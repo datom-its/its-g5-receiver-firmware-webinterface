@@ -121,6 +121,8 @@ void app_main(void)
 
     config_init();
 
+    ESP_LOGI(TAG, "Starting ITS-G5 receiver");
+
     led_init();
 
     initialize_filesystem();
