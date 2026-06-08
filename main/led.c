@@ -418,11 +418,16 @@ static void led_brightness_event_handler(void* arg, esp_event_base_t event_base,
     led_update();
 }
 
-static void system_led_timer_cb(void *)
+static void led_heartbeat_event_handler(void *, esp_event_base_t, int32_t, void *)
 {
     system_led_state = system_led_blink_state ? LED_IRGB(LED_SYSTEM, 0xFF, 0xFF, 0xFF) : LED_IRGB(LED_SYSTEM, 0, 0, 0);
     set_led_with_brightness_if_booted(led_handle, system_led_state);
     system_led_blink_state = !system_led_blink_state;
+}
+
+static void system_led_timer_cb(void *)
+{
+    esp_event_post(LED_EVENT_BASE, LED_HEARTBEAT, NULL, 0, 0);
 }
 
 static void eth_led_timer_cb(void *)
@@ -495,6 +500,7 @@ void led_init(void)
     ESP_ERROR_CHECK(esp_event_handler_register(MQTT_EVENT_BASE, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENT_BASE, ESP_EVENT_ANY_ID, app_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_BRIGHTNESS, led_brightness_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(LED_EVENT_BASE, LED_HEARTBEAT, led_heartbeat_event_handler, NULL));
 
     // brightness receives the default value of 255 in led.c, and thus cannot fail
     ESP_ERROR_CHECK(config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &led_brightness));
