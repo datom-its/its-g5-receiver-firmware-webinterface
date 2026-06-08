@@ -1184,8 +1184,17 @@ CONFIG_SNIFFER_TASK_STACK_SIZE=4096
 # default:
 CONFIG_SNIFFER_TASK_PRIORITY=2
 CONFIG_LEDSTRIP_PIN=27
+# default:
+CONFIG_LEDSTRIP_COUNT=5
 # CONFIG_ENABLE_TEMPERATURE is not set
 # end of Example Configuration
+
+#
+# SPI EPPP Configuration
+#
+# default:
+# CONFIG_USE_SPI_EPPP is not set
+# end of SPI EPPP Configuration
 
 #
 # Ethernet Configuration
@@ -4195,11 +4204,28 @@ CONFIG_CU_DIAGNOSTICS_COLOR_ALWAYS=y
 # end of CMake Utilities
 
 #
+# eppp_link
+#
+# default:
+# CONFIG_EPPP_LINK_USES_PPP is not set
+# default:
+CONFIG_EPPP_LINK_DEVICE_UART=y
+# default:
+# CONFIG_EPPP_LINK_DEVICE_SPI is not set
+# default:
+# CONFIG_EPPP_LINK_DEVICE_SDIO is not set
+# default:
+CONFIG_EPPP_LINK_CONN_MAX_RETRY=6
+# default:
+# CONFIG_EPPP_LINK_CHANNELS_SUPPORT is not set
+# end of eppp_link
+
+#
 # LED Indicator
 #
 # default:
 CONFIG_BRIGHTNESS_TICKS=10
-CONFIG_USE_GAMMA_CORRECTION=n
+# CONFIG_USE_GAMMA_CORRECTION is not set
 # default:
 # CONFIG_USE_MI_RGB_BLINK_DEFAULT is not set
 
