@@ -15,17 +15,27 @@
 
 #include "led.h"
 
+
+#define LED_IRGB(i, r, g, b) SET_IRGB(i, r, g, b)
+#define LED_ADD_INDEX(index, rgb) \
+        ((((index) & 0x7F) << 25) | ((rgb) & 0xFFFFFF))
+
 led_indicator_handle_t led_handle;
 bool sniffer_running;
 bool mqtt_connected;
 
-#define LED_IRGB(i, r, g, b) SET_IRGB(i, r, g, b)
-
 static uint8_t led_brightness;
+static uint32_t led_override_color;
+
+static bool boot_finished;
 
 static void set_led_with_brightness(led_indicator_handle_t handle, uint32_t irgb)
 {
     uint8_t i = GET_INDEX(irgb);
+
+    if (led_override_color && boot_finished)
+        irgb = led_override_color;
+
     uint8_t r = GET_RED(irgb);
     uint8_t g = GET_GREEN(irgb);
     uint8_t b = GET_BLUE(irgb);
@@ -122,6 +132,10 @@ static void blink_timer_cb(void *)
 static void app_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     switch (event_id) {
+    case APP_BOOT_FINISHED:
+        boot_finished = true;
+        update_single_led();
+        break;
     case APP_ETHERNET_MGMT_INTERFACE_GOT_IP:
         has_ip = true;
         recalc_state();
@@ -173,9 +187,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static void led_brightness_event_handler(void* arg, esp_event_base_t event_base,
+static void led_config_event_handler(void* arg, esp_event_base_t event_base,
                                          int32_t event_id, void* event_data)
 {
+    ESP_ERROR_CHECK(config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &led_brightness));
+    ESP_ERROR_CHECK(config_get_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, &led_override_color));
+
     update_single_led();
 }
 
@@ -219,10 +236,13 @@ void led_init(void)
     ESP_ERROR_CHECK(esp_event_handler_register(SNIFFER_EVENT_BASE, ESP_EVENT_ANY_ID, sniffer_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(MQTT_EVENT_BASE, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENT_BASE, ESP_EVENT_ANY_ID, app_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_BRIGHTNESS, led_brightness_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_BRIGHTNESS, led_config_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_OVERRIDE_COLOR, led_config_event_handler, NULL));
 
-    // brightness receives the default value of 255 in led.c, and thus cannot fail
+    // brightness receives the default value of 255 in config.c, and thus cannot fail
     ESP_ERROR_CHECK(config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &led_brightness));
+    // led_override_color receives the default value of 0 in config.c, and thus cannot fail
+    ESP_ERROR_CHECK(config_get_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, &led_override_color));
 
     // Start red (sniffer stopped)
     set_led_with_brightness(led_handle, LED_IRGB(0, 0xFF, 0, 0));
@@ -258,7 +278,6 @@ static eth_speed_t eth_speed;
 static bool eth_link_state;
 static bool eth_led_blink_state;
 
-static bool boot_finished;
 
 
 static void set_led_with_brightness_if_booted(led_indicator_handle_t handle, uint32_t irgb)
@@ -412,9 +431,11 @@ static void mqtt_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
-static void led_brightness_event_handler(void* arg, esp_event_base_t event_base,
-                                         int32_t event_id, void* event_data)
+static void led_config_event_handler(void *, esp_event_base_t, int32_t, void *)
 {
+    ESP_ERROR_CHECK(config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &led_brightness));
+    ESP_ERROR_CHECK(config_get_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, &led_override_color));
+
     led_update();
 }
 
@@ -447,9 +468,6 @@ static void cits_led_timer_cb(void *)
 
 void led_update(void)
 {
-    // brightness receives the default value of 255 in led.c, and thus cannot fail
-    ESP_ERROR_CHECK(config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &led_brightness));
-
     if (!boot_finished)
         return;
 
@@ -499,11 +517,14 @@ void led_init(void)
     ESP_ERROR_CHECK(esp_event_handler_register(SNIFFER_EVENT_BASE, ESP_EVENT_ANY_ID, sniffer_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(MQTT_EVENT_BASE, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENT_BASE, ESP_EVENT_ANY_ID, app_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_BRIGHTNESS, led_brightness_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_BRIGHTNESS, led_config_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, CONFIG_INDEX_LED_OVERRIDE_COLOR, led_config_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(LED_EVENT_BASE, LED_HEARTBEAT, led_heartbeat_event_handler, NULL));
 
-    // brightness receives the default value of 255 in led.c, and thus cannot fail
+    // brightness receives the default value of 255 in config.c, and thus cannot fail
     ESP_ERROR_CHECK(config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &led_brightness));
+    // led_override_color receives the default value of 0 in config.c, and thus cannot fail
+    ESP_ERROR_CHECK(config_get_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, &led_override_color));
 
     set_led_with_brightness(led_handle, LED_IRGB(0, 0xFF,    0,    0));
     set_led_with_brightness(led_handle, LED_IRGB(1, 0xFF, 0xFF,    0));

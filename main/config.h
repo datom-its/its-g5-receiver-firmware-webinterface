@@ -24,6 +24,7 @@ typedef enum {
     CONFIG_INDEX_AUTOSTART_CHAN,
     CONFIG_INDEX_BROADCAST_ONLY,
     CONFIG_INDEX_LED_BRIGHTNESS,
+    CONFIG_INDEX_LED_OVERRIDE_COLOR,
 } config_index_t;
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out);
