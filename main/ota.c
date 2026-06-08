@@ -14,7 +14,7 @@
 #include "esp_timer.h"
 #include "argtable3/argtable3.h"
 
-#define OTA_TASK_STACK_SIZE 2048
+#define OTA_TASK_STACK_SIZE 3072
 #define OTA_TASK_PRIORITY 20
 
 static const char TAG[] = "OTA";
