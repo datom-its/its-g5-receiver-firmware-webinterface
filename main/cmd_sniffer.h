@@ -8,6 +8,9 @@
 */
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "esp_eth_driver.h"
 
 #ifdef __cplusplus
@@ -19,6 +22,7 @@ typedef struct {
     uint32_t length;
     uint32_t seconds;
     uint32_t microseconds;
+    int rssi;
 } sniffer_packet_info_t;
 
 /**
@@ -51,6 +55,13 @@ void register_sniffer_cmd(void);
 esp_err_t sniffer_reg_eth_intf(esp_eth_handle_t eth_handle);
 
 void sniffer_autostart(void);
+
+/* Current sniffer channel frequency in MHz (e.g. 5900 for G5CC), or 0 if the
+ * sniffer is not running on a WLAN channel. */
+uint32_t sniffer_get_channel(void);
+
+/* True while the sniffer task is capturing. */
+bool sniffer_is_running(void);
 
 
 #ifdef __cplusplus

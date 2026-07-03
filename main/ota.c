@@ -170,6 +170,12 @@ static int ota_cmd(int argc, char **argv)
 
     if (ota_args.url->count)
     {
+        if (ota_task_running)
+        {
+            ESP_LOGE(TAG, "OTA already in progress");
+            return 1;
+        }
+
         if (strlen(ota_args.url->sval[0]) >= sizeof(https_url))
         {
             ESP_LOGE(TAG, "URL too long");
@@ -188,8 +194,14 @@ static int ota_cmd(int argc, char **argv)
 
         ota_config.partition.staging = other_app;
 
-        xTaskCreate(ota_task, "ota", OTA_TASK_STACK_SIZE,
-                    NULL, CONFIG_SNIFFER_TASK_PRIORITY, &ota_task_handle);
+        ota_task_running = true;
+        if (xTaskCreate(ota_task, "ota", OTA_TASK_STACK_SIZE,
+                        NULL, CONFIG_SNIFFER_TASK_PRIORITY, &ota_task_handle) != pdPASS)
+        {
+            ESP_LOGE(TAG, "Failed to create OTA task");
+            ota_task_running = false;
+            return 1;
+        }
     }
 
     if (ota_args.info->count)
@@ -311,4 +323,32 @@ void ota_init(void)
     ESP_ERROR_CHECK(esp_event_handler_register(ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, ota_event_handler, NULL));
 
     init_invalidate_and_reboot_timer();
+}
+
+bool ota_confirm(void)
+{
+    esp_err_t res = esp_ota_mark_app_valid_cancel_rollback();
+    if (res != ESP_OK)
+    {
+        ESP_LOGE(TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s", esp_err_to_name(res));
+        return false;
+    }
+
+    /* stop the pending-rollback timer if it is running */
+    res = esp_timer_stop(invalidate_and_reboot_timer);
+    if (res != ESP_OK)
+        ESP_LOGW(TAG, "esp_timer_stop: %s (maybe already valid)", esp_err_to_name(res));
+
+    ESP_LOGI(TAG, "Running app confirmed, rollback cancelled");
+    return true;
+}
+
+bool ota_is_pending_verify(void)
+{
+    const esp_partition_t *current_app = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(current_app, &state) != ESP_OK)
+        return false;
+
+    return state == ESP_OTA_IMG_PENDING_VERIFY;
 }

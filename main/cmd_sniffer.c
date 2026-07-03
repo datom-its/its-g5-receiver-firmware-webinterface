@@ -22,6 +22,7 @@
 #include "config.h"
 #include "events.h"
 #include "mqtt.h"
+#include "webserver.h"
 
 #include "cmd_sniffer.h"
 
@@ -80,6 +81,7 @@ static void wifi_sniffer_cb(void *recv_buf, wifi_promiscuous_pkt_type_t type)
     /* prepare packet_info */
     packet_info.seconds = packet->rx_ctrl.timestamp / 1000000U;
     packet_info.microseconds = packet->rx_ctrl.timestamp % 1000000U;
+    packet_info.rssi = packet->rx_ctrl.rssi;
 
 #if CONFIG_SOC_WIFI_HE_SUPPORT
     packet_info.length = packet->rx_ctrl.dump_len;
@@ -110,6 +112,7 @@ static esp_err_t eth_sniffer_cb(esp_eth_handle_t eth_handle, uint8_t *buffer, ui
     packet_info.seconds = tv_now.tv_sec;
     packet_info.microseconds = tv_now.tv_usec;
     packet_info.length = length;
+    packet_info.rssi = 0;  /* wired Ethernet has no RF RSSI */
 
     queue_packet(buffer, &packet_info);
 
@@ -133,6 +136,7 @@ static void sniffer_task(void *)
         }
 
         mqtt_handle_packet(&packet_info);
+        webserver_handle_packet(&packet_info);
 
         esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_RECEIVED_PACKET, NULL, 0, 0);
 
@@ -377,7 +381,7 @@ static int do_sniffer_cmd(int argc, char **argv)
     esp_err_t ret = config_get_u8(CONFIG_INDEX_BROADCAST_ONLY, &broadcast_only);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "config_get_u8 failed: %s", ret);
+        ESP_LOGE(TAG, "config_get_u8 failed: %s", esp_err_to_name(ret));
         return 1;
     }
 
@@ -428,7 +432,7 @@ void sniffer_autostart(void)
     if (ret != ESP_OK)
     {
         if (ret != ESP_ERR_NVS_NOT_FOUND)
-            ESP_LOGE(TAG, "config_get_u32 failed: %s", ret);
+            ESP_LOGE(TAG, "config_get_u32 failed: %s", esp_err_to_name(ret));
         return;
     }
 
@@ -436,7 +440,7 @@ void sniffer_autostart(void)
     ret = config_get_u8(CONFIG_INDEX_BROADCAST_ONLY, &broadcast_only);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "config_get_u8 failed: %s", ret);
+        ESP_LOGE(TAG, "config_get_u8 failed: %s", esp_err_to_name(ret));
         return;
     }
 
@@ -448,4 +452,17 @@ void sniffer_autostart(void)
         only_capture_broadcast = broadcast_only;
         sniffer_start();
     }
+}
+
+uint32_t sniffer_get_channel(void)
+{
+    /* channel holds the ITS-G5 frequency in MHz while running on WLAN */
+    if (is_running && interf == SNIFFER_INTF_WLAN)
+        return channel;
+    return 0;
+}
+
+bool sniffer_is_running(void)
+{
+    return is_running;
 }

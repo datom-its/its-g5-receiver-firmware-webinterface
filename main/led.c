@@ -290,7 +290,7 @@ static void set_led_with_brightness_if_booted(led_indicator_handle_t handle, uin
 
 static void set_eth_led_disconnected(void)
 {
-    esp_timer_stop_blocking(eth_led_timer_handle, 10 / portTICK_PERIOD_MS);
+    esp_timer_stop(eth_led_timer_handle);
 
     eth_led_state = LED_IRGB(LED_ETH, 0, 0, 0);
     set_led_with_brightness_if_booted(led_handle, eth_led_state);
@@ -298,7 +298,7 @@ static void set_eth_led_disconnected(void)
 
 static void set_eth_led_connected(void)
 {
-    esp_timer_stop_blocking(eth_led_timer_handle, 10 / portTICK_PERIOD_MS);
+    esp_timer_stop(eth_led_timer_handle);
 
     eth_led_blink_state = false;
     eth_led_state = LED_IRGB(LED_ETH, 0, 0, 0);

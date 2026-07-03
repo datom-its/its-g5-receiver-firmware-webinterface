@@ -13,11 +13,13 @@ idf_component_register(
         "spi.c"
         "spi_eppp.c"
         "temperature.c"
+        "webserver.c"
     PRIV_REQUIRES
         app_trace
         app_update
         console
         esp_eth
+        esp_http_server
         esp_https_ota
         esp_netif
         esp_wifi

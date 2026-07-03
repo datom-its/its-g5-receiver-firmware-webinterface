@@ -26,6 +26,7 @@
 #include "spi.h"
 #include "spi_eppp.h"
 #include "temperature.h"
+#include "webserver.h"
 
 #if CONFIG_SNIFFER_STORE_HISTORY
 #define HISTORY_MOUNT_POINT "/data"
@@ -130,6 +131,14 @@ void app_main(void)
 
     initialize_spi();
 
+#if CONFIG_ENABLE_SD
+    /* Auto-mount the SD card (shares the SPI bus just initialised above) so the
+     * web interface can browse it. A missing/unformatted card just logs a
+     * warning; the card can be (re)mounted later from the console. */
+    if (sdcard_mount() != ESP_OK)
+        ESP_LOGW(TAG, "SD card not mounted at boot");
+#endif
+
     // Make sure MQTT has registered its event handlers before Ethernet goes up
     mqtt_init();
 
@@ -149,6 +158,7 @@ void app_main(void)
 
     sniffer_init();
     ota_init();
+    webserver_init();
 
 #ifdef CONFIG_ENABLE_TEMPERATURE
     temperature_init();

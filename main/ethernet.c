@@ -21,8 +21,6 @@
 // TODO make configurable?
 #define ETH_MANAGEMENT_INTERFACE 0
 
-#define MAX_MTU 1420
-
 static const char TAG[] = "ETHERNET";
 
 static esp_netif_t *mgmt_netif;
@@ -81,24 +79,6 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static void update_mtu(esp_netif_t *netif)
-{
-    uint16_t mtu;
-    esp_err_t res = esp_netif_get_mtu(netif, &mtu);
-    if (res != ESP_OK)
-    {
-        ESP_LOGE(TAG, "esp_netif_get_mtu failed: %s", esp_err_to_name(res));
-        return;
-    }
-
-    if (mtu > MAX_MTU)
-    {
-        res = esp_netif_set_mtu(netif, MAX_MTU);
-        if (res != ESP_OK)
-            ESP_LOGE(TAG, "esp_netif_set_mtu failed: %s", esp_err_to_name(res));
-    }
-}
-
 /** Event handler for IP events */
 static void ip_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
@@ -120,8 +100,6 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
             const esp_netif_ip_info_t *ip_info = &event->ip_info;
             ESP_LOGI(TAG, "Ethernet %s got IP: " IPSTR " netmask: " IPSTR " gw: " IPSTR, ifname, IP2STR(&ip_info->ip), IP2STR(&ip_info->netmask), IP2STR(&ip_info->gw));
 
-            update_mtu(netif);
-
             // If this is the management netif, post an event to start MQTT etc.
             if (netif == mgmt_netif)
             {
@@ -141,25 +119,6 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
             esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_LOST_IP, NULL, 0, 0);
             if (post_res != ESP_OK)
                 ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
-        }
-        break;
-    }
-    case IP_EVENT_NETIF_UP:
-    {
-        ESP_LOGI(TAG, "Ethernet %s up", ifname);
-
-        // If this is the management netif and we have a static IP, configure some things and
-        // fire an event to start MQTT etc.
-        if (netif == mgmt_netif && static_ip)
-        {
-            eth_config_dns(netif);
-            update_mtu(netif);
-
-            esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
-            if (post_res != ESP_OK)
-            {
-                ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
-            }
         }
         break;
     }
@@ -225,7 +184,8 @@ static void configure_management_interface(esp_eth_handle_t *eth_handle, int idx
 
     esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
     esp_netif_config.route_prio -= idx * 5;
-    esp_netif_config.mtu = MAX_MTU;
+    /* .mtu config field was added in ESP-IDF v6.0; on v5.5 the default MTU
+     * (1500) is used. Jumbo frames are not needed for normal operation. */
 
     char ip_str[CONFIG_IPV4_BUFFER_SIZE] = {0};
     char nm_str[CONFIG_IPV4_BUFFER_SIZE] = {0};
@@ -262,8 +222,22 @@ static void configure_management_interface(esp_eth_handle_t *eth_handle, int idx
     mgmt_netif = eth_netif;
     mgmt_eth = eth_handle;
 
+    /* With a static IP there is no DHCP lease and therefore no
+     * IP_EVENT_ETH_GOT_IP. Configure DNS now and, once the link is started,
+     * post the "got IP" app event ourselves so MQTT etc. start up. With DHCP
+     * this is handled by the ip_event_handler on IP_EVENT_ETH_GOT_IP instead. */
+    if (static_ip)
+        eth_config_dns(eth_netif);
+
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
+
+    if (static_ip)
+    {
+        esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
+        if (post_res != ESP_OK)
+            ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
+    }
 }
 
 void initialize_ethernet(void)

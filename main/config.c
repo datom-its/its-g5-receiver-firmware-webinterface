@@ -72,6 +72,7 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_BROADCAST_ONLY]     = { "broadcastonly", NVS_TYPE_U8,  0,                           config_get_broadcast_only,     NULL },
     [CONFIG_INDEX_LED_BRIGHTNESS]     = { "ledbrightness", NVS_TYPE_U8,  0,                           config_get_led_brightness,     NULL },
     [CONFIG_INDEX_LED_OVERRIDE_COLOR] = { "ledoverride",   NVS_TYPE_U32, 0,                           config_get_led_override_color, NULL },
+    [CONFIG_INDEX_WEB_PASSWORD]       = { "webpasswd",     NVS_TYPE_STR, CONFIG_WEB_PASSWORD_BUFFER_SIZE, NULL,                       NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -753,16 +754,16 @@ static int cmd_config_set(int argc, char **argv)
             }
 
             switch (key->type) {
-            case NVS_TYPE_U8:
+            case NVS_TYPE_I8:
                 res = config_set_i8(index, (int8_t)parsed);
                 break;
-            case NVS_TYPE_U16:
+            case NVS_TYPE_I16:
                 res = config_set_i16(index, (int16_t)parsed);
                 break;
-            case NVS_TYPE_U32:
+            case NVS_TYPE_I32:
                 res = config_set_i32(index, (int32_t)parsed);
                 break;
-            case NVS_TYPE_U64:
+            case NVS_TYPE_I64:
                 res = config_set_i64(index, parsed);
                 break;
             default:

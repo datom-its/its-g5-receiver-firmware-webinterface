@@ -9,6 +9,7 @@ extern "C" {
 #define CONFIG_NODEID_BUFFER_SIZE 64
 #define CONFIG_MQTT_URI_BUFFER_SIZE 256
 #define CONFIG_IPV4_BUFFER_SIZE 16
+#define CONFIG_WEB_PASSWORD_BUFFER_SIZE 64
 
 void config_init(void);
 
@@ -25,6 +26,7 @@ typedef enum {
     CONFIG_INDEX_BROADCAST_ONLY,
     CONFIG_INDEX_LED_BRIGHTNESS,
     CONFIG_INDEX_LED_OVERRIDE_COLOR,
+    CONFIG_INDEX_WEB_PASSWORD,
 } config_index_t;
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out);
