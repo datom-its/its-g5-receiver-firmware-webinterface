@@ -22,6 +22,7 @@
 #include "config.h"
 #include "events.h"
 #include "mqtt.h"
+#include "sdlog.h"
 #include "webserver.h"
 
 #include "cmd_sniffer.h"
@@ -137,6 +138,7 @@ static void sniffer_task(void *)
 
         mqtt_handle_packet(&packet_info);
         webserver_handle_packet(&packet_info);
+        sdlog_handle_packet(&packet_info);
 
         esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_RECEIVED_PACKET, NULL, 0, 0);
 

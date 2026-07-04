@@ -27,6 +27,10 @@ typedef enum {
     CONFIG_INDEX_LED_BRIGHTNESS,
     CONFIG_INDEX_LED_OVERRIDE_COLOR,
     CONFIG_INDEX_WEB_PASSWORD,
+    CONFIG_INDEX_LOG_SYS,      /* u8  bool: write system log to SD */
+    CONFIG_INDEX_LOG_FRAMES,   /* u8  bool: write received-frame CSV log to SD */
+    CONFIG_INDEX_LOG_MAX_MB,   /* u32 total SD budget for logs, in MiB */
+    CONFIG_INDEX_REFRESH_SEC,  /* u32 web UI auto-refresh interval (0 = off) */
 } config_index_t;
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out);

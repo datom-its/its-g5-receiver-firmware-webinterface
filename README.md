@@ -12,7 +12,7 @@ Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 Pre-compiled binaries are available under
 [**Releases**](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases).
 The latest is
-**[0.7.1-webui](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases/tag/v0.7.1-webui)**
+**[0.9.0-webui](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases/tag/v0.9.0-webui)**
 — download `its-g5-receiver-firmware.bin` and flash it via the web interface
 (`/update`), or grab all four `.bin` files for an initial flash over serial
 (see below). No build environment needed.
@@ -23,6 +23,13 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.9.0-webui** | New app icon (glossy "Aero"-style Tokyo-tower with incoming-signal arrows and "ITS G5"), full-bleed so iOS shows no white border. Installable as a home-screen web app: PWA `manifest.webmanifest` + Apple web-app meta tags, favicon/apple-touch-icon and 192/512 icons embedded via `EMBED_FILES`. First release following strict SemVer 2.0.0 (features bump MINOR: 0.9 → 0.10 → 0.11 …, fixes bump PATCH). |
+| **0.8.4.1-webui** | Real PNG apple-touch-icon (satellite) so iOS shows an icon when saving the page to the home screen; icon paths are now wildcard-matched so the sized variants iOS probes no longer 404 in the log. Browser tab title is now always "ITS G5 Node". Removed the wrong hard-coded "auto-refreshes every 5 s" status-page line (the interval is configurable and shown on the pause button), and moved that button to the bottom-right so it no longer overlaps the language switch. |
+| **0.8.4-webui** | Fix a reboot when opening the `/sdcard` page: the directory-listing handler used ~14 KB of large scratch buffers on the single httpd task's stack, overflowing it. Those buffers are now `static` (off-stack; safe because the HTTP server handles requests sequentially in one task). |
+| **0.8.3-webui** | Satellite favicon (inline SVG) that also silences the browser icon 404s in the log; real wall-clock timestamps in the logs (system log via `LOG_TIMESTAMP_SOURCE_SYSTEM`, frame CSV as `YYYY-MM-DD HH:MM:SS`); configurable web-UI auto-refresh interval (settings, 0 = off) plus a floating ⏸/▶ pause button that persists per browser. |
+| **0.8.2-webui** | New `/logs` page: view the SD log files (`system.log`, `frames.csv`) directly in the browser (tail of the last 24 KB), with a switcher and refresh. Password-protected, content HTML-escaped. |
+| **0.8.1-webui** | New `/system` page: chip/CPU info, ESP-IDF version, last reset reason, uptime, internal + PSRAM memory (free/min/total), and a task table with live per-task CPU load (delta-measured), state, priority and min free stack. Enables FreeRTOS run-time stats. |
+| **0.8.0-webui** | SD logging: optional rotating system log (`/sdcard/logs/system.log`) and received-frame CSV log (`frames.csv`) with a configurable size budget, all toggled on the settings page. Buffered via a PSRAM ring + dedicated writer task so the sniffer hot path stays free. |
 | **0.7.1-webui** | Security hardening for the SD card manager: `/sdcard` (browsing) and `/sdcard/download` now require the web password like the other write actions do; fixed a reflected-XSS in the path breadcrumb (`?p=` was rendered unescaped); rejected control characters (CR/LF) in paths/filenames to prevent HTTP response header injection via `Content-Disposition`. |
 | **0.7.0-webui** | SD card manager in the web interface: new `/sdcard` page to browse folders/files, see storage usage, upload files, delete files, and format the card. The card is auto-mounted at boot. Write actions honour the web password. |
 | **0.6.5-webui** | Status page now reports internal SRAM and PSRAM free heap separately. Previously "free heap" summed all regions, so the 8 MB PSRAM hid the scarce internal RAM (it always read ~8 MiB). |
@@ -42,9 +49,10 @@ English.
 
 - `/` — status dashboard: node ID, MAC, firmware version, sniffer state, active
   channel, MQTT status, uptime, packets received, packet rate (last 60 s), free
-  heap, temperature. Auto-refreshes every 5 s; Start/Stop sniffer and Reboot
-  buttons. If the running firmware was installed via update and not yet
-  confirmed, a banner with a **Confirm update** button appears here.
+  heap, temperature. Auto-refreshes (interval configurable on `/settings`);
+  Start/Stop sniffer and Reboot buttons. If the running firmware was installed
+  via update and not yet confirmed, a banner with a **Confirm update** button
+  appears here.
 - `/messages` — the last 20 received frames (time, RSSI, length, hex preview),
   newest first, auto-refreshing. Times are real local `HH:MM:SS` once NTP has
   synced (see 0.6.2).
@@ -53,6 +61,15 @@ English.
   NVS.
 - `/update` — upload a `.bin` from the browser to flash the inactive OTA
   partition; the device reboots into it.
+- `/system` — chip/CPU info, ESP-IDF version, last reset reason, uptime,
+  internal + PSRAM memory, and a per-task CPU-load table.
+- `/sdcard` — browse the SD card, see usage, upload/delete files, format the
+  card (requires the web password).
+- `/logs` — view the SD log files (`system.log`, `frames.csv`) inline in the
+  browser. Logging is toggled on `/settings`.
+
+A configurable auto-refresh (interval on `/settings`, `0` = off) with a floating
+pause/resume button keeps the status and message pages live.
 
 ### Update confirmation (rollback)
 

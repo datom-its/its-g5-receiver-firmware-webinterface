@@ -13,11 +13,15 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "esp_app_desc.h"
+#include "esp_chip_info.h"
 #include "esp_console.h"
 #include "esp_event.h"
+#include "esp_flash.h"
 #include "esp_heap_caps.h"
+#include "esp_idf_version.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -42,6 +46,16 @@
 
 #include "webserver.h"
 
+/* Icons embedded via CMake EMBED_FILES (see main/CMakeLists.txt). */
+extern const uint8_t favicon_png_start[]          asm("_binary_favicon_png_start");
+extern const uint8_t favicon_png_end[]            asm("_binary_favicon_png_end");
+extern const uint8_t apple_touch_icon_png_start[] asm("_binary_apple_touch_icon_png_start");
+extern const uint8_t apple_touch_icon_png_end[]   asm("_binary_apple_touch_icon_png_end");
+extern const uint8_t icon_192_png_start[]         asm("_binary_icon_192_png_start");
+extern const uint8_t icon_192_png_end[]           asm("_binary_icon_192_png_end");
+extern const uint8_t icon_512_png_start[]         asm("_binary_icon_512_png_start");
+extern const uint8_t icon_512_png_end[]           asm("_binary_icon_512_png_end");
+
 static const char TAG[] = "WEBSERVER";
 
 /* ================================================================== */
@@ -64,10 +78,18 @@ typedef enum {
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
     S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
     S_WEB_PASSWORD, S_WEB_PASSWORD_SET, S_WEB_PASSWORD_NONE, S_WEB_PASSWORD_CLEAR,
+    S_REFRESH_SEC,
+    S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
     S_NAV_SD, S_TITLE_SD, S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
+    S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
+    S_SYS_IDF, S_SYS_RESET, S_SYS_FLASH, S_SYS_RAM_INT, S_SYS_RAM_PSRAM,
+    S_SYS_TRIPLE, S_SYS_TASKS, S_SYS_COL_STATE, S_SYS_COL_PRIO, S_SYS_COL_CPU,
+    S_SYS_COL_STACK,
+    S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
+    S_LOGS_NONE, S_LOGS_TAIL,
     S_LANG_OTHER, S_LANG_OTHER_CODE,
     S_COUNT
 } str_id_t;
@@ -142,6 +164,12 @@ static const char *STR[S_COUNT][2] = {
                               "no password &ndash; protects /update and /settings" },
     [S_WEB_PASSWORD_CLEAR] = { "Passwortschutz entfernen",
                                "Remove password protection" },
+    [S_REFRESH_SEC]     = { "Auto-Refresh (Sek., 0=aus)", "Auto-refresh (sec, 0=off)" },
+    [S_LOG_SYS]         = { "System-Log auf SD",        "System log to SD" },
+    [S_LOG_FRAMES]      = { "Frame-Log auf SD (CSV)",   "Frame log to SD (CSV)" },
+    [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
+    [S_LOG_HINT]        = { "Logs unter /sdcard/logs/, rotierend. Braucht eine eingebundene SD-Karte.",
+                            "Logs in /sdcard/logs/, rotating. Requires a mounted SD card." },
     [S_UPD_INTRO]       = { "W&auml;hle eine Firmware-Datei (.bin) und klicke Hochladen. Das Ger&auml;t "
                             "flasht sie auf die inaktive OTA-Partition und startet neu. Danach musst du "
                             "das Update im Status best&auml;tigen, sonst wird es zur&uuml;ckgerollt.",
@@ -177,6 +205,31 @@ static const char *STR[S_COUNT][2] = {
     [S_SD_FORMATTING]   = { "Formatiere\\u2026",        "Formatting\\u2026" },
     [S_SD_UP_HERE]      = { "Datei hierher hochladen",  "Upload a file here" },
     [S_SD_UP_BTN]       = { "Hochladen",                "Upload" },
+    [S_NAV_SYSTEM]      = { "System",                   "System" },
+    [S_TITLE_SYSTEM]    = { "System-Info",              "System info" },
+    [S_SYS_CHIP]        = { "Chip",                     "Chip" },
+    [S_SYS_CORES]       = { "Kerne",                    "Cores" },
+    [S_SYS_CPU_FREQ]    = { "CPU-Takt",                 "CPU clock" },
+    [S_SYS_IDF]         = { "ESP-IDF",                  "ESP-IDF" },
+    [S_SYS_RESET]       = { "Letzter Reset",            "Last reset" },
+    [S_SYS_FLASH]       = { "Flash",                    "Flash" },
+    [S_SYS_RAM_INT]     = { "RAM intern",              "RAM internal" },
+    [S_SYS_RAM_PSRAM]   = { "PSRAM",                    "PSRAM" },
+    [S_SYS_TRIPLE]      = { "frei / min / gesamt",      "free / min / total" },
+    [S_SYS_TASKS]       = { "Tasks",                    "Tasks" },
+    [S_SYS_COL_STATE]   = { "Status",                   "State" },
+    [S_SYS_COL_PRIO]    = { "Prio",                     "Prio" },
+    [S_SYS_COL_CPU]     = { "CPU %",                    "CPU %" },
+    [S_SYS_COL_STACK]   = { "Stack frei (min)",         "Stack free (min)" },
+    [S_NAV_LOGS]        = { "Logs",                     "Logs" },
+    [S_TITLE_LOGS]      = { "Logs",                     "Logs" },
+    [S_LOGS_SYS]        = { "System-Log",               "System log" },
+    [S_LOGS_FRAMES]     = { "Frame-Log",                "Frame log" },
+    [S_LOGS_REFRESH]    = { "Aktualisieren",            "Refresh" },
+    [S_LOGS_NONE]       = { "Keine Log-Datei vorhanden (Logging aktiviert? SD eingebunden?).",
+                            "No log file yet (logging enabled? SD mounted?)." },
+    [S_LOGS_TAIL]       = { "Letzte %d KB, neueste Zeilen unten.",
+                            "Last %d KB, newest lines at the bottom." },
     [S_LANG_OTHER]      = { "English",                  "Deutsch" },
     [S_LANG_OTHER_CODE] = { "en",                       "de" },
 };
@@ -472,7 +525,14 @@ static void resolve_language(httpd_req_t *req)
 static const char PAGE_HEADER_FMT[] =
     "<!DOCTYPE html><html lang='%s'><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "%s"  /* optional auto-refresh meta tag */
+    "<link rel='icon' href='/favicon.png' type='image/png'>"
+    "<link rel='apple-touch-icon' href='/apple-touch-icon.png'>"
+    "<link rel='manifest' href='/manifest.webmanifest'>"
+    "<meta name='theme-color' content='#1c56be'>"
+    "<meta name='apple-mobile-web-app-capable' content='yes'>"
+    "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
+    "<meta name='apple-mobile-web-app-title' content='ITS G5 Node'>"
+    "%s"  /* optional auto-refresh script */
     "<style>"
     "body{font-family:sans-serif;margin:2em;background:#111;color:#eee}"
     "a{color:#6cf}"
@@ -484,11 +544,12 @@ static const char PAGE_HEADER_FMT[] =
     ".ok{color:#4c4}.bad{color:#c44}"
     ".warn{background:#4a3c00;border:1px solid #aa8800;padding:1em;margin:1em 0;border-radius:4px}"
     ".lang{float:right;font-size:0.85em}"
-    "</style><title>%s</title></head><body>"
+    "</style><title>ITS G5 Node</title></head><body>"
     "<nav><a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
+    "<a href='/system?lang=%s'>%s</a>"
 #if CONFIG_ENABLE_SD
-    "<a href='/sdcard?lang=%s'>%s</a>"
+    "<a href='/sdcard?lang=%s'>%s</a><a href='/logs?lang=%s'>%s</a>"
 #endif
     "<span class='lang'><a href='?lang=%s'>%s</a></span></nav>"
     "<h1>%s</h1>";
@@ -497,22 +558,43 @@ static const char PAGE_FOOTER[] = "</body></html>";
 
 static void send_page_header_refresh(httpd_req_t *req, const char *heading, int refresh_secs)
 {
-    char refresh_tag[64] = "";
+    /* Auto-refresh is JS-based (not a <meta> tag) so a floating button can
+     * pause/resume it (persisted per-browser in localStorage) and the interval
+     * is configurable (0 = off). ⏸ = pause, ▶ = play. */
+    char refresh_tag[768] = "";
     if (refresh_secs > 0)
-        snprintf(refresh_tag, sizeof(refresh_tag),
-                 "<meta http-equiv='refresh' content='%d'>", refresh_secs);
+    {
+        uint32_t ri = 5;
+        config_get_u32(CONFIG_INDEX_REFRESH_SEC, &ri);
+        if (ri > 0 && ri < 0xFFFFFFFF)
+            snprintf(refresh_tag, sizeof(refresh_tag),
+                "<script>(function(){var ri=%lu;"
+                "window.addEventListener('load',function(){"
+                "var b=document.createElement('button');"
+                "b.style.cssText='position:fixed;bottom:12px;right:12px;z-index:99;opacity:.9;border-radius:4px;box-shadow:0 1px 4px #000';"
+                "function u(){b.textContent=(localStorage.getItem('ar')!=='0'?'\\u23f8 ':'\\u25b6 ')+ri+'s';}"
+                "b.onclick=function(){var on=localStorage.getItem('ar')==='0';"
+                "localStorage.setItem('ar',on?'1':'0');"
+                "if(on){location.reload();}else{if(window._t)clearTimeout(window._t);u();}};"
+                "u();document.body.appendChild(b);"
+                "if(localStorage.getItem('ar')!=='0'){window._t=setTimeout(function(){location.reload();},ri*1000);}"
+                "});})();</script>",
+                (unsigned long)ri);
+    }
 
     const char *lc = current_lang == LANG_DE ? "de" : "en";
 
-    char header[1400];
+    char header[3072];
     snprintf(header, sizeof(header), PAGE_HEADER_FMT,
-             lc, refresh_tag, heading,
+             lc, refresh_tag,
              lc, T(S_NAV_STATUS),
              lc, T(S_NAV_MESSAGES),
              lc, T(S_NAV_SETTINGS),
              lc, T(S_NAV_UPDATE),
+             lc, T(S_NAV_SYSTEM),
 #if CONFIG_ENABLE_SD
              lc, T(S_NAV_SD),
+             lc, T(S_NAV_LOGS),
 #endif
              T(S_LANG_OTHER_CODE), T(S_LANG_OTHER),
              heading);
@@ -618,8 +700,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         "<p>"
         "<button onclick=\"fetch('/sniffer?action=%s',{method:'POST'}).then(()=>location.reload())\">%s %s</button> "
         "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
-        "</p>"
-        "<p style='color:#888;font-size:0.8em'>%s</p>",
+        "</p>",
         T(S_NODEID), nodeid_esc,
         T(S_MAC), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         T(S_FW_VERSION), app_desc->version,
@@ -640,8 +721,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 #endif
         running ? "stop" : "start",
         running ? T(S_STOP) : T(S_START), T(S_SNIFFER_LABEL),
-        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT),
-        T(S_AUTO_REFRESH)
+        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT)
     );
     httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -785,6 +865,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u32(CONFIG_INDEX_AUTOSTART_CHAN, &chan);
     uint8_t brightness = 0;
     config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &brightness);
+    uint32_t refresh_sec = 5;
+    config_get_u32(CONFIG_INDEX_REFRESH_SEC, &refresh_sec);
 
     /* Whether a web password is currently set. We never echo the password
      * itself back into the page, only whether one exists. */
@@ -793,7 +875,15 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     bool pw_set = config_get_str(CONFIG_INDEX_WEB_PASSWORD, cur_pw, &cur_pw_size) == ESP_OK
                   && cur_pw_size > 1;
 
-    char body[5120];
+#if CONFIG_ENABLE_SD
+    uint8_t log_sys = 0, log_frames = 0;
+    uint32_t log_mb = 50;
+    config_get_u8(CONFIG_INDEX_LOG_SYS, &log_sys);
+    config_get_u8(CONFIG_INDEX_LOG_FRAMES, &log_frames);
+    config_get_u32(CONFIG_INDEX_LOG_MAX_MB, &log_mb);
+#endif
+
+    char body[6144];
     snprintf(body, sizeof(body),
         "<p>%s</p>"
         "<table>"
@@ -811,11 +901,18 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<input type='range' id='led' min='0' max='255' value='%u' "
         "oninput=\"document.getElementById('ledval').innerText=this.value\">"
         "<span id='ledval'>%u</span></td></tr>"
+        "<tr><th>%s</th><td><input id='refreshsec' type='number' min='0' max='3600' value='%lu' size='6'></td></tr>"
         "<tr><th>%s</th><td>"
         "<input type='password' id='webpasswd' size='24' autocomplete='new-password'>"
         "<br><small>%s</small>"
         "<br><label><input type='checkbox' id='webpwclear'> %s</label>"
         "</td></tr>"
+#if CONFIG_ENABLE_SD
+        "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='logframes'%s></td></tr>"
+        "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' value='%lu' size='6'>"
+        "<br><small>%s</small></td></tr>"
+#endif
         "</table>"
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
         "<script>"
@@ -825,8 +922,14 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('mqtturi',document.getElementById('mqtturi').value);"
         "p.append('chan',document.getElementById('chan').value);"
         "p.append('led',document.getElementById('led').value);"
+        "p.append('refreshsec',document.getElementById('refreshsec').value);"
         "p.append('webpasswd',document.getElementById('webpasswd').value);"
         "if(document.getElementById('webpwclear').checked)p.append('webpwclear','1');"
+#if CONFIG_ENABLE_SD
+        "p.append('logsys',document.getElementById('logsys').checked?'1':'0');"
+        "p.append('logframes',document.getElementById('logframes').checked?'1':'0');"
+        "p.append('logmaxmb',document.getElementById('logmaxmb').value);"
+#endif
         "fetch('/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
         ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;});"
         "}"
@@ -842,9 +945,15 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         chan == 5870 ? " selected" : "",
         chan == 5860 ? " selected" : "",
         T(S_LED_BRIGHTNESS), brightness, brightness,
+        T(S_REFRESH_SEC), (unsigned long)refresh_sec,
         T(S_WEB_PASSWORD),
         pw_set ? T(S_WEB_PASSWORD_SET) : T(S_WEB_PASSWORD_NONE),
         T(S_WEB_PASSWORD_CLEAR),
+#if CONFIG_ENABLE_SD
+        T(S_LOG_SYS), log_sys ? " checked" : "",
+        T(S_LOG_FRAMES), log_frames ? " checked" : "",
+        T(S_LOG_BUDGET), (unsigned long)log_mb, T(S_LOG_HINT),
+#endif
         T(S_SAVE)
     );
 
@@ -904,6 +1013,11 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         /* config_set_u8 fires a config event, so LED brightness updates live */
         if (config_set_u8(CONFIG_INDEX_LED_BRIGHTNESS, (uint8_t)b) == ESP_OK) saved++;
     }
+    if (httpd_query_key_value(buf, "refreshsec", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long s = strtoul(value, NULL, 10);
+        if (s <= 3600 && config_set_u32(CONFIG_INDEX_REFRESH_SEC, (uint32_t)s) == ESP_OK) saved++;
+    }
     /* Web password: an explicit "remove" checkbox clears it; otherwise a
      * non-empty value sets it. An empty value leaves the current one unchanged
      * so other settings can be saved without wiping the password. Storing an
@@ -918,6 +1032,24 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         url_decode(value);
         if (value[0] && config_set_str(CONFIG_INDEX_WEB_PASSWORD, value) == ESP_OK) saved++;
     }
+#if CONFIG_ENABLE_SD
+    /* SD logging: checkboxes send 0/1; config_set fires a config event so sdlog
+     * picks up the change live. */
+    if (httpd_query_key_value(buf, "logsys", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_LOG_SYS, strcmp(value, "1") == 0 ? 1 : 0) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "logframes", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_LOG_FRAMES, strcmp(value, "1") == 0 ? 1 : 0) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "logmaxmb", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long mb = strtoul(value, NULL, 10);
+        if (mb >= 1 && mb <= 100000 &&
+            config_set_u32(CONFIG_INDEX_LOG_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
+    }
+#endif
 
     char msg[64];
     snprintf(msg, sizeof(msg), T(S_SAVED), saved);
@@ -982,6 +1114,197 @@ static esp_err_t confirm_post_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, ok ? T(S_CONFIRMED) : "Error");
     return ok ? ESP_OK : ESP_FAIL;
+}
+
+/* ================================================================== */
+/*  Icons + PWA web-app manifest                                      */
+/* ================================================================== */
+
+static esp_err_t send_png(httpd_req_t *req, const uint8_t *start, const uint8_t *end)
+{
+    httpd_resp_set_type(req, "image/png");
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
+    return httpd_resp_send(req, (const char *)start, end - start);
+}
+
+/* Browser tab / favicon. Wildcard-matched (/favicon*) so favicon.ico probes
+ * are answered too instead of 404'ing into the log. */
+static esp_err_t favicon_get_handler(httpd_req_t *req)
+{
+    return send_png(req, favicon_png_start, favicon_png_end);
+}
+
+/* iOS home-screen icon. Wildcard (/apple-touch-icon*) covers the sized variants
+ * iOS probes (…-152x152.png, …-precomposed.png). Full-bleed PNG so iOS applies
+ * its own rounded mask (no white border). */
+static esp_err_t apple_icon_get_handler(httpd_req_t *req)
+{
+    return send_png(req, apple_touch_icon_png_start, apple_touch_icon_png_end);
+}
+
+static esp_err_t icon192_get_handler(httpd_req_t *req)
+{
+    return send_png(req, icon_192_png_start, icon_192_png_end);
+}
+
+static esp_err_t icon512_get_handler(httpd_req_t *req)
+{
+    return send_png(req, icon_512_png_start, icon_512_png_end);
+}
+
+/* Web-app manifest: lets iOS/Android save the page as a standalone web app. */
+static esp_err_t manifest_get_handler(httpd_req_t *req)
+{
+    static const char m[] =
+        "{\"name\":\"ITS G5 Node\",\"short_name\":\"ITS G5\",\"start_url\":\"/\","
+        "\"display\":\"standalone\",\"background_color\":\"#0a1c3a\","
+        "\"theme_color\":\"#1c56be\",\"icons\":["
+        "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\"},"
+        "{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\"}]}";
+    httpd_resp_set_type(req, "application/manifest+json");
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
+    return httpd_resp_send(req, m, HTTPD_RESP_USE_STRLEN);
+}
+
+/* ================================================================== */
+/*  /system  -- chip, memory, per-task CPU load                       */
+/* ================================================================== */
+
+static const char *reset_reason_str(esp_reset_reason_t r)
+{
+    switch (r)
+    {
+    case ESP_RST_POWERON:   return "Power-on";
+    case ESP_RST_EXT:       return "External";
+    case ESP_RST_SW:        return "Software";
+    case ESP_RST_PANIC:     return "Panic / exception";
+    case ESP_RST_INT_WDT:   return "Interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "Task watchdog";
+    case ESP_RST_WDT:       return "Other watchdog";
+    case ESP_RST_DEEPSLEEP: return "Deep-sleep wake";
+    case ESP_RST_BROWNOUT:  return "Brownout";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "Unknown";
+    }
+}
+
+static const char *task_state_str(eTaskState s)
+{
+    switch (s)
+    {
+    case eRunning:   return "run";
+    case eReady:     return "ready";
+    case eBlocked:   return "blocked";
+    case eSuspended: return "susp";
+    case eDeleted:   return "deleted";
+    default:         return "?";
+    }
+}
+
+static esp_err_t system_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    send_page_header(req, T(S_TITLE_SYSTEM));
+
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    const esp_app_desc_t *app = esp_app_get_description();
+
+    char feat[64] = "";
+    if (chip.features & CHIP_FEATURE_WIFI_BGN) strlcat(feat, "WiFi ", sizeof(feat));
+    if (chip.features & CHIP_FEATURE_BT)       strlcat(feat, "BT ", sizeof(feat));
+    if (chip.features & CHIP_FEATURE_BLE)      strlcat(feat, "BLE ", sizeof(feat));
+    if (chip.features & CHIP_FEATURE_EMB_PSRAM) strlcat(feat, "PSRAM ", sizeof(feat));
+
+    uint32_t flash_sz = 0;
+    esp_flash_get_size(NULL, &flash_sz);
+    char flash_str[24];
+    format_bytes(flash_sz, flash_str, sizeof(flash_str));
+
+    char uptime_str[48];
+    format_uptime(esp_timer_get_time() / 1000000ull, uptime_str, sizeof(uptime_str));
+
+    char ri_f[24], ri_m[24], ri_t[24], rp_f[24], rp_m[24], rp_t[24];
+    format_bytes(heap_caps_get_free_size(MALLOC_CAP_INTERNAL), ri_f, sizeof(ri_f));
+    format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), ri_m, sizeof(ri_m));
+    format_bytes(heap_caps_get_total_size(MALLOC_CAP_INTERNAL), ri_t, sizeof(ri_t));
+    format_bytes(heap_caps_get_free_size(MALLOC_CAP_SPIRAM), rp_f, sizeof(rp_f));
+    format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), rp_m, sizeof(rp_m));
+    format_bytes(heap_caps_get_total_size(MALLOC_CAP_SPIRAM), rp_t, sizeof(rp_t));
+
+    char info[1400];
+    snprintf(info, sizeof(info),
+        "<table>"
+        "<tr><th>%s</th><td>%s rev %d, %s</td></tr>"
+        "<tr><th>%s</th><td>%d</td></tr>"
+        "<tr><th>%s</th><td>%d MHz</td></tr>"
+        "<tr><th>%s</th><td>%s (IDF %s, %s %s)</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s (%s)</th><td>%s / %s / %s</td></tr>"
+        "<tr><th>%s (%s)</th><td>%s / %s / %s</td></tr>"
+        "</table><h2>%s</h2>",
+        T(S_SYS_CHIP), CONFIG_IDF_TARGET, chip.revision, feat,
+        T(S_SYS_CORES), chip.cores,
+        T(S_SYS_CPU_FREQ), CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        T(S_FW_VERSION), app->version, app->idf_ver, app->date, app->time,
+        T(S_SYS_IDF), esp_get_idf_version(),
+        T(S_SYS_RESET), reset_reason_str(esp_reset_reason()),
+        T(S_UPTIME), uptime_str,
+        T(S_SYS_RAM_INT), T(S_SYS_TRIPLE), ri_f, ri_m, ri_t,
+        T(S_SYS_RAM_PSRAM), T(S_SYS_TRIPLE), rp_f, rp_m, rp_t,
+        T(S_SYS_TASKS));
+    httpd_resp_send_chunk(req, info, HTTPD_RESP_USE_STRLEN);
+
+    /* Two snapshots ~300 ms apart give the *current* per-task CPU load (delta),
+     * which is wrap-safe unlike cumulative-since-boot counters. */
+    UBaseType_t n1 = uxTaskGetNumberOfTasks();
+    if (n1 > 64) n1 = 64;
+    TaskStatus_t *a1 = malloc(n1 * sizeof(TaskStatus_t));
+    TaskStatus_t *a2 = malloc(n1 * sizeof(TaskStatus_t));
+    if (a1 && a2)
+    {
+        uint32_t rt1 = 0, rt2 = 0;
+        UBaseType_t c1 = uxTaskGetSystemState(a1, n1, &rt1);
+        vTaskDelay(pdMS_TO_TICKS(300));
+        UBaseType_t c2 = uxTaskGetSystemState(a2, n1, &rt2);
+        uint32_t total_delta = rt2 - rt1;
+
+        httpd_resp_send_chunk(req,
+            "<table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
+        char hdr[128];
+        snprintf(hdr, sizeof(hdr), "%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
+                 T(S_SYS_COL_STATE), T(S_SYS_COL_PRIO), T(S_SYS_COL_CPU), T(S_SYS_COL_STACK));
+        httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
+
+        for (UBaseType_t i = 0; i < c2; i++)
+        {
+            uint32_t prev = 0;
+            for (UBaseType_t j = 0; j < c1; j++)
+                if (a1[j].xHandle == a2[i].xHandle) { prev = a1[j].ulRunTimeCounter; break; }
+            uint32_t delta = a2[i].ulRunTimeCounter - prev;
+            unsigned cpu_x10 = total_delta ? (unsigned)(((uint64_t)delta * 1000) / total_delta) : 0;
+
+            char nameesc[48];
+            html_escape(a2[i].pcTaskName, nameesc, sizeof(nameesc));
+            char row[256];
+            snprintf(row, sizeof(row),
+                "<tr><td>%s</td><td>%s</td><td>%u</td><td>%u.%u</td><td>%u</td></tr>",
+                nameesc, task_state_str(a2[i].eCurrentState),
+                (unsigned)a2[i].uxCurrentPriority,
+                cpu_x10 / 10, cpu_x10 % 10,
+                (unsigned)a2[i].usStackHighWaterMark);
+            httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
+    }
+    free(a1);
+    free(a2);
+
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
 }
 
 /* ================================================================== */
@@ -1227,14 +1550,17 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         snprintf(usage, sizeof(usage), "<p><b>%s:</b> %s</p>", T(S_SD_USAGE), used_of);
     }
 
-    char relenc[SD_PATH_MAX * 3];
+    /* These scratch buffers are large; keeping them on the stack overflowed the
+     * single httpd task. esp_http_server handles requests sequentially in one
+     * task, so 'static' (off-stack, one instance) is safe here. */
+    static char relenc[SD_PATH_MAX * 3];
     url_encode(rel, relenc, sizeof(relenc));
     /* rel is attacker-controlled (from ?p=) and gets displayed as a path
      * breadcrumb below; escape it so it can't inject HTML/JS. */
-    char relesc[SD_PATH_MAX * 6];
+    static char relesc[SD_PATH_MAX * 6];
     html_escape(rel, relesc, sizeof(relesc));
 
-    char top[2560];
+    static char top[2560];
     snprintf(top, sizeof(top),
         "%s"
         "<p>%s: <input type='file' id='fw'><button onclick='up()'>%s</button> "
@@ -1266,7 +1592,7 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     /* Own (small) chunk: the path breadcrumb is attacker-controlled (?p=), so
      * it is kept separate from the buffer above and always HTML-escaped. */
-    char breadcrumb[SD_PATH_MAX * 6 + 96];
+    static char breadcrumb[SD_PATH_MAX * 6 + 96];
     snprintf(breadcrumb, sizeof(breadcrumb),
         "<p><b>/%s</b></p><table><tr><th>%s</th><th>%s</th><th></th></tr>",
         relesc, T(S_SD_NAME), T(S_SD_SIZE));
@@ -1311,12 +1637,13 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
             struct stat st;
             bool is_dir = (stat(childfull, &st) == 0) && S_ISDIR(st.st_mode);
 
-            char nameesc[256], relenc2[SD_PATH_MAX * 3];
+            static char nameesc[256], relenc2[SD_PATH_MAX * 3];
             html_escape(de->d_name, nameesc, sizeof(nameesc));
             url_encode(childrel, relenc2, sizeof(relenc2));
 
-            /* row holds relenc2 twice (href + delete) plus the escaped name. */
-            char row[SD_PATH_MAX * 6 + 512];
+            /* row holds relenc2 twice (href + delete) plus the escaped name.
+             * static (off-stack) for the same reason as the buffers above. */
+            static char row[SD_PATH_MAX * 6 + 512];
             if (is_dir)
             {
                 snprintf(row, sizeof(row),
@@ -1521,6 +1848,113 @@ static esp_err_t sdcard_mount_handler(httpd_req_t *req)
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
+
+/* ================================================================== */
+/*  /logs  -- view the SD log files inline in the browser             */
+/* ================================================================== */
+
+#define LOGS_TAIL_KB 24   /* how much of the file tail to show */
+
+/* Stream the last `tail` bytes of an open file into a <pre>, HTML-escaping
+ * '<', '>' and '&'. Skips the first (partial) line when not starting at 0. */
+static void stream_tail_escaped(httpd_req_t *req, FILE *f, long start)
+{
+    fseek(f, start, SEEK_SET);
+    char in[512];
+    char out[512 * 5];
+    bool skip_partial = (start > 0);
+    size_t n;
+    while ((n = fread(in, 1, sizeof(in), f)) > 0)
+    {
+        size_t i = 0;
+        if (skip_partial)
+        {
+            while (i < n && in[i] != '\n') i++;
+            if (i < n) { i++; skip_partial = false; }
+            else continue;  /* whole chunk was the partial first line */
+        }
+        size_t o = 0;
+        for (; i < n; i++)
+        {
+            const char *rep;
+            switch (in[i])
+            {
+            case '<': rep = "&lt;";  break;
+            case '>': rep = "&gt;";  break;
+            case '&': rep = "&amp;"; break;
+            default:  out[o++] = in[i]; continue;
+            }
+            size_t rl = strlen(rep);
+            memcpy(out + o, rep, rl);
+            o += rl;
+        }
+        if (o)
+            httpd_resp_send_chunk(req, out, o);
+    }
+}
+
+static esp_err_t logs_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+
+    /* Which log: ?file=frames selects the frame CSV, otherwise the system log. */
+    bool frames = false;
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char v[16];
+        if (httpd_query_key_value(query, "file", v, sizeof(v)) == ESP_OK && strcmp(v, "frames") == 0)
+            frames = true;
+    }
+    const char *path = frames ? CONFIG_SNIFFER_MOUNT_POINT "/logs/frames.csv"
+                              : CONFIG_SNIFFER_MOUNT_POINT "/logs/system.log";
+    const char *lc = current_lang == LANG_DE ? "de" : "en";
+
+    send_page_header(req, T(S_TITLE_LOGS));
+
+    /* Switcher + refresh links. */
+    char nav[512];
+    snprintf(nav, sizeof(nav),
+        "<p><a href='/logs?file=system&lang=%s'>%s%s%s</a> | "
+        "<a href='/logs?file=frames&lang=%s'>%s%s%s</a> | "
+        "<a href='/logs?file=%s&lang=%s'>%s</a></p>",
+        lc, frames ? "" : "<b>", T(S_LOGS_SYS), frames ? "" : "</b>",
+        lc, frames ? "<b>" : "", T(S_LOGS_FRAMES), frames ? "</b>" : "",
+        frames ? "frames" : "system", lc, T(S_LOGS_REFRESH));
+    httpd_resp_send_chunk(req, nav, HTTPD_RESP_USE_STRLEN);
+
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "<p>%s</p>", T(S_LOGS_NONE));
+        httpd_resp_send_chunk(req, msg, HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, NULL, 0);
+        return ESP_OK;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    long start = size > (LOGS_TAIL_KB * 1024) ? size - (LOGS_TAIL_KB * 1024) : 0;
+
+    char note[128];
+    httpd_resp_send_chunk(req, "<p><small>", HTTPD_RESP_USE_STRLEN);
+    snprintf(note, sizeof(note), T(S_LOGS_TAIL), LOGS_TAIL_KB);
+    httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</small></p><pre style='white-space:pre-wrap;word-break:break-all;background:#000;padding:1em;border:1px solid #444;max-height:70vh;overflow:auto'>",
+                          HTTPD_RESP_USE_STRLEN);
+
+    stream_tail_escaped(req, f, start);
+    fclose(f);
+
+    httpd_resp_send_chunk(req, "</pre>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
 #endif // CONFIG_ENABLE_SD
 
 /* ================================================================== */
@@ -1550,7 +1984,10 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 28;
+    /* Wildcard matching lets one handler answer all the icon variants a browser
+     * probes (/favicon*, /apple-touch-icon*). Exact routes still match exactly. */
+    config.uri_match_fn = httpd_uri_match_wildcard;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -1570,6 +2007,12 @@ void webserver_init(void)
         { .uri = "/sniffer",  .method = HTTP_POST, .handler = sniffer_post_handler },
         { .uri = "/reboot",   .method = HTTP_POST, .handler = reboot_post_handler },
         { .uri = "/confirm",  .method = HTTP_POST, .handler = confirm_post_handler },
+        { .uri = "/system",   .method = HTTP_GET,  .handler = system_get_handler },
+        { .uri = "/favicon*",          .method = HTTP_GET, .handler = favicon_get_handler },
+        { .uri = "/apple-touch-icon*", .method = HTTP_GET, .handler = apple_icon_get_handler },
+        { .uri = "/icon-192.png",      .method = HTTP_GET, .handler = icon192_get_handler },
+        { .uri = "/icon-512.png",      .method = HTTP_GET, .handler = icon512_get_handler },
+        { .uri = "/manifest.webmanifest", .method = HTTP_GET, .handler = manifest_get_handler },
 #if CONFIG_ENABLE_SD
         { .uri = "/sdcard",          .method = HTTP_GET,  .handler = sdcard_get_handler },
         { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_handler },
@@ -1577,6 +2020,7 @@ void webserver_init(void)
         { .uri = "/sdcard/delete",   .method = HTTP_POST, .handler = sdcard_delete_handler },
         { .uri = "/sdcard/format",   .method = HTTP_POST, .handler = sdcard_format_handler },
         { .uri = "/sdcard/mount",    .method = HTTP_POST, .handler = sdcard_mount_handler },
+        { .uri = "/logs",            .method = HTTP_GET,  .handler = logs_get_handler },
 #endif
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++)

@@ -10,6 +10,7 @@ idf_component_register(
         "mqtt.cpp"
         "ota.c"
         "sdcard.c"
+        "sdlog.c"
         "spi.c"
         "spi_eppp.c"
         "temperature.c"
@@ -25,7 +26,13 @@ idf_component_register(
         esp_wifi
         fatfs
         nvs_flash
+        spi_flash
     INCLUDE_DIRS
         "."
+    EMBED_FILES
+        "assets/favicon.png"
+        "assets/apple-touch-icon.png"
+        "assets/icon-192.png"
+        "assets/icon-512.png"
 )
 

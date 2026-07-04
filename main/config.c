@@ -58,6 +58,10 @@ static esp_err_t config_get_autostart_chan(uint32_t *autostart_chan);
 static esp_err_t config_get_broadcast_only(uint8_t *broadcast_only);
 static esp_err_t config_get_led_brightness(uint8_t *led_brightness);
 static esp_err_t config_get_led_override_color(uint32_t *led_override_color);
+static esp_err_t config_get_log_sys(uint8_t *out);
+static esp_err_t config_get_log_frames(uint8_t *out);
+static esp_err_t config_get_log_max_mb(uint32_t *out);
+static esp_err_t config_get_refresh_sec(uint32_t *out);
 
 static const config_key_t config_keys[] = {
     [CONFIG_INDEX_NODEID]             = { "nodeid",        NVS_TYPE_STR, CONFIG_NODEID_BUFFER_SIZE,   config_get_node_id,            NULL },
@@ -73,6 +77,10 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_LED_BRIGHTNESS]     = { "ledbrightness", NVS_TYPE_U8,  0,                           config_get_led_brightness,     NULL },
     [CONFIG_INDEX_LED_OVERRIDE_COLOR] = { "ledoverride",   NVS_TYPE_U32, 0,                           config_get_led_override_color, NULL },
     [CONFIG_INDEX_WEB_PASSWORD]       = { "webpasswd",     NVS_TYPE_STR, CONFIG_WEB_PASSWORD_BUFFER_SIZE, NULL,                       NULL },
+    [CONFIG_INDEX_LOG_SYS]            = { "logsys",        NVS_TYPE_U8,  0,                           config_get_log_sys,            NULL },
+    [CONFIG_INDEX_LOG_FRAMES]         = { "logframes",     NVS_TYPE_U8,  0,                           config_get_log_frames,         NULL },
+    [CONFIG_INDEX_LOG_MAX_MB]         = { "logmaxmb",      NVS_TYPE_U32, 0,                           config_get_log_max_mb,         NULL },
+    [CONFIG_INDEX_REFRESH_SEC]        = { "refreshsec",    NVS_TYPE_U32, 0,                           config_get_refresh_sec,        NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -221,6 +229,64 @@ static esp_err_t config_get_led_override_color(uint32_t *led_override_color)
     }
 
     *led_override_color = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_log_sys(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "logsys", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 0;  /* default: off */
+    }
+    *out_val = !!out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_log_frames(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "logframes", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 0;  /* default: off */
+    }
+    *out_val = !!out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_log_max_mb(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "logmaxmb", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 50;  /* default: 50 MiB total */
+    }
+    if (out == 0)
+        out = 50;
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_refresh_sec(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "refreshsec", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 5;  /* default: 5 s (0 = off). Stored value 0xFFFFFFFF also = off. */
+    }
+    *out_val = out;
     return ESP_OK;
 }
 

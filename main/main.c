@@ -23,6 +23,7 @@
 #include "mqtt.h"
 #include "ota.h"
 #include "sdcard.h"
+#include "sdlog.h"
 #include "spi.h"
 #include "spi_eppp.h"
 #include "temperature.h"
@@ -159,6 +160,7 @@ void app_main(void)
     sniffer_init();
     ota_init();
     webserver_init();
+    sdlog_init();
 
 #ifdef CONFIG_ENABLE_TEMPERATURE
     temperature_init();
