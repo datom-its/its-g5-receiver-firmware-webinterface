@@ -82,6 +82,8 @@ typedef enum {
     S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
     S_WEB_PASSWORD, S_WEB_PASSWORD_SET, S_WEB_PASSWORD_NONE, S_WEB_PASSWORD_CLEAR,
     S_REFRESH_SEC,
+    S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
+    S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
@@ -172,6 +174,20 @@ static const char *STR[S_COUNT][2] = {
     [S_WEB_PASSWORD_CLEAR] = { "Passwortschutz entfernen",
                                "Remove password protection" },
     [S_REFRESH_SEC]     = { "Auto-Refresh (Sek., 0=aus)", "Auto-refresh (sec, 0=off)" },
+    [S_ETH_DHCP]        = { "DHCP (IP automatisch)",     "DHCP (automatic IP)" },
+    [S_ETH_IP]          = { "IP-Adresse",               "IP address" },
+    [S_ETH_NETMASK]     = { "Subnetzmaske",             "Subnet mask" },
+    [S_ETH_GATEWAY]     = { "Gateway",                  "Gateway" },
+    [S_ETH_DNS]         = { "DNS-Server (1/2/3)",       "DNS servers (1/2/3)" },
+    [S_ETH_NET_NOTE]    = { "Netzwerk-&Auml;nderungen wirken erst nach einem Neustart. "
+                           "DHCP aus = feste IP, dann IP/Maske/Gateway ausf&uuml;llen. "
+                           "DNS optional, gilt auch bei DHCP.",
+                           "Network changes take effect after a reboot. "
+                           "DHCP off = static IP, then fill in IP/mask/gateway. "
+                           "DNS is optional and also applies with DHCP." },
+    [S_ETH_CURRENT]     = { "Aktuell bezogen",           "Currently in use" },
+    [S_ETH_CUR_NOT_UP]  = { "(keine IP &ndash; Kabel/Link pr&uuml;fen)",
+                           "(no IP yet &ndash; check cable/link)" },
     [S_LOG_SYS]         = { "System-Log auf SD",        "System log to SD" },
     [S_LOG_FRAMES]      = { "Frame-Log auf SD (CSV)",   "Frame log to SD (CSV)" },
     [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
@@ -546,8 +562,10 @@ static void resolve_language(httpd_req_t *req)
 static const char PAGE_HEADER_FMT[] =
     "<!DOCTYPE html><html lang='%s'><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<link rel='icon' href='/favicon.png' type='image/png'>"
-    "<link rel='apple-touch-icon' sizes='180x180' href='/apple-touch-icon.png'>"
+    /* ?v= busts the browser's aggressive per-origin favicon cache so the tower
+     * icon replaces the old satellite from early versions. Bump on icon change. */
+    "<link rel='icon' href='/favicon.png?v=2' type='image/png'>"
+    "<link rel='apple-touch-icon' sizes='180x180' href='/apple-touch-icon.png?v=2'>"
     "<link rel='manifest' href='/manifest.webmanifest'>"
     "<meta name='theme-color' content='#1c56be'>"
     "<meta name='apple-mobile-web-app-capable' content='yes'>"
@@ -912,7 +930,40 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u32(CONFIG_INDEX_LOG_MAX_MB, &log_mb);
 #endif
 
-    char body[6144];
+    /* Ethernet: no static IP stored → DHCP. DNS applies in either mode. */
+    char ethip[64] = {0}, ethnm[64] = {0}, ethgw[64] = {0};
+    char ethdns0[64] = {0}, ethdns1[64] = {0}, ethdns2[64] = {0};
+    settings_get_str(CONFIG_INDEX_ETH_IP, ethip, sizeof(ethip));
+    settings_get_str(CONFIG_INDEX_ETH_NETMASK, ethnm, sizeof(ethnm));
+    settings_get_str(CONFIG_INDEX_ETH_GATEWAY, ethgw, sizeof(ethgw));
+    settings_get_str(CONFIG_INDEX_ETH_DNS0, ethdns0, sizeof(ethdns0));
+    settings_get_str(CONFIG_INDEX_ETH_DNS1, ethdns1, sizeof(ethdns1));
+    settings_get_str(CONFIG_INDEX_ETH_DNS2, ethdns2, sizeof(ethdns2));
+    bool dhcp = (ethip[0] == '\0');
+
+    /* Live status (what's actually bound right now, e.g. the DHCP-obtained
+     * IP), as opposed to the ethip/... above which is only ever set for a
+     * static config. Shown read-only above the editable fields. */
+    ethernet_status_t eth_now;
+    ethernet_get_status(&eth_now);
+    char cur_line[256];
+    if (eth_now.up)
+    {
+        char dns_join[64];
+        snprintf(dns_join, sizeof(dns_join), "%s%s%s%s%s",
+            eth_now.dns[0], eth_now.dns[1][0] ? ", " : "", eth_now.dns[1],
+            eth_now.dns[2][0] ? ", " : "", eth_now.dns[2]);
+        snprintf(cur_line, sizeof(cur_line), "%s: %s / %s / %s%s%s",
+            T(S_ETH_CURRENT), eth_now.ip, eth_now.netmask, eth_now.gateway,
+            dns_join[0] ? " &middot; DNS " : "", dns_join);
+    }
+    else
+    {
+        snprintf(cur_line, sizeof(cur_line), "%s: %s", T(S_ETH_CURRENT), T(S_ETH_CUR_NOT_UP));
+    }
+
+    /* Large; keep off the httpd task stack (single-task, sequential handlers). */
+    static EXT_RAM_BSS_ATTR char body[8192];
     snprintf(body, sizeof(body),
         "<p>%s</p>"
         "<table class='kv'>"
@@ -942,6 +993,15 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
 #endif
+        "<tr><th></th><td>%s</td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='dhcp'%s onchange='dhcpToggle()'></td></tr>"
+        "<tr><th>%s</th><td><input id='ethip' value='%s' size='16'></td></tr>"
+        "<tr><th>%s</th><td><input id='ethnm' value='%s' size='16'></td></tr>"
+        "<tr><th>%s</th><td><input id='ethgw' value='%s' size='16'></td></tr>"
+        "<tr><th>%s</th><td><input id='ethdns0' value='%s' size='16'> "
+        "<input id='ethdns1' value='%s' size='16'> "
+        "<input id='ethdns2' value='%s' size='16'>"
+        "<br><small>%s</small></td></tr>"
         "</table>"
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
         "<script>"
@@ -959,9 +1019,19 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('logframes',document.getElementById('logframes').checked?'1':'0');"
         "p.append('logmaxmb',document.getElementById('logmaxmb').value);"
 #endif
+        "p.append('dhcp',document.getElementById('dhcp').checked?'1':'0');"
+        "p.append('ethip',document.getElementById('ethip').value);"
+        "p.append('ethnm',document.getElementById('ethnm').value);"
+        "p.append('ethgw',document.getElementById('ethgw').value);"
+        "p.append('ethdns0',document.getElementById('ethdns0').value);"
+        "p.append('ethdns1',document.getElementById('ethdns1').value);"
+        "p.append('ethdns2',document.getElementById('ethdns2').value);"
         "fetch('/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
         ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;});"
         "}"
+        "function dhcpToggle(){var d=document.getElementById('dhcp').checked;"
+        "['ethip','ethnm','ethgw'].forEach(function(i){document.getElementById(i).disabled=d;});}"
+        "dhcpToggle();"
         "</script>",
         T(S_SET_INTRO),
         T(S_NODEID), nodeid,
@@ -983,6 +1053,13 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_LOG_FRAMES), log_frames ? " checked" : "",
         T(S_LOG_BUDGET), (unsigned long)log_mb, T(S_LOG_HINT),
 #endif
+        cur_line,
+        T(S_ETH_DHCP), dhcp ? " checked" : "",
+        T(S_ETH_IP), ethip,
+        T(S_ETH_NETMASK), ethnm,
+        T(S_ETH_GATEWAY), ethgw,
+        T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
+        T(S_ETH_NET_NOTE),
         T(S_SAVE)
     );
 
@@ -993,6 +1070,20 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Loose IPv4 dotted-quad check (4 octets, each 0-255). Empty string is NOT
+ * valid here; callers treat empty separately (clear/DHCP). */
+static bool is_ipv4(const char *s)
+{
+    int parts = 0, val = 0, digits = 0;
+    for (const char *p = s; ; p++)
+    {
+        if (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); if (++digits > 3 || val > 255) return false; }
+        else if (*p == '.' || *p == '\0') { if (digits == 0) return false; parts++; if (*p == '\0') break; val = 0; digits = 0; }
+        else return false;
+    }
+    return parts == 4;
+}
+
 static esp_err_t settings_post_handler(httpd_req_t *req)
 {
     resolve_language(req);
@@ -1000,13 +1091,13 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (!check_update_auth(req))
         return send_auth_required(req);
 
-    if (req->content_len == 0 || req->content_len > 1024)
+    if (req->content_len == 0 || req->content_len > 2048)
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
         return ESP_FAIL;
     }
 
-    char buf[1024] = {0};
+    char buf[2048] = {0};
     int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (received <= 0)
     {
@@ -1079,6 +1170,52 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
             config_set_u32(CONFIG_INDEX_LOG_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
     }
 #endif
+    /* Ethernet / network — only touched when the form submitted the block, so a
+     * partial POST never wipes it. Takes effect on the next reboot. */
+    if (httpd_query_key_value(buf, "dhcp", value, sizeof(value)) == ESP_OK)
+    {
+        if (strcmp(value, "1") == 0)
+        {
+            /* DHCP: clear the static trio so the boot code runs a DHCP client. */
+            config_set_str(CONFIG_INDEX_ETH_IP, "");
+            config_set_str(CONFIG_INDEX_ETH_NETMASK, "");
+            config_set_str(CONFIG_INDEX_ETH_GATEWAY, "");
+            saved++;
+        }
+        else
+        {
+            char ip[64] = "", nm[64] = "", gw[64] = "";
+            if (httpd_query_key_value(buf, "ethip", ip, sizeof(ip)) == ESP_OK) url_decode(ip);
+            if (httpd_query_key_value(buf, "ethnm", nm, sizeof(nm)) == ESP_OK) url_decode(nm);
+            if (httpd_query_key_value(buf, "ethgw", gw, sizeof(gw)) == ESP_OK) url_decode(gw);
+            /* Static needs all three valid together, else the boot code falls back
+             * to DHCP — store them atomically to avoid a half-configured state. */
+            if (is_ipv4(ip) && is_ipv4(nm) && is_ipv4(gw))
+            {
+                config_set_str(CONFIG_INDEX_ETH_IP, ip);
+                config_set_str(CONFIG_INDEX_ETH_NETMASK, nm);
+                config_set_str(CONFIG_INDEX_ETH_GATEWAY, gw);
+                saved++;
+            }
+        }
+        /* DNS 1/2/3: empty clears, a valid address is stored. Applies in both
+         * DHCP and static mode. */
+        static const struct { const char *key; config_index_t idx; } dnsf[3] = {
+            { "ethdns0", CONFIG_INDEX_ETH_DNS0 },
+            { "ethdns1", CONFIG_INDEX_ETH_DNS1 },
+            { "ethdns2", CONFIG_INDEX_ETH_DNS2 },
+        };
+        for (size_t i = 0; i < 3; i++)
+        {
+            char d[64] = "";
+            if (httpd_query_key_value(buf, dnsf[i].key, d, sizeof(d)) == ESP_OK)
+            {
+                url_decode(d);
+                if (d[0] == '\0')      { if (config_set_str(dnsf[i].idx, "") == ESP_OK) saved++; }
+                else if (is_ipv4(d))   { if (config_set_str(dnsf[i].idx, d)  == ESP_OK) saved++; }
+            }
+        }
+    }
 
     char msg[64];
     snprintf(msg, sizeof(msg), T(S_SAVED), saved);

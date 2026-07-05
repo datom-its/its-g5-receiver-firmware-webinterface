@@ -29,6 +29,16 @@ static bool static_ip;
 
 static void eth_config_dns(esp_netif_t *netif);
 
+/* True if a primary DNS server (ETH_DNS0) is configured. Used to override the
+ * DHCP-provided DNS with the manual one after DHCP hands out an address. */
+static bool has_manual_dns(void)
+{
+    char s[CONFIG_IPV4_BUFFER_SIZE] = {0};
+    size_t n = sizeof(s);
+    ip4_addr_t d;
+    return config_get_str(CONFIG_INDEX_ETH_DNS0, s, &n) == ESP_OK && s[0] && inet_aton(s, &d);
+}
+
 /** Event handler for Ethernet events */
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
@@ -103,6 +113,12 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
             // If this is the management netif, post an event to start MQTT etc.
             if (netif == mgmt_netif)
             {
+                /* DHCP just (re)set the DNS servers; if the user configured a
+                 * manual DNS, re-apply it so it takes precedence. Guarded so an
+                 * unset manual DNS never wipes the DHCP-provided one. */
+                if (has_manual_dns())
+                    eth_config_dns(netif);
+
                 esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
                 if (post_res != ESP_OK)
                     ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
@@ -288,6 +304,35 @@ eth_speed_t ethernet_get_mgmt_if_link_speed(void)
     }
 
     return speed;
+}
+
+void ethernet_get_status(ethernet_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!mgmt_netif || !esp_netif_is_netif_up(mgmt_netif))
+        return;
+
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(mgmt_netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0)
+        return;
+
+    out->up = true;
+    ip4addr_ntoa_r((const ip4_addr_t *)&ip_info.ip, out->ip, sizeof(out->ip));
+    ip4addr_ntoa_r((const ip4_addr_t *)&ip_info.netmask, out->netmask, sizeof(out->netmask));
+    ip4addr_ntoa_r((const ip4_addr_t *)&ip_info.gw, out->gateway, sizeof(out->gateway));
+
+    static const esp_netif_dns_type_t dns_types[3] = {
+        ESP_NETIF_DNS_MAIN, ESP_NETIF_DNS_BACKUP, ESP_NETIF_DNS_FALLBACK
+    };
+    for (int i = 0; i < 3; i++)
+    {
+        esp_netif_dns_info_t dns_info;
+        if (esp_netif_get_dns_info(mgmt_netif, dns_types[i], &dns_info) == ESP_OK &&
+            dns_info.ip.u_addr.ip4.addr != 0)
+        {
+            ip4addr_ntoa_r((const ip4_addr_t *)&dns_info.ip.u_addr.ip4, out->dns[i], sizeof(out->dns[i]));
+        }
+    }
 }
 
 void ethernet_get_mac(uint8_t mac[6])
