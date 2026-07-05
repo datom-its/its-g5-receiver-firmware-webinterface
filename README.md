@@ -10,12 +10,12 @@ Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 ## Download
 
 Pre-compiled binaries are available under
-[**Releases**](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases).
-The latest is
-**[0.9.0-webui](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases/tag/v0.9.0-webui)**
-— download `its-g5-receiver-firmware.bin` and flash it via the web interface
-(`/update`), or grab all four `.bin` files for an initial flash over serial
-(see below). No build environment needed.
+[**Releases**](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases)
+— the newest release is at the top of that page. Download
+`its-g5-receiver-firmware.bin` and flash it via the web interface (`/update`),
+or grab all four `.bin` files for an initial flash over serial (see below).
+No build environment needed. The version history below lists what changed in
+each release.
 
 ## Version history
 
