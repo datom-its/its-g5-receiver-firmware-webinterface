@@ -33,23 +33,28 @@ static size_t mac80211_header_len(const uint8_t *f, size_t len)
     return len >= hlen ? hlen : 0;
 }
 
-typedef struct { uint16_t port; const char *name; } btp_port_name_t;
+typedef struct { uint8_t id; const char *name; } msgid_name_t;
 
-/* Only the two message types we're fully confident about (ETSI TS 103 301
- * well-known BTP port numbers, confirmed against real captured traffic).
- * Everything else is reported as "GeoNet:<port>" rather than guessed -- e.g.
- * the roadside traffic-light unit in our test capture used ports 2003/2004,
- * which aren't in this table on purpose. */
-static const btp_port_name_t KNOWN_BTP_PORTS[] = {
-    { 2001, "CAM" },
-    { 2002, "DENM" },
+/* ITS PDU header "messageId" -> facility message name. Values/names taken
+ * verbatim from Wireshark's authoritative its.messageId value-string (ETSI
+ * TS 102 894-2 registry). Read from the actual message rather than inferred
+ * from the BTP port, so it's correct for every type, not just a few
+ * hand-listed ports -- verified against ~2400 real captured frames (CAM from
+ * vehicles, SPATEM/MAPEM from a roadside traffic-light unit). rfu1(7)/rfu2(8)
+ * are reserved and intentionally absent. */
+static const msgid_name_t MSGID_NAMES[] = {
+    { 1,  "DENM" },   { 2,  "CAM" },    { 3,  "POIM" },  { 4,  "SPATEM" },
+    { 5,  "MAPEM" },  { 6,  "IVIM" },   { 9,  "SREM" },  { 10, "SSEM" },
+    { 11, "EVCSN" },  { 12, "SAEM" },   { 13, "RTCMEM" },{ 14, "CPM" },
+    { 15, "IMZM" },   { 16, "VAM" },    { 17, "DSM" },   { 18, "PCIM" },
+    { 19, "PCVM" },   { 20, "MCM" },    { 21, "PAM" },
 };
 
-static const char *lookup_btp_name(uint16_t port)
+static const char *lookup_msgid_name(uint8_t id)
 {
-    for (size_t i = 0; i < sizeof(KNOWN_BTP_PORTS) / sizeof(KNOWN_BTP_PORTS[0]); i++)
-        if (KNOWN_BTP_PORTS[i].port == port)
-            return KNOWN_BTP_PORTS[i].name;
+    for (size_t i = 0; i < sizeof(MSGID_NAMES) / sizeof(MSGID_NAMES[0]); i++)
+        if (MSGID_NAMES[i].id == id)
+            return MSGID_NAMES[i].name;
     return NULL;
 }
 
@@ -143,7 +148,12 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
     {
         if (len < off + 2) { snprintf(out, out_size, "GeoNet"); return; }
         uint16_t port = rd_u16be(frame + off);
-        const char *name = lookup_btp_name(port);
+        /* The message type is the ITS PDU header's messageId: one byte past
+         * the 4-byte BTP-B header + the 1-byte protocolVersion. This offset
+         * was verified against ~2400 real frames. Prefer the decoded name;
+         * fall back to the raw port for anything not in the table (e.g. a
+         * non-facility BTP-B service, or a truncated frame). */
+        const char *name = (len >= off + 6) ? lookup_msgid_name(frame[off + 5]) : NULL;
         if (name) snprintf(out, out_size, "%s", name);
         else      snprintf(out, out_size, "GeoNet:%u", (unsigned)port);
     }

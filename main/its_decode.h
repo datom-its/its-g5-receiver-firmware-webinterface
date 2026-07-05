@@ -22,14 +22,14 @@ extern "C" {
  * match the shape verified against real traffic, the frame falls back to
  * plain "Signed" rather than a guess.
  *
- * This is a label for the web UI, not a full ASN.1/UPER decode of the message
- * content (e.g. CAM's speed/heading aren't read). Only CAM and DENM ports are
- * mapped to a name with confidence; other recognised facility ports are
- * labelled "GeoNet:<port>" rather than guessed, since a wrong name would be
- * worse than a raw port number.
+ * The message type is read from the ITS PDU header's messageId field (CAM,
+ * DENM, SPATEM, MAPEM, IVIM, CPM, ...), mapped via the ETSI TS 102 894-2
+ * registry. This is a label for the web UI, not a full ASN.1/UPER decode of
+ * the message content (e.g. CAM's speed/heading aren't read). A messageId not
+ * in the table falls back to "GeoNet:<port>".
  *
  * `out` is always left as a valid, non-empty, NUL-terminated string, e.g.
- * "Bus CAM", "RSU GeoNet:2004", "DENM", "Signed", "?". */
+ * "Bus CAM", "RSU SPATEM", "DENM", "Signed", "?". */
 void its_decode_msg_type(const uint8_t *frame, size_t len, char *out, size_t out_size);
 
 #ifdef __cplusplus

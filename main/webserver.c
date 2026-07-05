@@ -86,7 +86,7 @@ typedef enum {
     S_REFRESH_SEC,
     S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
-    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE, S_ACTIVITY_HINT,
+    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE, S_TYPE_HINT,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
@@ -195,8 +195,16 @@ static const char *STR[S_COUNT][2] = {
     [S_COL_TYPE]        = { "Typ",                       "Type" },
     [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t (60s)",      "Activity (60s)" },
     [S_ACTIVITY_NONE]   = { "(noch keine Nachrichten)",  "(no messages yet)" },
-    [S_ACTIVITY_HINT]   = { "&bdquo;Signed&ldquo; = signierte Nachricht (Zertifikat nicht ausgewertet). &bdquo;?&ldquo; = kein GeoNetworking-Paket erkannt.",
-                            "\"Signed\" = a secured/signed message (certificate not evaluated). \"?\" = not recognised as GeoNetworking." },
+    [S_TYPE_HINT]       = { "Typ = Absender + Nachricht. Absender: Auto, Bus, Fu&szlig;g&auml;nger, "
+                            "RSU (Stra&szlig;enrand-Einheit, z.B. Ampel). Nachricht: CAM=Fahrzeug-Status, "
+                            "DENM=Warnung, SPATEM=Ampelphase, MAPEM=Kreuzungskarte, IVIM=Verkehrszeichen, "
+                            "CPM=Umfeldwahrnehmung. &bdquo;Signed&ldquo;=signiert, nicht entschl&uuml;sselbar. "
+                            "&bdquo;?&ldquo;=kein GeoNetworking-Paket.",
+                            "Type = sender + message. Sender: car, bus, pedestrian, RSU (roadside unit, "
+                            "e.g. a traffic light). Message: CAM=vehicle status, DENM=hazard warning, "
+                            "SPATEM=signal phase/timing, MAPEM=intersection map, IVIM=road signs, "
+                            "CPM=perceived objects. \"Signed\"=signed, not unwrapped. "
+                            "\"?\"=not a GeoNetworking packet." },
     [S_LOG_SYS]         = { "System-Log auf SD",        "System log to SD" },
     [S_LOG_FRAMES]      = { "Frame-Log auf SD (CSV)",   "Frame log to SD (CSV)" },
     [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
@@ -788,10 +796,16 @@ static void render_activity_stats(httpd_req_t *req)
     httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, svg, HTTPD_RESP_USE_STRLEN);
 
+    /* typeline (the per-type counts) and the hint are sent as separate chunks
+     * so a long breakdown can't crowd out the hint in one fixed buffer. */
     char typeblock[1152];
-    snprintf(typeblock, sizeof(typeblock), "<p>%s<br><small>%s</small></p>",
-        typeline[0] ? typeline : T(S_ACTIVITY_NONE), T(S_ACTIVITY_HINT));
+    snprintf(typeblock, sizeof(typeblock), "<p>%s</p>",
+        typeline[0] ? typeline : T(S_ACTIVITY_NONE));
     httpd_resp_send_chunk(req, typeblock, HTTPD_RESP_USE_STRLEN);
+
+    char hintblock[768];
+    snprintf(hintblock, sizeof(hintblock), "<p><small>%s</small></p>", T(S_TYPE_HINT));
+    httpd_resp_send_chunk(req, hintblock, HTTPD_RESP_USE_STRLEN);
 }
 
 /* ================================================================== */
@@ -1045,11 +1059,22 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     size_t l = strlen(intro);
     snprintf(intro + l, sizeof(intro) - l, T(S_MSG_INTRO), WEB_MSG_RING_SIZE, WEB_MSG_PREVIEW_LEN);
     l = strlen(intro);
-    snprintf(intro + l, sizeof(intro) - l,
-        "</p><div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
+    snprintf(intro + l, sizeof(intro) - l, "</p>");
+    httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
+
+    /* Own chunk (not concatenated into intro above): T(S_TYPE_HINT) alone can
+     * approach several hundred bytes, which intro's small fixed buffer isn't
+     * sized for. */
+    char typehint[768];
+    snprintf(typehint, sizeof(typehint), "<p><small>%s</small></p>", T(S_TYPE_HINT));
+    httpd_resp_send_chunk(req, typehint, HTTPD_RESP_USE_STRLEN);
+
+    char thead[384];
+    snprintf(thead, sizeof(thead),
+        "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
         "<tbody id='msgtbody'>",
         T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE), T(S_COL_PREVIEW));
-    httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
 
     static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
     size_t count = 0;
