@@ -62,6 +62,7 @@ static esp_err_t config_get_log_sys(uint8_t *out);
 static esp_err_t config_get_log_frames(uint8_t *out);
 static esp_err_t config_get_log_max_mb(uint32_t *out);
 static esp_err_t config_get_refresh_sec(uint32_t *out);
+static esp_err_t config_get_ntp_server(char *out, size_t *size);
 
 static const config_key_t config_keys[] = {
     [CONFIG_INDEX_NODEID]             = { "nodeid",        NVS_TYPE_STR, CONFIG_NODEID_BUFFER_SIZE,   config_get_node_id,            NULL },
@@ -81,6 +82,7 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_LOG_FRAMES]         = { "logframes",     NVS_TYPE_U8,  0,                           config_get_log_frames,         NULL },
     [CONFIG_INDEX_LOG_MAX_MB]         = { "logmaxmb",      NVS_TYPE_U32, 0,                           config_get_log_max_mb,         NULL },
     [CONFIG_INDEX_REFRESH_SEC]        = { "refreshsec",    NVS_TYPE_U32, 0,                           config_get_refresh_sec,        NULL },
+    [CONFIG_INDEX_NTP_SERVER]         = { "ntpserver",     NVS_TYPE_STR, CONFIG_NTP_SERVER_BUFFER_SIZE, config_get_ntp_server,        NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -147,6 +149,38 @@ static esp_err_t config_get_mqtt_uri(char *out, size_t *size)
             ESP_LOGW(TAG, "nvs_get_str failed: %s", esp_err_to_name(res));
 
         int print_res = snprintf(out, *size, "%s", "mqtts://cits1.opentrafficmap.org");
+
+        if (print_res > *size - 1)
+        {
+            ESP_LOGE(TAG, "buffer too small to print");
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        if (print_res < 0)
+        {
+            ESP_LOGE(TAG, "snprintf failed");
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        size_copy = print_res + 1;
+    }
+
+    *size = size_copy;
+
+    return ESP_OK;
+}
+
+static esp_err_t config_get_ntp_server(char *out, size_t *size)
+{
+    size_t size_copy = *size;
+
+    esp_err_t res = nvs_get_str(handle, "ntpserver", out, &size_copy);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGW(TAG, "nvs_get_str failed: %s", esp_err_to_name(res));
+
+        int print_res = snprintf(out, *size, "%s", "pool.ntp.org");
 
         if (print_res > *size - 1)
         {

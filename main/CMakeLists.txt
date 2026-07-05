@@ -6,6 +6,7 @@ idf_component_register(
         "config.c"
         "ethernet.c"
         "events.c"
+        "its_decode.c"
         "led.c"
         "mqtt.cpp"
         "ota.c"

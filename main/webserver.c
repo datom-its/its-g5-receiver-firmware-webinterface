@@ -1,6 +1,7 @@
 #include "sdkconfig.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -39,6 +40,7 @@
 #include "cmd_sniffer.h"
 #include "ethernet.h"
 #include "events.h"
+#include "its_decode.h"
 #include "ota.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
@@ -84,6 +86,7 @@ typedef enum {
     S_REFRESH_SEC,
     S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
+    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
@@ -188,6 +191,10 @@ static const char *STR[S_COUNT][2] = {
     [S_ETH_CURRENT]     = { "Aktuell bezogen",           "Currently in use" },
     [S_ETH_CUR_NOT_UP]  = { "(keine IP &ndash; Kabel/Link pr&uuml;fen)",
                            "(no IP yet &ndash; check cable/link)" },
+    [S_NTP_SERVER]      = { "NTP-Server",                "NTP server" },
+    [S_COL_TYPE]        = { "Typ",                       "Type" },
+    [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t (60s)",      "Activity (60s)" },
+    [S_ACTIVITY_NONE]   = { "(noch keine Nachrichten)",  "(no messages yet)" },
     [S_LOG_SYS]         = { "System-Log auf SD",        "System log to SD" },
     [S_LOG_FRAMES]      = { "Frame-Log auf SD (CSV)",   "Frame log to SD (CSV)" },
     [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
@@ -308,11 +315,16 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
  * client once the network is up; from then on webserver_handle_packet stamps
  * each frame with the synced wall-clock time and /messages shows HH:MM:SS. */
 
-#define NTP_SERVER "pool.ntp.org"
 /* Europe/Berlin with automatic CET/CEST daylight-saving switch. */
 #define LOCAL_TZ   "CET-1CEST,M3.5.0,M10.5.0/3"
 
 static bool sntp_started;
+
+/* ESP_NETIF_SNTP_DEFAULT_CONFIG stores the hostname pointer, not a copy, and
+ * esp_netif_sntp_init() is only ever called once (see sntp_started below), so
+ * this buffer must stay alive for the SNTP client's whole lifetime. Configured
+ * server takes effect after a reboot, like the other network settings. */
+static char ntp_server_buf[CONFIG_NTP_SERVER_BUFFER_SIZE];
 
 static void time_sync_event_handler(void *arg, esp_event_base_t base,
                                     int32_t event_id, void *event_data)
@@ -329,7 +341,10 @@ static void time_sync_event_handler(void *arg, esp_event_base_t base,
         return;
     }
 
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER);
+    size_t ntp_size = sizeof(ntp_server_buf);
+    config_get_str(CONFIG_INDEX_NTP_SERVER, ntp_server_buf, &ntp_size);
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(ntp_server_buf);
     esp_err_t err = esp_netif_sntp_init(&config);
     if (err != ESP_OK)
     {
@@ -337,7 +352,7 @@ static void time_sync_event_handler(void *arg, esp_event_base_t base,
         return;
     }
     sntp_started = true;
-    ESP_LOGI(TAG, "SNTP client started (%s)", NTP_SERVER);
+    ESP_LOGI(TAG, "SNTP client started (%s)", ntp_server_buf);
 }
 
 /* True once the system clock has been set from NTP. Checking the clock itself
@@ -355,6 +370,8 @@ static bool time_is_synced(void)
 #define WEB_MSG_RING_SIZE   20
 #define WEB_MSG_PREVIEW_LEN 32
 
+#define WEB_MSG_TYPE_LEN 16
+
 typedef struct {
     uint32_t seconds;
     uint32_t microseconds;
@@ -362,6 +379,7 @@ typedef struct {
     uint32_t preview_len;
     int      rssi;
     uint8_t  preview[WEB_MSG_PREVIEW_LEN];
+    char     msgtype[WEB_MSG_TYPE_LEN];
 } web_msg_entry_t;
 
 static web_msg_entry_t msg_ring[WEB_MSG_RING_SIZE];
@@ -369,6 +387,37 @@ static size_t msg_ring_head;
 static size_t msg_ring_count;
 static uint32_t msg_total_count;
 static SemaphoreHandle_t msg_ring_mutex;
+
+/* Message-type breakdown (its_decode labels, e.g. "CAM"/"DENM"/"Signed"/"?")
+ * for the small stats block on the status page. Fixed-size, linear-scan
+ * table: only a handful of distinct labels occur in practice, so this stays
+ * O(1) in effect despite the O(n) scan, and needs no dynamic allocation. */
+#define MSG_TYPE_STATS_SLOTS 12
+typedef struct {
+    char     label[WEB_MSG_TYPE_LEN];
+    uint32_t count;
+} msg_type_stat_t;
+static msg_type_stat_t msg_type_stats[MSG_TYPE_STATS_SLOTS];
+
+static void msg_type_stats_record(const char *label)
+{
+    for (size_t i = 0; i < MSG_TYPE_STATS_SLOTS; i++)
+    {
+        if (msg_type_stats[i].label[0] == '\0')
+        {
+            strlcpy(msg_type_stats[i].label, label, sizeof(msg_type_stats[i].label));
+            msg_type_stats[i].count = 1;
+            return;
+        }
+        if (strcmp(msg_type_stats[i].label, label) == 0)
+        {
+            msg_type_stats[i].count++;
+            return;
+        }
+    }
+    /* All slots taken by distinct labels (shouldn't happen in practice) --
+     * silently drop rather than grow unbounded. */
+}
 
 /* Packet-rate tracking: per-second buckets in a 60-second ring. */
 #define RATE_WINDOW_SECS 60
@@ -428,6 +477,10 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     e->rssi = packet->rssi;
     e->preview_len = packet->length < WEB_MSG_PREVIEW_LEN ? packet->length : WEB_MSG_PREVIEW_LEN;
     memcpy(e->preview, packet->payload, e->preview_len);
+    /* Decoded from the full frame (not just the short preview above) -- CAM/
+     * DENM's BTP header sits well past WEB_MSG_PREVIEW_LEN bytes in. */
+    its_decode_msg_type(packet->payload, packet->length, e->msgtype, sizeof(e->msgtype));
+    msg_type_stats_record(e->msgtype);
 
     msg_ring_head = (msg_ring_head + 1) % WEB_MSG_RING_SIZE;
     if (msg_ring_count < WEB_MSG_RING_SIZE)
@@ -671,6 +724,71 @@ static void send_page_header(httpd_req_t *req, const char *heading)
     send_page_header_refresh(req, heading, 0);
 }
 
+/* Renders the 60-second packet-rate sparkline + per-message-type breakdown
+ * shown on the status page under "Activity". Reuses state that already
+ * exists (rate_buckets fed by rate_record_packet, msg_type_stats fed by
+ * msg_type_stats_record -- both in webserver_handle_packet) rather than
+ * adding new counters. Only one channel is ever active at a time (see
+ * sniffer_get_channel), so this is framed as activity/signal over time
+ * rather than a per-channel breakdown. */
+static void render_activity_stats(httpd_req_t *req)
+{
+    uint64_t now_sec = esp_timer_get_time() / 1000000ull;
+    uint32_t counts[RATE_WINDOW_SECS];
+    uint32_t maxcount = 1;
+    for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
+    {
+        uint64_t sec = now_sec - (RATE_WINDOW_SECS - 1 - i);
+        rate_bucket_t *b = &rate_buckets[sec % RATE_WINDOW_SECS];
+        uint32_t c = (b->sec == sec) ? b->count : 0;
+        counts[i] = c;
+        if (c > maxcount) maxcount = c;
+    }
+
+    static EXT_RAM_BSS_ATTR char svg[6144];
+    size_t o = 0;
+    o += snprintf(svg + o, sizeof(svg) - o,
+        "<svg viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>",
+        RATE_WINDOW_SECS * 4);
+    for (size_t i = 0; i < RATE_WINDOW_SECS && o < sizeof(svg); i++)
+    {
+        int h = counts[i] ? (int)(4 + (counts[i] * 32) / maxcount) : 1;
+        o += snprintf(svg + o, sizeof(svg) - o,
+            "<rect x='%d' y='%d' width='3' height='%d' rx='1' fill='#2f6fd0'/>",
+            (int)i * 4, 40 - h, h);
+    }
+    o += snprintf(svg + o, sizeof(svg) - o, "</svg>");
+
+    char typeline[512] = {0};
+    size_t tl = 0;
+    for (size_t i = 0; i < MSG_TYPE_STATS_SLOTS; i++)
+    {
+        if (msg_type_stats[i].label[0] == '\0')
+            continue;
+        char typeesc[WEB_MSG_TYPE_LEN * 6];
+        html_escape(msg_type_stats[i].label, typeesc, sizeof(typeesc));
+        int n = snprintf(typeline + tl, sizeof(typeline) - tl, "%s%s %lu",
+            tl ? " &middot; " : "", typeesc, (unsigned long)msg_type_stats[i].count);
+        if (n > 0 && (size_t)n < sizeof(typeline) - tl)
+            tl += (size_t)n;
+    }
+
+    /* Sent as separate chunks (title / svg / breakdown) rather than composed
+     * into one buffer: svg alone can approach its 6 KiB capacity, and gcc's
+     * -Werror=format-truncation assumes that worst case for any %s of a
+     * fixed-size array -- concatenating it into another snprintf would need
+     * a implausibly large destination just to satisfy the compiler. */
+    char title[128];
+    snprintf(title, sizeof(title), "<h3>%s</h3>", T(S_ACTIVITY_TITLE));
+    httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, svg, HTTPD_RESP_USE_STRLEN);
+
+    char typeblock[608];
+    snprintf(typeblock, sizeof(typeblock), "<p>%s</p>",
+        typeline[0] ? typeline : T(S_ACTIVITY_NONE));
+    httpd_resp_send_chunk(req, typeblock, HTTPD_RESP_USE_STRLEN);
+}
+
 /* ================================================================== */
 /*  GET /  -- status dashboard                                        */
 /* ================================================================== */
@@ -747,11 +865,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 #ifdef CONFIG_ENABLE_TEMPERATURE
         "<tr><th>%s</th><td>%.1f &deg;C</td></tr>"
 #endif
-        "</table>"
-        "<p>"
-        "<button onclick=\"fetch('/sniffer?action=%s',{method:'POST'}).then(()=>location.reload())\">%s</button> "
-        "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
-        "</p>",
+        "</table>",
         T(S_MSGS_RECEIVED), (unsigned long)msg_total_count,
         T(S_RATE), (unsigned long)rate,
         T(S_UPTIME), uptime_str,
@@ -762,19 +876,152 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         T(S_SNIFFER), running ? "ok" : "bad", running ? T(S_RUNNING) : T(S_STOPPED),
         T(S_CHANNEL), chan_str,
         T(S_MQTT), mqtt_connected_state ? "ok" : "bad",
-        mqtt_connected_state ? T(S_CONNECTED) : T(S_DISCONNECTED),
+        mqtt_connected_state ? T(S_CONNECTED) : T(S_DISCONNECTED)
 #ifdef CONFIG_ENABLE_TEMPERATURE
-        T(S_TEMPERATURE), (double)temperature_get(),
+        , T(S_TEMPERATURE), (double)temperature_get()
 #endif
-        running ? "stop" : "start",
-        running ? T(S_SNIFF_STOP) : T(S_SNIFF_START),
-        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT)
     );
     httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
+
+    render_activity_stats(req);
+
+    char buttons[512];
+    snprintf(buttons, sizeof(buttons),
+        "<p>"
+        "<button onclick=\"fetch('/sniffer?action=%s',{method:'POST'}).then(()=>location.reload())\">%s</button> "
+        "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
+        "</p>",
+        running ? "stop" : "start",
+        running ? T(S_SNIFF_STOP) : T(S_SNIFF_START),
+        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT));
+    httpd_resp_send_chunk(req, buttons, HTTPD_RESP_USE_STRLEN);
+
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
+
+#if CONFIG_HTTPD_WS_SUPPORT
+/* ================================================================== */
+/*  /ws -- live feed for /messages                                    */
+/*                                                                    */
+/*  A periodic timer (see webserver_init) queues a broadcast roughly   */
+/*  once a second, but only while the ring actually changed, onto the  */
+/*  httpd task via httpd_queue_work -- this is the only place raw      */
+/*  frame data crosses to another task, and httpd_ws_send_frame_async  */
+/*  must be called from the httpd task itself (ESP-IDF requirement),   */
+/*  so building the JSON *and* enumerating clients happens inside that */
+/*  one queued work function rather than in the timer callback.        */
+/* ================================================================== */
+
+static httpd_handle_t g_httpd_server;
+static uint32_t ws_last_broadcast_count = UINT32_MAX;
+
+/* Same snapshot-then-render shape as messages_get_handler, but as compact
+ * JSON for the browser to turn into table rows. Field names are single
+ * letters (t/r/l/y/h) purely to keep the payload small on a 10 Mbit link. */
+static size_t build_msg_json(char *out, size_t out_size)
+{
+    static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
+    size_t count = 0;
+    if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        count = msg_ring_count;
+        size_t start = (msg_ring_head + WEB_MSG_RING_SIZE - count) % WEB_MSG_RING_SIZE;
+        for (size_t i = 0; i < count; i++)
+            snapshot[i] = msg_ring[(start + i) % WEB_MSG_RING_SIZE];
+        xSemaphoreGive(msg_ring_mutex);
+    }
+
+    size_t o = 0;
+    o += snprintf(out + o, out_size - o, "[");
+    for (size_t n = 0; n < count && o < out_size; n++)
+    {
+        web_msg_entry_t *e = &snapshot[count - 1 - n];
+
+        char hex[WEB_MSG_PREVIEW_LEN * 3 + 1] = {0};
+        for (uint32_t b = 0; b < e->preview_len; b++)
+            snprintf(hex + b * 3, 4, "%02x ", e->preview[b]);
+
+        char clock[24];
+        format_clock(e->seconds, e->microseconds, clock, sizeof(clock));
+
+        char rssi_str[16];
+        if (e->rssi != 0)
+            snprintf(rssi_str, sizeof(rssi_str), "%d dBm", e->rssi);
+        else
+            snprintf(rssi_str, sizeof(rssi_str), "-");
+
+        /* msgtype/clock/rssi_str/hex only ever contain digits, letters,
+         * spaces, ':', '-', '.' (see its_decode_msg_type/format_clock) --
+         * never attacker- or frame-controlled bytes, so no JSON escaping is
+         * needed for them. */
+        o += snprintf(out + o, o < out_size ? out_size - o : 0,
+            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"}",
+            n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length, e->msgtype, hex);
+    }
+    if (o + 2 <= out_size)
+    {
+        out[o++] = ']';
+        out[o] = '\0';
+    }
+    return o;
+}
+
+static void ws_broadcast_work(void *arg)
+{
+    (void)arg;
+    if (!g_httpd_server)
+        return;
+
+    static EXT_RAM_BSS_ATTR char json[6144];
+    size_t len = build_msg_json(json, sizeof(json));
+
+    size_t max_fds = CONFIG_LWIP_MAX_SOCKETS;
+    int client_fds[CONFIG_LWIP_MAX_SOCKETS];
+    if (httpd_get_client_list(g_httpd_server, &max_fds, client_fds) != ESP_OK)
+        return;
+
+    httpd_ws_frame_t frame = { .type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)json, .len = len };
+    for (size_t i = 0; i < max_fds; i++)
+        if (httpd_ws_get_fd_info(g_httpd_server, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
+            httpd_ws_send_frame_async(g_httpd_server, client_fds[i], &frame);
+}
+
+/* Fires roughly once a second (see webserver_init); cheap no-op when nothing
+ * new arrived, so idle browsers don't cause httpd work-queue churn. */
+static void ws_broadcast_tick(void *arg)
+{
+    (void)arg;
+    if (msg_total_count == ws_last_broadcast_count)
+        return;
+    ws_last_broadcast_count = msg_total_count;
+    httpd_queue_work(g_httpd_server, ws_broadcast_work, NULL);
+}
+
+static esp_err_t ws_get_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET)
+        return ESP_OK; /* handshake done; client just receives broadcasts */
+
+    /* We never expect the browser to send anything meaningful -- just drain
+     * whatever arrived so it doesn't desync the next frame. Oversized frames
+     * (shouldn't happen from our own JS) close the connection by returning
+     * an error, per httpd_uri_t's contract. */
+    httpd_ws_frame_t pkt = {0};
+    pkt.type = HTTPD_WS_TYPE_TEXT;
+    esp_err_t ret = httpd_ws_recv_frame(req, &pkt, 0);
+    if (ret != ESP_OK)
+        return ret;
+    if (pkt.len > 0 && pkt.len < 256)
+    {
+        uint8_t buf[256];
+        pkt.payload = buf;
+        return httpd_ws_recv_frame(req, &pkt, sizeof(buf));
+    }
+    return pkt.len == 0 ? ESP_OK : ESP_FAIL;
+}
+#endif /* CONFIG_HTTPD_WS_SUPPORT */
 
 /* ================================================================== */
 /*  GET /messages                                                     */
@@ -783,7 +1030,10 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 static esp_err_t messages_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
-    send_page_header_refresh(req, T(S_TITLE_MESSAGES), 5);
+    /* Live-updated over WebSocket (see /ws) instead of a periodic full-page
+     * reload, so the table refreshes without flicker or losing scroll
+     * position. */
+    send_page_header(req, T(S_TITLE_MESSAGES));
 
     char intro[256];
     snprintf(intro, sizeof(intro), "<p>");
@@ -791,8 +1041,9 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     snprintf(intro + l, sizeof(intro) - l, T(S_MSG_INTRO), WEB_MSG_RING_SIZE, WEB_MSG_PREVIEW_LEN);
     l = strlen(intro);
     snprintf(intro + l, sizeof(intro) - l,
-        "</p><div class='scroll'><table><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
-        T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_PREVIEW));
+        "</p><div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
+        "<tbody id='msgtbody'>",
+        T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE), T(S_COL_PREVIEW));
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
 
     static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
@@ -823,14 +1074,40 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         else
             snprintf(rssi_str, sizeof(rssi_str), "-");
 
-        char row[512];
+        char typeesc[WEB_MSG_TYPE_LEN * 6];
+        html_escape(e->msgtype, typeesc, sizeof(typeesc));
+
+        char row[640];
         snprintf(row, sizeof(row),
-            "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td><td><code>%s</code></td></tr>",
-            n + 1, clock, rssi_str, (unsigned long)e->length, hex);
+            "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td><td>%s</td><td><code>%s</code></td></tr>",
+            n + 1, clock, rssi_str, (unsigned long)e->length, typeesc, hex);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
-    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+
+#if CONFIG_HTTPD_WS_SUPPORT
+    /* Reconnects with backoff if the socket drops (e.g. Wi-Fi hiccup on the
+     * client, or the device rebooting) -- the static rows above still work
+     * without JS/WebSocket, just without the live updates. */
+    static const char ws_script[] =
+        "<script>(function(){"
+        "var delay=1000;"
+        "function connect(){"
+        "var proto=location.protocol==='https:'?'wss://':'ws://';"
+        "var ws=new WebSocket(proto+location.host+'/ws');"
+        "ws.onmessage=function(ev){"
+        "var d=JSON.parse(ev.data);var h='';"
+        "for(var i=0;i<d.length;i++){var m=d[i];"
+        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td>'+m.y+'</td><td><code>'+m.h+'</code></td></tr>';}"
+        "document.getElementById('msgtbody').innerHTML=h;delay=1000;};"
+        "ws.onclose=function(){setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
+        "}"
+        "connect();"
+        "})();</script>";
+    httpd_resp_send_chunk(req, ws_script, HTTPD_RESP_USE_STRLEN);
+#endif
+
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -905,8 +1182,10 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 
     char nodeid[CONFIG_NODEID_BUFFER_SIZE * 6] = {0};
     char mqtt_uri[CONFIG_MQTT_URI_BUFFER_SIZE * 6] = {0};
+    char ntp_server[CONFIG_NTP_SERVER_BUFFER_SIZE * 6] = {0};
     settings_get_str(CONFIG_INDEX_NODEID, nodeid, sizeof(nodeid));
     settings_get_str(CONFIG_INDEX_MQTT_URI, mqtt_uri, sizeof(mqtt_uri));
+    settings_get_str(CONFIG_INDEX_NTP_SERVER, ntp_server, sizeof(ntp_server));
 
     uint32_t chan = 0;
     config_get_u32(CONFIG_INDEX_AUTOSTART_CHAN, &chan);
@@ -1002,6 +1281,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<input id='ethdns1' value='%s' size='16'> "
         "<input id='ethdns2' value='%s' size='16'>"
         "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input id='ntpserver' value='%s' size='24'></td></tr>"
         "</table>"
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
         "<script>"
@@ -1012,6 +1292,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('chan',document.getElementById('chan').value);"
         "p.append('led',document.getElementById('led').value);"
         "p.append('refreshsec',document.getElementById('refreshsec').value);"
+        "p.append('ntpserver',document.getElementById('ntpserver').value);"
         "p.append('webpasswd',document.getElementById('webpasswd').value);"
         "if(document.getElementById('webpwclear').checked)p.append('webpwclear','1');"
 #if CONFIG_ENABLE_SD
@@ -1060,6 +1341,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_ETH_GATEWAY), ethgw,
         T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
         T(S_ETH_NET_NOTE),
+        T(S_NTP_SERVER), ntp_server,
         T(S_SAVE)
     );
 
@@ -1137,6 +1419,11 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     {
         unsigned long s = strtoul(value, NULL, 10);
         if (s <= 3600 && config_set_u32(CONFIG_INDEX_REFRESH_SEC, (uint32_t)s) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "ntpserver", value, sizeof(value)) == ESP_OK)
+    {
+        url_decode(value);
+        if (value[0] && config_set_str(CONFIG_INDEX_NTP_SERVER, value) == ESP_OK) saved++;
     }
     /* Web password: an explicit "remove" checkbox clears it; otherwise a
      * non-empty value sets it. An empty value leaves the current one unchanged
@@ -2641,6 +2928,15 @@ void webserver_init(void)
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &reboot_timer_handle));
 
+#if CONFIG_HTTPD_WS_SUPPORT
+    static esp_timer_handle_t ws_tick_handle;
+    esp_timer_create_args_t ws_tick_args = {
+        .callback = ws_broadcast_tick, .arg = NULL, .name = "ws_tick"
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&ws_tick_args, &ws_tick_handle));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(ws_tick_handle, 1000000)); /* 1s */
+#endif
+
     ESP_ERROR_CHECK(esp_event_handler_register(MQTT_EVENT_BASE, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
 
     /* Local timezone for /messages timestamps, and start NTP once we get an IP. */
@@ -2653,7 +2949,11 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 28;
+    config.max_uri_handlers = 30;
+    /* One extra over the default 7: the /ws live feed holds a socket open for
+     * as long as /messages is open in a browser tab, on top of normal
+     * requests. */
+    config.max_open_sockets = 8;
     /* Wildcard matching lets one handler answer all the icon variants a browser
      * probes (/favicon*, /apple-touch-icon*). Exact routes still match exactly. */
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -2665,6 +2965,9 @@ void webserver_init(void)
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
         return;
     }
+#if CONFIG_HTTPD_WS_SUPPORT
+    g_httpd_server = server;
+#endif
 
     static const httpd_uri_t uris[] = {
         { .uri = "/",         .method = HTTP_GET,  .handler = status_page_handler },
@@ -2682,6 +2985,9 @@ void webserver_init(void)
         { .uri = "/icon-192.png",      .method = HTTP_GET, .handler = icon192_get_handler },
         { .uri = "/icon-512.png",      .method = HTTP_GET, .handler = icon512_get_handler },
         { .uri = "/manifest.webmanifest", .method = HTTP_GET, .handler = manifest_get_handler },
+#if CONFIG_HTTPD_WS_SUPPORT
+        { .uri = "/ws", .method = HTTP_GET, .handler = ws_get_handler, .is_websocket = true },
+#endif
 #if CONFIG_ENABLE_SD
         { .uri = "/sdcard",          .method = HTTP_GET,  .handler = sdcard_get_handler },
         { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_handler },

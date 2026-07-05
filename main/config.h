@@ -10,6 +10,7 @@ extern "C" {
 #define CONFIG_MQTT_URI_BUFFER_SIZE 256
 #define CONFIG_IPV4_BUFFER_SIZE 16
 #define CONFIG_WEB_PASSWORD_BUFFER_SIZE 64
+#define CONFIG_NTP_SERVER_BUFFER_SIZE 64
 
 void config_init(void);
 
@@ -31,6 +32,7 @@ typedef enum {
     CONFIG_INDEX_LOG_FRAMES,   /* u8  bool: write received-frame CSV log to SD */
     CONFIG_INDEX_LOG_MAX_MB,   /* u32 total SD budget for logs, in MiB */
     CONFIG_INDEX_REFRESH_SEC,  /* u32 web UI auto-refresh interval (0 = off) */
+    CONFIG_INDEX_NTP_SERVER,   /* str NTP server hostname (default pool.ntp.org) */
 } config_index_t;
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out);
