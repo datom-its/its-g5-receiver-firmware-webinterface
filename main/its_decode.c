@@ -36,8 +36,10 @@ static size_t mac80211_header_len(const uint8_t *f, size_t len)
 typedef struct { uint16_t port; const char *name; } btp_port_name_t;
 
 /* Only the two message types we're fully confident about (ETSI TS 103 301
- * well-known BTP port numbers). Everything else is reported as
- * "GeoNet:<port>" -- see the header comment for why. */
+ * well-known BTP port numbers, confirmed against real captured traffic).
+ * Everything else is reported as "GeoNet:<port>" rather than guessed -- e.g.
+ * the roadside traffic-light unit in our test capture used ports 2003/2004,
+ * which aren't in this table on purpose. */
 static const btp_port_name_t KNOWN_BTP_PORTS[] = {
     { 2001, "CAM" },
     { 2002, "DENM" },
@@ -57,6 +59,10 @@ static const char *lookup_btp_name(uint16_t port)
  * GeoBroadcast/-Anycast (types 3/4); Beacon (1) and Location Service (6)
  * frames don't carry a facility payload at all. GeoUnicast (2) isn't used by
  * broadcast facility messages but is included for completeness.
+ * Verified byte-for-byte against real captured traffic (GeoBroadcast carries
+ * a leading sequence-number+reserved field before the position vector, same
+ * as TSB, which is easy to miss -- an earlier version of this code had it
+ * wrong at 40 instead of 44).
  * -1 means "not handled here" (variable-length / out of scope). */
 static int gn_ext_header_len(uint8_t header_type)
 {
@@ -64,11 +70,155 @@ static int gn_ext_header_len(uint8_t header_type)
     {
     case 1: return 24;  /* Beacon: Source LongPV only, nothing follows */
     case 2: return 44;  /* GeoUnicast */
-    case 3: return 40;  /* GeoAnycast */
-    case 4: return 40;  /* GeoBroadcast */
+    case 3: return 44;  /* GeoAnycast: SN+Reserved(4) + Source LongPV(24) + Geo-Area(16) */
+    case 4: return 44;  /* GeoBroadcast: SN+Reserved(4) + Source LongPV(24) + Geo-Area(16) */
     case 5: return 28;  /* TSB, single- or multi-hop */
     default: return -1; /* Location Service (6) and anything else */
     }
+}
+
+typedef struct { uint8_t code; const char *name; } station_type_name_t;
+
+/* GeoNetworking GN_ADDR "ITS-S type" field (5 bits, the first byte of the
+ * Source Position Vector -- see parse_common_onward). Values and names match
+ * Wireshark's GeoNetworking dissector (geonw.src_pos.addr.type); confirmed
+ * against real traffic (a passing bus correctly decoded as "Bus"). Values not
+ * listed (12-14, 16+) aren't defined/observed and fall back to no label. */
+static const station_type_name_t STATION_TYPES[] = {
+    { 1,  "Ped" },       { 2,  "Cyclist" },  { 3,  "Moped" },
+    { 4,  "Motorcycle" },{ 5,  "Car" },      { 6,  "Bus" },
+    { 7,  "LTruck" },    { 8,  "HTruck" },   { 9,  "Trailer" },
+    { 10, "Special" },   { 11, "Tram" },     { 15, "RSU" },
+};
+
+static const char *lookup_station_name(uint8_t t)
+{
+    for (size_t i = 0; i < sizeof(STATION_TYPES) / sizeof(STATION_TYPES[0]); i++)
+        if (STATION_TYPES[i].code == t)
+            return STATION_TYPES[i].name;
+    return NULL; /* 0 = unknown, or a value we don't have a name for */
+}
+
+/* Parses a GeoNetworking "Common Header onward" structure (Common Header +
+ * extended header + BTP-B + facility message). `len` is the size of the
+ * whole buffer `frame` points into; `off` is where the Common Header starts.
+ * Used both directly on unsecured GN packets and on the structure re-embedded
+ * inside a Secured Packet's unsecuredData (see unwrap_secured) -- same shape
+ * either way. `*station_out` receives the sender's station-type name (from
+ * the extended header's Source Position Vector), or NULL if unavailable. */
+static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
+                                 char *out, size_t out_size, const char **station_out)
+{
+    *station_out = NULL;
+    if (len < off + 8) { snprintf(out, out_size, "?"); return; }
+    uint8_t common_nh   = (frame[off]     >> 4) & 0x0F;
+    uint8_t header_type = (frame[off + 1] >> 4) & 0x0F;
+    off += 8;
+
+    if (header_type == 1)
+    {
+        /* Beacon: still carries a Source Position Vector (station type is
+         * readable) but no facility payload follows. */
+        if (len >= off + 1)
+            *station_out = lookup_station_name((frame[off] >> 2) & 0x1F);
+        snprintf(out, out_size, "GeoNet-Beacon");
+        return;
+    }
+    int ext_len = gn_ext_header_len(header_type);
+    if (ext_len < 0) { snprintf(out, out_size, "GeoNet-LS"); return; }
+    if (len < off + (size_t)ext_len) { snprintf(out, out_size, "?"); return; }
+
+    /* The extended header's first field is the Source Position Vector for
+     * GeoUnicast/TSB, but GeoAnycast/GeoBroadcast lead with a 4-byte sequence-
+     * number+reserved field first (verified against real traffic -- this is
+     * the part that's easy to get wrong, see gn_ext_header_len). Either way,
+     * the Position Vector's first byte's low 5 bits (after the 1-bit "manual"
+     * flag) are the sender's station type, independent of the facility
+     * message/BTP port read below. */
+    size_t pv_off = (header_type == 3 || header_type == 4) ? off + 4 : off;
+    *station_out = lookup_station_name((frame[pv_off] >> 2) & 0x1F);
+    off += (size_t)ext_len;
+
+    if (common_nh == 2) /* BTP-B: destination port is the first 2 bytes */
+    {
+        if (len < off + 2) { snprintf(out, out_size, "GeoNet"); return; }
+        uint16_t port = rd_u16be(frame + off);
+        const char *name = lookup_btp_name(port);
+        if (name) snprintf(out, out_size, "%s", name);
+        else      snprintf(out, out_size, "GeoNet:%u", (unsigned)port);
+    }
+    else if (common_nh == 1) { snprintf(out, out_size, "BTP-A"); }
+    else if (common_nh == 3) { snprintf(out, out_size, "IPv6-GN"); }
+    else                     { snprintf(out, out_size, "GeoNet"); }
+}
+
+/* Reads a COER length determinant (ITU-T X.696 clause 8.6) at frame[off]:
+ * short form (top bit clear) is the length directly, in that one byte; long
+ * form (top bit set) gives, in the low 7 bits, how many following big-endian
+ * octets encode the actual length. Returns false if there isn't room, or the
+ * encoded length needs an implausible number of octets (defends against a
+ * corrupt or crafted frame; real messages need at most 2). */
+static bool read_oer_length(const uint8_t *frame, size_t len, size_t off,
+                             size_t *value_len, size_t *field_len)
+{
+    if (off >= len) return false;
+    uint8_t b0 = frame[off];
+    if ((b0 & 0x80) == 0)
+    {
+        *value_len = b0;
+        *field_len = 1;
+        return true;
+    }
+    size_t n = b0 & 0x7F;
+    if (n == 0 || n > 4 || off + 1 + n > len)
+        return false;
+    size_t v = 0;
+    for (size_t i = 0; i < n; i++)
+        v = (v << 8) | frame[off + 1 + i];
+    *value_len = v;
+    *field_len = 1 + n;
+    return true;
+}
+
+/* Unwraps an ETSI TS 103 097 / IEEE 1609.2 Ieee1609Dot2Data "Secured Packet"
+ * envelope (GN Basic Header next-header == 2) far enough to reach the plain
+ * GeoNetworking structure (Common Header onward) it carries as payload --
+ * WITHOUT touching the certificate/signature that follows, since those come
+ * later in the encoding and are simply never read.
+ *
+ * The fixed-shape prefix below (protocolVersion, a CHOICE tag, hashId,
+ * another CHOICE tag, an inner protocolVersion, an inner CHOICE tag, then a
+ * COER length determinant) was verified byte-for-byte identical in shape
+ * across ~2400 real captured V2X frames (mixed CAM from vehicles and
+ * MAP/SPAT-like messages from a roadside unit). Only the two CHOICE tag
+ * *values* are checked (0x81 "signedData", 0x80 "unsecuredData"), since
+ * those are the only variants seen on real traffic; anything else bails out
+ * to plain "Signed" rather than guess at an unverified encoding (e.g. an
+ * encrypted or recursively-signed payload). */
+static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
+                           size_t *inner_off, size_t *inner_len)
+{
+    /* off is right after the 4-byte GN Basic Header. */
+    if (len < off + 6) return false;
+    /* frame[off]   = Ieee1609Dot2Data.protocolVersion (not checked) */
+    uint8_t content_tag = frame[off + 1];
+    /* frame[off+2] = hashId (not checked, doesn't affect layout) */
+    /* frame[off+3] = payload choice-tag (not checked, fixed 1 byte either way) */
+    /* frame[off+4] = payload.data.protocolVersion (not checked) */
+    uint8_t inner_tag = frame[off + 5];
+    if (content_tag != 0x81 || inner_tag != 0x80)
+        return false;
+
+    size_t value_len, field_len;
+    if (!read_oer_length(frame, len, off + 6, &value_len, &field_len))
+        return false;
+    size_t start = off + 6 + field_len;
+    if (start > len)
+        return false;
+
+    *inner_off = start;
+    *inner_len = value_len < (len - start) ? value_len : (len - start);
+    return true;
 }
 
 void its_decode_msg_type(const uint8_t *frame, size_t len, char *out, size_t out_size)
@@ -102,38 +252,26 @@ void its_decode_msg_type(const uint8_t *frame, size_t len, char *out, size_t out
     uint8_t basic_nh = frame[off] & 0x0F;
     off += 4;
 
+    char label[32];
+    const char *station = NULL;
+
     if (basic_nh == 2)
     {
-        /* ETSI TS 103 097 secured envelope: variable-length cert/signature,
-         * not parsed here -- but distinguishing "signed" from "unparseable"
-         * is itself useful, since most real road traffic is signed. */
-        snprintf(out, out_size, "Signed");
-        return;
+        size_t inner_off, inner_len;
+        if (unwrap_secured(frame, len, off, &inner_off, &inner_len))
+            parse_common_onward(frame, inner_off + inner_len, inner_off, label, sizeof(label), &station);
+        else
+            snprintf(label, sizeof(label), "Signed");
     }
-    if (basic_nh != 1) { snprintf(out, out_size, "?"); return; } /* not "Common Header follows" */
-
-    /* Common Header (8 bytes): NextHeader(hi nibble) | Reserved(lo nibble),
-     * HeaderType(hi nibble) | HeaderSubtype(lo nibble), ... */
-    if (len < off + 8) { snprintf(out, out_size, "?"); return; }
-    uint8_t common_nh   = (frame[off]     >> 4) & 0x0F;
-    uint8_t header_type = (frame[off + 1] >> 4) & 0x0F;
-    off += 8;
-
-    if (header_type == 1) { snprintf(out, out_size, "GeoNet-Beacon"); return; }
-    int ext_len = gn_ext_header_len(header_type);
-    if (ext_len < 0) { snprintf(out, out_size, "GeoNet-LS"); return; }
-    if (len < off + (size_t)ext_len) { snprintf(out, out_size, "?"); return; }
-    off += (size_t)ext_len;
-
-    if (common_nh == 2) /* BTP-B: destination port is the first 2 bytes */
+    else if (basic_nh == 1)
     {
-        if (len < off + 2) { snprintf(out, out_size, "GeoNet"); return; }
-        uint16_t port = rd_u16be(frame + off);
-        const char *name = lookup_btp_name(port);
-        if (name) snprintf(out, out_size, "%s", name);
-        else      snprintf(out, out_size, "GeoNet:%u", (unsigned)port);
+        parse_common_onward(frame, len, off, label, sizeof(label), &station);
     }
-    else if (common_nh == 1) { snprintf(out, out_size, "BTP-A"); }
-    else if (common_nh == 3) { snprintf(out, out_size, "IPv6-GN"); }
-    else                     { snprintf(out, out_size, "GeoNet"); }
+    else
+    {
+        snprintf(label, sizeof(label), "?"); /* not "Common Header follows" */
+    }
+
+    if (station) snprintf(out, out_size, "%s %s", station, label);
+    else         snprintf(out, out_size, "%s", label);
 }

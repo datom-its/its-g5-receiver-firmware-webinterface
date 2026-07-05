@@ -86,7 +86,7 @@ typedef enum {
     S_REFRESH_SEC,
     S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
-    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE,
+    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE, S_ACTIVITY_HINT,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
@@ -195,6 +195,8 @@ static const char *STR[S_COUNT][2] = {
     [S_COL_TYPE]        = { "Typ",                       "Type" },
     [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t (60s)",      "Activity (60s)" },
     [S_ACTIVITY_NONE]   = { "(noch keine Nachrichten)",  "(no messages yet)" },
+    [S_ACTIVITY_HINT]   = { "&bdquo;Signed&ldquo; = signierte Nachricht (Zertifikat nicht ausgewertet). &bdquo;?&ldquo; = kein GeoNetworking-Paket erkannt.",
+                            "\"Signed\" = a secured/signed message (certificate not evaluated). \"?\" = not recognised as GeoNetworking." },
     [S_LOG_SYS]         = { "System-Log auf SD",        "System log to SD" },
     [S_LOG_FRAMES]      = { "Frame-Log auf SD (CSV)",   "Frame log to SD (CSV)" },
     [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
@@ -370,7 +372,7 @@ static bool time_is_synced(void)
 #define WEB_MSG_RING_SIZE   20
 #define WEB_MSG_PREVIEW_LEN 32
 
-#define WEB_MSG_TYPE_LEN 16
+#define WEB_MSG_TYPE_LEN 32
 
 typedef struct {
     uint32_t seconds;
@@ -392,7 +394,10 @@ static SemaphoreHandle_t msg_ring_mutex;
  * for the small stats block on the status page. Fixed-size, linear-scan
  * table: only a handful of distinct labels occur in practice, so this stays
  * O(1) in effect despite the O(n) scan, and needs no dynamic allocation. */
-#define MSG_TYPE_STATS_SLOTS 12
+/* Now that labels combine station type + message type (e.g. "Bus CAM", "RSU
+ * GeoNet:2004"), more distinct combinations can occur than with the plain
+ * message-type-only label, hence more slots than before. */
+#define MSG_TYPE_STATS_SLOTS 24
 typedef struct {
     char     label[WEB_MSG_TYPE_LEN];
     uint32_t count;
@@ -759,7 +764,7 @@ static void render_activity_stats(httpd_req_t *req)
     }
     o += snprintf(svg + o, sizeof(svg) - o, "</svg>");
 
-    char typeline[512] = {0};
+    char typeline[1024] = {0};
     size_t tl = 0;
     for (size_t i = 0; i < MSG_TYPE_STATS_SLOTS; i++)
     {
@@ -783,9 +788,9 @@ static void render_activity_stats(httpd_req_t *req)
     httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, svg, HTTPD_RESP_USE_STRLEN);
 
-    char typeblock[608];
-    snprintf(typeblock, sizeof(typeblock), "<p>%s</p>",
-        typeline[0] ? typeline : T(S_ACTIVITY_NONE));
+    char typeblock[1152];
+    snprintf(typeblock, sizeof(typeblock), "<p>%s<br><small>%s</small></p>",
+        typeline[0] ? typeline : T(S_ACTIVITY_NONE), T(S_ACTIVITY_HINT));
     httpd_resp_send_chunk(req, typeblock, HTTPD_RESP_USE_STRLEN);
 }
 
