@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "esp_app_desc.h"
+#include "esp_attr.h"
 #include "esp_chip_info.h"
 #include "esp_console.h"
 #include "esp_event.h"
@@ -27,7 +28,9 @@
 #include "esp_mac.h"
 #include "esp_netif_sntp.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_sntp.h"
+#include "esp_vfs_fat.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "mbedtls/base64.h"
@@ -72,7 +75,7 @@ typedef enum {
     S_CHANNEL, S_MQTT, S_MSGS_RECEIVED, S_RATE, S_FREE_HEAP, S_FREE_PSRAM, S_TEMPERATURE,
     S_RUNNING, S_STOPPED, S_CONNECTED, S_DISCONNECTED,
     S_START, S_STOP, S_REBOOT, S_REBOOT_CONFIRM, S_REBOOTING,
-    S_SNIFFER_LABEL, S_AUTO_REFRESH,
+    S_SNIFFER_LABEL, S_SNIFF_START, S_SNIFF_STOP, S_AUTO_REFRESH,
     S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED,
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
@@ -81,7 +84,9 @@ typedef enum {
     S_REFRESH_SEC,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
-    S_NAV_SD, S_TITLE_SD, S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
+    S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
+    S_FS_INTERNAL, S_FS_NOTE, S_TAR_FOLDER, S_TAR_SELECTED, S_TAR_NONE,
+    S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
     S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
@@ -129,6 +134,8 @@ static const char *STR[S_COUNT][2] = {
     [S_REBOOT_CONFIRM]  = { "Ger\\u00e4t neu starten?", "Reboot the device?" },
     [S_REBOOTING]       = { "Neustart l&auml;uft...",   "Rebooting..." },
     [S_SNIFFER_LABEL]   = { "Sniffer",                  "sniffer" },
+    [S_SNIFF_START]     = { "Sniffer starten",          "Start sniffer" },
+    [S_SNIFF_STOP]      = { "Sniffer stoppen",          "Stop sniffer" },
     [S_AUTO_REFRESH]    = { "Aktualisiert automatisch alle 5 Sekunden.",
                             "Auto-refreshing every 5 seconds." },
     [S_CONFIRM_NEEDED]  = { "Diese Firmware wurde per Update installiert und ist noch nicht best&auml;tigt. "
@@ -184,8 +191,22 @@ static const char *STR[S_COUNT][2] = {
                             "OK, flashed successfully. Rebooting..." },
     [S_UPLOAD_FAIL]     = { "Upload fehlgeschlagen (Verbindungsfehler)",
                             "Upload failed (connection error)" },
-    [S_NAV_SD]          = { "SD-Karte",                 "SD card" },
-    [S_TITLE_SD]        = { "SD-Karte",                 "SD card" },
+    [S_NAV_SD]          = { "Dateiverwaltung",          "Files" },
+    [S_TITLE_SD]        = { "Dateiverwaltung",          "File management" },
+    [S_FS_PARTITIONS]   = { "Flash-Partitionen",        "Flash partitions" },
+    [S_FS_SDCARD]       = { "SD-Karte",                 "SD card" },
+    [S_FS_USED]         = { "belegt",                   "used" },
+    [S_FS_MOUNT_AT]     = { "eingebunden unter",        "mounted at" },
+    [S_FS_INTERNAL]     = { "Interner Speicher",        "Internal storage" },
+    [S_FS_NOTE]         = { "Nur &bdquo;storage&ldquo; (/data) und die SD-Karte sind Dateisysteme mit Ordnern. "
+                            "Die &uuml;brigen Partitionen sind Rohbereiche ohne Dateien "
+                            "(nvs = Einstellungs-Datenbank, ota_* = Firmware-Images) &ndash; nur als Roh-Abbild ladbar.",
+                            "Only \"storage\" (/data) and the SD card are file systems with folders. "
+                            "The other partitions are raw regions without files "
+                            "(nvs = settings database, ota_* = firmware images) &ndash; downloadable only as a raw image." },
+    [S_TAR_FOLDER]      = { "Ordner (.tar)",            "Folder (.tar)" },
+    [S_TAR_SELECTED]    = { "Auswahl (.tar)",           "Selection (.tar)" },
+    [S_TAR_NONE]        = { "Nichts markiert.",         "Nothing selected." },
     [S_SD_NOT_MOUNTED]  = { "Keine SD-Karte eingebunden.", "No SD card mounted." },
     [S_SD_MOUNT]        = { "Einbinden",               "Mount" },
     [S_SD_USAGE]        = { "Belegung",                 "Usage" },
@@ -526,7 +547,7 @@ static const char PAGE_HEADER_FMT[] =
     "<!DOCTYPE html><html lang='%s'><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<link rel='icon' href='/favicon.png' type='image/png'>"
-    "<link rel='apple-touch-icon' href='/apple-touch-icon.png'>"
+    "<link rel='apple-touch-icon' sizes='180x180' href='/apple-touch-icon.png'>"
     "<link rel='manifest' href='/manifest.webmanifest'>"
     "<meta name='theme-color' content='#1c56be'>"
     "<meta name='apple-mobile-web-app-capable' content='yes'>"
@@ -534,17 +555,38 @@ static const char PAGE_HEADER_FMT[] =
     "<meta name='apple-mobile-web-app-title' content='ITS G5 Node'>"
     "%s"  /* optional auto-refresh script */
     "<style>"
-    "body{font-family:sans-serif;margin:2em;background:#111;color:#eee}"
-    "a{color:#6cf}"
-    "table{border-collapse:collapse;width:100%%}"
-    "td,th{border:1px solid #444;padding:4px 8px;text-align:left;font-size:0.9em}"
-    "nav a{margin-right:1em}"
-    "button{background:#333;color:#eee;border:1px solid #555;padding:6px 12px;margin:2px;cursor:pointer}"
-    "input,select{background:#222;color:#eee;border:1px solid #555;padding:4px}"
-    ".ok{color:#4c4}.bad{color:#c44}"
-    ".warn{background:#4a3c00;border:1px solid #aa8800;padding:1em;margin:1em 0;border-radius:4px}"
-    ".lang{float:right;font-size:0.85em}"
-    "</style><title>ITS G5 Node</title></head><body>"
+    "*{box-sizing:border-box}"
+    "body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;background:#0e1725;color:#e6ebf2;line-height:1.5}"
+    ".wrap{width:100%%;max-width:1040px;margin:0 auto;padding:18px clamp(14px,4vw,32px) 48px}"
+    "a{color:#5f9bff;text-decoration:none}a:hover{text-decoration:underline}"
+    "h1{font-size:20px;font-weight:600;margin:6px 0 16px}"
+    "h2{font-size:16px;font-weight:600;margin:22px 0 10px}"
+    "nav{display:flex;flex-wrap:wrap;gap:4px;padding:5px;background:#131c2a;border:1px solid #26303f;border-radius:11px;margin-bottom:18px;font-size:13px;align-items:center}"
+    "nav a{color:#aeb9c9;padding:6px 12px;border-radius:8px}"
+    "nav a:hover{background:#1c2636;text-decoration:none}"
+    "nav a.active{background:#2f6fd0;color:#fff}"
+    "nav .lang{margin-left:auto}"
+    "table{width:100%%;border-collapse:collapse;background:#16202e;border:1px solid #26303f;border-radius:12px;margin:10px 0}"
+    "th,td{text-align:left;padding:10px 14px;font-size:13.5px;border-bottom:1px solid #222c3a}"
+    "tr:last-child>*{border-bottom:none}"
+    "th{color:#8b98ab;font-weight:400}"
+    ".kv th{width:1px;white-space:nowrap;padding-right:32px}.kv td{overflow-wrap:anywhere}"
+    ".scroll{overflow-x:auto;border:1px solid #26303f;border-radius:12px;margin:10px 0}"
+    ".scroll table{border:none;border-radius:0;margin:0;width:auto;min-width:100%%}"
+    ".scroll td,.scroll th{white-space:nowrap}"
+    "button{background:#2f6fd0;color:#fff;border:none;font-size:13.5px;padding:9px 15px;border-radius:9px;margin:3px 5px 3px 0;cursor:pointer}"
+    "button:hover{background:#3b7de0}"
+    "input,select{background:#0e1725;color:#e6ebf2;border:1px solid #38455a;border-radius:8px;padding:7px 9px;font-size:13.5px;max-width:100%%}"
+    ".kv input:not([type=checkbox]):not([type=range]){width:100%%;max-width:360px}"
+    ".ok{display:inline-block;color:#5fe0a0;background:#123726;padding:2px 10px;border-radius:20px;font-size:12px}"
+    ".bad{display:inline-block;color:#ff8a8a;background:#3a1720;padding:2px 10px;border-radius:20px;font-size:12px}"
+    ".warn{background:#3a2e0c;border:1px solid #7a5c12;color:#ffd77a;padding:12px 14px;border-radius:11px;margin:14px 0}"
+    ".lang{font-size:12px}small{color:#8b98ab}"
+    ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:6px 0 4px}"
+    ".card{background:#141d2b;border:1px solid #26303f;border-radius:11px;padding:12px 14px}"
+    ".card .l{font-size:12px;color:#8b98ab;margin-bottom:3px}.card .v{font-size:22px;font-weight:600}"
+    "pre{background:#0b1220;border:1px solid #26303f;border-radius:11px;color:#cfe3ff}"
+    "</style><title>ITS G5 Node</title></head><body><div class='wrap'>"
     "<nav><a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
     "<a href='/system?lang=%s'>%s</a>"
@@ -554,7 +596,11 @@ static const char PAGE_HEADER_FMT[] =
     "<span class='lang'><a href='?lang=%s'>%s</a></span></nav>"
     "<h1>%s</h1>";
 
-static const char PAGE_FOOTER[] = "</body></html>";
+static const char PAGE_FOOTER[] =
+    "<script>document.querySelectorAll('nav a').forEach(function(a){"
+    "var h=(a.getAttribute('href')||'').split('?')[0];"
+    "if(h&&h===location.pathname)a.className='active';});</script>"
+    "</div></body></html>";
 
 static void send_page_header_refresh(httpd_req_t *req, const char *heading, int refresh_secs)
 {
@@ -584,7 +630,7 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
 
     const char *lc = current_lang == LANG_DE ? "de" : "en";
 
-    char header[3072];
+    char header[5120];
     snprintf(header, sizeof(header), PAGE_HEADER_FMT,
              lc, refresh_tag,
              lc, T(S_NAV_STATUS),
@@ -632,19 +678,8 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     uint32_t channel = sniffer_get_channel();
     bool running = sniffer_is_running();
     uint32_t rate = rate_packets_last_minute();
-    /* Internal SRAM is the scarce resource (~400 KB); PSRAM (8 MB) would
-     * otherwise dominate esp_get_free_heap_size() and hide it. Report them
-     * separately using heap_caps. */
-    char heap_str[24];
-    format_bytes(heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_str, sizeof(heap_str));
-    char minheap_str[24];
-    format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), minheap_str, sizeof(minheap_str));
-#ifdef CONFIG_SPIRAM
-    char psram_str[24];
-    format_bytes(heap_caps_get_free_size(MALLOC_CAP_SPIRAM), psram_str, sizeof(psram_str));
-    char minpsram_str[24];
-    format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), minpsram_str, sizeof(minpsram_str));
-#endif
+    /* Memory details live on /system now (single source of truth); the status
+     * page just shows operational state. */
 
     const char *chan_name;
     switch (channel)
@@ -676,51 +711,45 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
     }
 
-    char body[3072];
+    char body[3584];
     snprintf(body, sizeof(body),
-        "<table>"
+        "<div class='cards'>"
+        "<div class='card'><div class='l'>%s</div><div class='v'>%lu</div></div>"
+        "<div class='card'><div class='l'>%s</div><div class='v'>%lu</div></div>"
+        "<div class='card'><div class='l'>%s</div><div class='v'>%s</div></div>"
+        "</div>"
+        "<table class='kv'>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%02x:%02x:%02x:%02x:%02x:%02x</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s</th><td><span class='%s'>%s</span></td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td class='%s'>%s</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td class='%s'>%s</td></tr>"
-        "<tr><th>%s</th><td>%lu</td></tr>"
-        "<tr><th>%s</th><td>%lu</td></tr>"
-        "<tr><th>%s</th><td>%s (min %s)</td></tr>"
-#ifdef CONFIG_SPIRAM
-        "<tr><th>%s</th><td>%s (min %s)</td></tr>"
-#endif
+        "<tr><th>%s</th><td><span class='%s'>%s</span></td></tr>"
 #ifdef CONFIG_ENABLE_TEMPERATURE
         "<tr><th>%s</th><td>%.1f &deg;C</td></tr>"
 #endif
         "</table>"
         "<p>"
-        "<button onclick=\"fetch('/sniffer?action=%s',{method:'POST'}).then(()=>location.reload())\">%s %s</button> "
+        "<button onclick=\"fetch('/sniffer?action=%s',{method:'POST'}).then(()=>location.reload())\">%s</button> "
         "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
         "</p>",
+        T(S_MSGS_RECEIVED), (unsigned long)msg_total_count,
+        T(S_RATE), (unsigned long)rate,
+        T(S_UPTIME), uptime_str,
         T(S_NODEID), nodeid_esc,
         T(S_MAC), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         T(S_FW_VERSION), app_desc->version,
         T(S_HW_VARIANT), CONFIG_HW_VARIANT,
-        T(S_UPTIME), uptime_str,
         T(S_SNIFFER), running ? "ok" : "bad", running ? T(S_RUNNING) : T(S_STOPPED),
         T(S_CHANNEL), chan_str,
         T(S_MQTT), mqtt_connected_state ? "ok" : "bad",
         mqtt_connected_state ? T(S_CONNECTED) : T(S_DISCONNECTED),
-        T(S_MSGS_RECEIVED), (unsigned long)msg_total_count,
-        T(S_RATE), (unsigned long)rate,
-        T(S_FREE_HEAP), heap_str, minheap_str,
-#ifdef CONFIG_SPIRAM
-        T(S_FREE_PSRAM), psram_str, minpsram_str,
-#endif
 #ifdef CONFIG_ENABLE_TEMPERATURE
         T(S_TEMPERATURE), (double)temperature_get(),
 #endif
         running ? "stop" : "start",
-        running ? T(S_STOP) : T(S_START), T(S_SNIFFER_LABEL),
+        running ? T(S_SNIFF_STOP) : T(S_SNIFF_START),
         T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT)
     );
     httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
@@ -744,7 +773,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     snprintf(intro + l, sizeof(intro) - l, T(S_MSG_INTRO), WEB_MSG_RING_SIZE, WEB_MSG_PREVIEW_LEN);
     l = strlen(intro);
     snprintf(intro + l, sizeof(intro) - l,
-        "</p><table><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
+        "</p><div class='scroll'><table><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
         T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_PREVIEW));
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
 
@@ -783,7 +812,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
-    httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -886,7 +915,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     char body[6144];
     snprintf(body, sizeof(body),
         "<p>%s</p>"
-        "<table>"
+        "<table class='kv'>"
         "<tr><th>%s</th><td><input id='nodeid' value='%s' size='24'></td></tr>"
         "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='40'></td></tr>"
         "<tr><th>%s</th><td><select id='chan'>"
@@ -1159,6 +1188,7 @@ static esp_err_t manifest_get_handler(httpd_req_t *req)
         "{\"name\":\"ITS G5 Node\",\"short_name\":\"ITS G5\",\"start_url\":\"/\","
         "\"display\":\"standalone\",\"background_color\":\"#0a1c3a\","
         "\"theme_color\":\"#1c56be\",\"icons\":["
+        "{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\"},"
         "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\"},"
         "{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\"}]}";
     httpd_resp_set_type(req, "application/manifest+json");
@@ -1234,7 +1264,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
 
     char info[1400];
     snprintf(info, sizeof(info),
-        "<table>"
+        "<table class='kv'>"
         "<tr><th>%s</th><td>%s rev %d, %s</td></tr>"
         "<tr><th>%s</th><td>%d</td></tr>"
         "<tr><th>%s</th><td>%d MHz</td></tr>"
@@ -1272,7 +1302,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         uint32_t total_delta = rt2 - rt1;
 
         httpd_resp_send_chunk(req,
-            "<table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
+            "<div class='scroll'><table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
         char hdr[128];
         snprintf(hdr, sizeof(hdr), "%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
                  T(S_SYS_COL_STATE), T(S_SYS_COL_PRIO), T(S_SYS_COL_CPU), T(S_SYS_COL_STACK));
@@ -1297,7 +1327,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
                 (unsigned)a2[i].usStackHighWaterMark);
             httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
         }
-        httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
     }
     free(a1);
     free(a2);
@@ -1504,6 +1534,62 @@ static void sd_full_path(const char *rel, char *out, size_t out_size)
         snprintf(out, out_size, "%s", sdcard_mount_point());
 }
 
+/* Overview of the flash partition layout (what's stored where), at the top of
+ * the file-management page. */
+static void send_fs_overview(httpd_req_t *req)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    static EXT_RAM_BSS_ATTR char hdr[768];
+    snprintf(hdr, sizeof(hdr),
+        "<h2>%s</h2><p>%s</p><div class='scroll'><table><tr><th>%s</th><th>Typ</th><th>%s</th><th></th></tr>",
+        T(S_FS_PARTITIONS), T(S_FS_NOTE), T(S_SD_NAME), T(S_SD_SIZE));
+    httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
+
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    while (it != NULL)
+    {
+        const esp_partition_t *p = esp_partition_get(it);
+        char sz[24];
+        format_bytes(p->size, sz, sizeof(sz));
+        char info[128] = "";
+        char namecell[96];
+        snprintf(namecell, sizeof(namecell), "%s", p->label);
+        if (running && p->address == running->address)
+        {
+            snprintf(info, sizeof(info), "<span class='ok'>aktiv</span>");
+        }
+        else if (p->type == ESP_PARTITION_TYPE_DATA && p->subtype == ESP_PARTITION_SUBTYPE_DATA_FAT)
+        {
+            uint64_t tot = 0, freeb = 0;
+            if (esp_vfs_fat_info("/data", &tot, &freeb) == ESP_OK)
+            {
+                /* The internal FAT filesystem is browsable → link the label to
+                 * the read-only /fs browser, just like the SD card below. */
+                const char *lq = current_lang == LANG_EN ? "en" : "de";
+                char u[24], t[24];
+                format_bytes((uint32_t)(tot - freeb), u, sizeof(u));
+                format_bytes((uint32_t)tot, t, sizeof(t));
+                snprintf(namecell, sizeof(namecell), "<a href='/fs?lang=%s'>%s</a>", lq, p->label);
+                snprintf(info, sizeof(info), "%s /data (%s / %s)", T(S_FS_MOUNT_AT), u, t);
+            }
+        }
+        /* Action cell: any status/mount info, plus a raw-image download of the
+         * partition bytes (esp_partition_read). */
+        char dl[96];
+        snprintf(dl, sizeof(dl), "<a href='/fs/part?label=%s'>&#8595; .img</a>", p->label);
+        char act[256];
+        if (info[0]) snprintf(act, sizeof(act), "%s &middot; %s", info, dl);
+        else         snprintf(act, sizeof(act), "%s", dl);
+        char row[512];
+        snprintf(row, sizeof(row),
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+            namecell, p->type == ESP_PARTITION_TYPE_APP ? "app" : "data", sz, act);
+        httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+        it = esp_partition_next(it);
+    }
+    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t sdcard_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
@@ -1522,6 +1608,12 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     }
 
     send_page_header(req, T(S_TITLE_SD));
+
+    /* Flash partition layout first, then the SD-card section below it. */
+    send_fs_overview(req);
+    char sdhdr[64];
+    snprintf(sdhdr, sizeof(sdhdr), "<h2>%s</h2>", T(S_FS_SDCARD));
+    httpd_resp_send_chunk(req, sdhdr, HTTPD_RESP_USE_STRLEN);
 
     if (!sdcard_is_mounted())
     {
@@ -1552,20 +1644,22 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     /* These scratch buffers are large; keeping them on the stack overflowed the
      * single httpd task. esp_http_server handles requests sequentially in one
-     * task, so 'static' (off-stack, one instance) is safe here. */
-    static char relenc[SD_PATH_MAX * 3];
+     * task, so 'static' (off-stack, one instance) is safe here. EXT_RAM_BSS_ATTR
+     * places them in PSRAM .bss to spare the scarce internal SRAM. */
+    static EXT_RAM_BSS_ATTR char relenc[SD_PATH_MAX * 3];
     url_encode(rel, relenc, sizeof(relenc));
     /* rel is attacker-controlled (from ?p=) and gets displayed as a path
      * breadcrumb below; escape it so it can't inject HTML/JS. */
-    static char relesc[SD_PATH_MAX * 6];
+    static EXT_RAM_BSS_ATTR char relesc[SD_PATH_MAX * 6];
     html_escape(rel, relesc, sizeof(relesc));
 
-    static char top[2560];
+    static EXT_RAM_BSS_ATTR char top[3584];
     snprintf(top, sizeof(top),
         "%s"
         "<p>%s: <input type='file' id='fw'><button onclick='up()'>%s</button> "
         "<span id='ur'></span></p>"
         "<p><button onclick='fmt()'>%s</button> <span id='fr'></span></p>"
+        "<p><button onclick='seltar()'>&#8595; %s</button></p>"
         "<script>"
         "var P='%s';"
         "function up(){var f=document.getElementById('fw').files[0];if(!f){return;}"
@@ -1580,21 +1674,29 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "function del(p){if(!confirm('%s'))return;"
         "var x=new XMLHttpRequest();x.open('POST','/sdcard/delete?p='+encodeURIComponent(p));"
         "x.onload=function(){location.reload();};x.send();}"
+        "function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
+        "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
+        "function(c){s.push(encodeURIComponent(c.value));});"
+        "if(!s.length){alert('%s');return;}location.href='/sdcard/tar?sel='+s.join('|');}"
         "</script>",
         usage,
         T(S_SD_UP_HERE), T(S_SD_UP_BTN),
         T(S_SD_FORMAT),
+        T(S_TAR_SELECTED),
         relenc,
         T(S_UPLOADING),
         T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING),
-        T(S_SD_DELETE_CONFIRM));
+        T(S_SD_DELETE_CONFIRM),
+        T(S_TAR_NONE));
     httpd_resp_send_chunk(req, top, HTTPD_RESP_USE_STRLEN);
 
     /* Own (small) chunk: the path breadcrumb is attacker-controlled (?p=), so
      * it is kept separate from the buffer above and always HTML-escaped. */
-    static char breadcrumb[SD_PATH_MAX * 6 + 96];
+    static EXT_RAM_BSS_ATTR char breadcrumb[SD_PATH_MAX * 6 + 256];
     snprintf(breadcrumb, sizeof(breadcrumb),
-        "<p><b>/%s</b></p><table><tr><th>%s</th><th>%s</th><th></th></tr>",
+        "<p><b>/%s</b></p><div class='scroll'><table>"
+        "<tr><th><input type='checkbox' onclick='selall(this)'></th>"
+        "<th>%s</th><th>%s</th><th></th></tr>",
         relesc, T(S_SD_NAME), T(S_SD_SIZE));
     httpd_resp_send_chunk(req, breadcrumb, HTTPD_RESP_USE_STRLEN);
 
@@ -1609,7 +1711,7 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         url_encode(parent, penc, sizeof(penc));
         char row[SD_PATH_MAX * 3 + 128];
         snprintf(row, sizeof(row),
-            "<tr><td><a href='/sdcard?p=%s'>%s</a></td><td></td><td></td></tr>",
+            "<tr><td></td><td><a href='/sdcard?p=%s'>%s</a></td><td></td><td></td></tr>",
             penc, T(S_SD_PARENT));
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
@@ -1637,27 +1739,32 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
             struct stat st;
             bool is_dir = (stat(childfull, &st) == 0) && S_ISDIR(st.st_mode);
 
-            static char nameesc[256], relenc2[SD_PATH_MAX * 3];
+            /* nameesc = display name (escaped); relenc2 = url-encoded path for
+             * hrefs; relhtml = escaped raw path for the checkbox value (JS reads
+             * it back and url-encodes it for the tar selection). */
+            static EXT_RAM_BSS_ATTR char nameesc[256], relenc2[SD_PATH_MAX * 3];
+            static EXT_RAM_BSS_ATTR char relhtml[SD_PATH_MAX * 6];
             html_escape(de->d_name, nameesc, sizeof(nameesc));
             url_encode(childrel, relenc2, sizeof(relenc2));
+            html_escape(childrel, relhtml, sizeof(relhtml));
 
-            /* row holds relenc2 twice (href + delete) plus the escaped name.
-             * static (off-stack) for the same reason as the buffers above. */
-            static char row[SD_PATH_MAX * 6 + 512];
+            static EXT_RAM_BSS_ATTR char row[SD_PATH_MAX * 14];
             if (is_dir)
             {
                 snprintf(row, sizeof(row),
-                    "<tr><td><a href='/sdcard?p=%s'>%s/</a></td><td></td><td></td></tr>",
-                    relenc2, nameesc);
+                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<td><a href='/sdcard?p=%s'>%s/</a></td><td></td><td></td></tr>",
+                    relhtml, relenc2, nameesc);
             }
             else
             {
                 char sz[32];
                 format_bytes64((uint64_t)st.st_size, sz, sizeof(sz));
                 snprintf(row, sizeof(row),
-                    "<tr><td><a href='/sdcard/download?p=%s'>%s</a></td><td>%s</td>"
+                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<td><a href='/sdcard/download?p=%s'>%s</a></td><td>%s</td>"
                     "<td><button onclick=\"del('%s')\">%s</button></td></tr>",
-                    relenc2, nameesc, sz, relenc2, T(S_SD_DELETE));
+                    relhtml, relenc2, nameesc, sz, relenc2, T(S_SD_DELETE));
             }
             httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
         }
@@ -1667,11 +1774,11 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     if (entries == 0)
     {
         char row[128];
-        snprintf(row, sizeof(row), "<tr><td>%s</td><td></td><td></td></tr>", T(S_SD_EMPTY));
+        snprintf(row, sizeof(row), "<tr><td colspan='4'>%s</td></tr>", T(S_SD_EMPTY));
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
-    httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -1850,6 +1957,425 @@ static esp_err_t sdcard_mount_handler(httpd_req_t *req)
 }
 
 /* ================================================================== */
+/*  /fs  -- read-only browser for the internal FAT storage (/data)    */
+/*  Reached from the "storage" partition row on the file-management    */
+/*  page. Deliberately view+download only: /data is system storage,   */
+/*  no upload/delete/format like the removable SD card.               */
+/* ================================================================== */
+
+#define DATA_MOUNT "/data"
+
+static void data_full_path(const char *rel, char *out, size_t out_size)
+{
+    if (rel && rel[0])
+        snprintf(out, out_size, "%s/%s", DATA_MOUNT, rel);
+    else
+        snprintf(out, out_size, "%s", DATA_MOUNT);
+}
+
+static esp_err_t internal_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+
+    char rel[SD_PATH_MAX];
+    if (!sd_get_relpath(req, rel, sizeof(rel)))
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad path");
+        return ESP_FAIL;
+    }
+
+    const char *lq = current_lang == LANG_EN ? "en" : "de";
+    send_page_header(req, T(S_TITLE_SD));
+
+    /* Heading, back-link to the overview, and the current-path breadcrumb.
+     * rel comes from ?p= (attacker-controlled) → always HTML-escaped. */
+    static EXT_RAM_BSS_ATTR char relesc[SD_PATH_MAX * 6];
+    html_escape(rel, relesc, sizeof(relesc));
+    static EXT_RAM_BSS_ATTR char head[SD_PATH_MAX * 12];
+    snprintf(head, sizeof(head),
+        "<h2>%s &middot; /data</h2>"
+        "<p><a href='/sdcard?lang=%s'>&larr; %s</a></p>"
+        "<p><button onclick='seltar()'>&#8595; %s</button></p>"
+        "<script>function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
+        "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
+        "function(c){s.push(encodeURIComponent(c.value));});"
+        "if(!s.length){alert('%s');return;}location.href='/fs/tar?sel='+s.join('|');}</script>"
+        "<p><b>/%s</b></p><div class='scroll'><table>"
+        "<tr><th><input type='checkbox' onclick='selall(this)'></th>"
+        "<th>%s</th><th>%s</th></tr>",
+        T(S_FS_INTERNAL), lq, T(S_TITLE_SD),
+        T(S_TAR_SELECTED), T(S_TAR_NONE),
+        relesc, T(S_SD_NAME), T(S_SD_SIZE));
+    httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+    /* Parent-directory link */
+    if (rel[0])
+    {
+        char parent[SD_PATH_MAX];
+        strlcpy(parent, rel, sizeof(parent));
+        char *slash = strrchr(parent, '/');
+        if (slash) *slash = '\0'; else parent[0] = '\0';
+        char penc[SD_PATH_MAX * 3];
+        url_encode(parent, penc, sizeof(penc));
+        char row[SD_PATH_MAX * 3 + 128];
+        snprintf(row, sizeof(row),
+            "<tr><td></td><td><a href='/fs?p=%s&amp;lang=%s'>%s</a></td><td></td></tr>",
+            penc, lq, T(S_SD_PARENT));
+        httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+    }
+
+    char full[SD_PATH_MAX];
+    data_full_path(rel, full, sizeof(full));
+    DIR *dir = opendir(full);
+    size_t entries = 0;
+    if (dir)
+    {
+        struct dirent *de;
+        while ((de = readdir(dir)) != NULL)
+        {
+            if (de->d_name[0] == '.')
+                continue;
+            entries++;
+
+            char childrel[SD_PATH_MAX + 256];
+            if (rel[0]) snprintf(childrel, sizeof(childrel), "%s/%s", rel, de->d_name);
+            else        snprintf(childrel, sizeof(childrel), "%s", de->d_name);
+
+            char childfull[SD_PATH_MAX + 288];
+            data_full_path(childrel, childfull, sizeof(childfull));
+            struct stat st;
+            bool is_dir = (stat(childfull, &st) == 0) && S_ISDIR(st.st_mode);
+
+            static EXT_RAM_BSS_ATTR char nameesc[256], relenc2[SD_PATH_MAX * 3];
+            static EXT_RAM_BSS_ATTR char relhtml[SD_PATH_MAX * 6];
+            html_escape(de->d_name, nameesc, sizeof(nameesc));
+            url_encode(childrel, relenc2, sizeof(relenc2));
+            html_escape(childrel, relhtml, sizeof(relhtml));
+
+            static EXT_RAM_BSS_ATTR char row[SD_PATH_MAX * 14];
+            if (is_dir)
+            {
+                snprintf(row, sizeof(row),
+                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<td><a href='/fs?p=%s&amp;lang=%s'>%s/</a></td><td></td></tr>",
+                    relhtml, relenc2, lq, nameesc);
+            }
+            else
+            {
+                char sz[32];
+                format_bytes64((uint64_t)st.st_size, sz, sizeof(sz));
+                snprintf(row, sizeof(row),
+                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<td><a href='/fs/download?p=%s'>%s</a></td><td>%s</td></tr>",
+                    relhtml, relenc2, nameesc, sz);
+            }
+            httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+        }
+        closedir(dir);
+    }
+
+    if (entries == 0)
+    {
+        char row[128];
+        snprintf(row, sizeof(row), "<tr><td colspan='3'>%s</td></tr>", T(S_SD_EMPTY));
+        httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+    }
+
+    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static esp_err_t internal_download_handler(httpd_req_t *req)
+{
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+    char rel[SD_PATH_MAX];
+    if (!sd_get_relpath(req, rel, sizeof(rel)) || rel[0] == '\0')
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad path");
+        return ESP_FAIL;
+    }
+    char full[SD_PATH_MAX];
+    data_full_path(rel, full, sizeof(full));
+    FILE *f = fopen(full, "rb");
+    if (!f)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+    const char *base = strrchr(rel, '/');
+    base = base ? base + 1 : rel;
+    char disp[SD_PATH_MAX + 64];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", base);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+    {
+        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK)
+        {
+            fclose(f);
+            return ESP_FAIL;
+        }
+    }
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ================================================================== */
+/*  Raw partition image download  (/fs/part?label=...)                */
+/* ================================================================== */
+
+static esp_err_t partimg_download_handler(httpd_req_t *req)
+{
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+    char query[128], label[24] = "";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+        httpd_query_key_value(query, "label", label, sizeof(label));
+    url_decode(label);
+    if (label[0] == '\0')
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no label");
+        return ESP_FAIL;
+    }
+    /* Look the label up in the partition table; only a real partition can ever
+     * match, so this can't be used to read arbitrary flash. */
+    const esp_partition_t *p =
+        esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, label);
+    if (!p)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no partition");
+        return ESP_FAIL;
+    }
+    char disp[64];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s.img\"", p->label);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+    static EXT_RAM_BSS_ATTR uint8_t partbuf[4096];
+    for (size_t off = 0; off < p->size; off += sizeof(partbuf))
+    {
+        size_t n = (p->size - off) < sizeof(partbuf) ? (p->size - off) : sizeof(partbuf);
+        if (esp_partition_read(p, off, partbuf, n) != ESP_OK)
+            return ESP_FAIL;
+        if (httpd_resp_send_chunk(req, (const char *)partbuf, n) != ESP_OK)
+            return ESP_FAIL;
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ================================================================== */
+/*  Streaming tar (ustar) writer -- download a whole folder or a       */
+/*  multi-file selection as one .tar. No compression, no external lib. */
+/*  Used by both /sdcard/tar and /fs/tar.                              */
+/* ================================================================== */
+
+#define TAR_BLOCK     512
+#define TAR_MAX_DEPTH 12
+
+static EXT_RAM_BSS_ATTR char tar_hdr[TAR_BLOCK];
+static EXT_RAM_BSS_ATTR char tar_full[SD_PATH_MAX * 2];
+
+/* Write `val` as a NUL-terminated, zero-padded octal string into a header
+ * field of the given width (tar numeric fields). */
+static void tar_num(char *field, size_t width, uint64_t val)
+{
+    for (int i = (int)width - 2; i >= 0; i--) { field[i] = '0' + (char)(val & 7); val >>= 3; }
+    field[width - 1] = '\0';
+}
+
+/* Place the archive member name into the 100-byte name field, using the
+ * 155-byte prefix field for long paths (ustar). Best-effort for very long
+ * paths (keeps the tail). */
+static void tar_put_name(char *hdr, const char *arc)
+{
+    size_t len = strlen(arc);
+    if (len <= 100) { memcpy(hdr, arc, len); return; }
+    size_t split = 0;
+    for (size_t i = 0; i < len; i++)
+        if (arc[i] == '/' && i <= 155 && (len - i - 1) <= 100) { split = i; break; }
+    if (split > 0)
+    {
+        memcpy(hdr + 345, arc, split);
+        memcpy(hdr, arc + split + 1, len - split - 1);
+    }
+    else
+    {
+        memcpy(hdr, arc + (len - 100), 100);
+    }
+}
+
+/* Emit one regular file (header + data + padding). Opens first so a failed
+ * open never leaves a dangling header in the stream. Returns false only on a
+ * transport error (abort the whole archive). */
+static bool tar_send_file(httpd_req_t *req, const char *full, const char *arc, uint64_t size)
+{
+    FILE *f = fopen(full, "rb");
+    if (!f) return true;   /* skip unreadable entry, archive stays valid */
+
+    memset(tar_hdr, 0, TAR_BLOCK);
+    tar_put_name(tar_hdr, arc);
+    tar_num(tar_hdr + 100, 8, 0644);   /* mode */
+    tar_num(tar_hdr + 108, 8, 0);      /* uid  */
+    tar_num(tar_hdr + 116, 8, 0);      /* gid  */
+    tar_num(tar_hdr + 124, 12, size);  /* size */
+    tar_num(tar_hdr + 136, 12, 0);     /* mtime (unknown) */
+    tar_hdr[156] = '0';                /* typeflag: regular file */
+    memcpy(tar_hdr + 257, "ustar", 5); /* magic "ustar\0" */
+    tar_hdr[263] = '0'; tar_hdr[264] = '0';  /* version "00" */
+    memset(tar_hdr + 148, ' ', 8);     /* checksum field = spaces while summing */
+    unsigned sum = 0;
+    for (int i = 0; i < TAR_BLOCK; i++) sum += (unsigned char)tar_hdr[i];
+    char cs[8];
+    snprintf(cs, sizeof(cs), "%06o", sum & 0777777);
+    memcpy(tar_hdr + 148, cs, 6);
+    tar_hdr[154] = '\0';
+    tar_hdr[155] = ' ';
+
+    if (httpd_resp_send_chunk(req, tar_hdr, TAR_BLOCK) != ESP_OK) { fclose(f); return false; }
+
+    uint64_t remaining = size;
+    char buf[TAR_BLOCK];
+    while (remaining > 0)
+    {
+        size_t want = remaining < TAR_BLOCK ? (size_t)remaining : TAR_BLOCK;
+        size_t n = fread(buf, 1, want, f);
+        if (n < want) memset(buf + n, 0, want - n);  /* honour declared size */
+        if (httpd_resp_send_chunk(req, buf, want) != ESP_OK) { fclose(f); return false; }
+        remaining -= want;
+    }
+    fclose(f);
+
+    size_t pad = (size_t)(size % TAR_BLOCK);
+    if (pad)
+    {
+        pad = TAR_BLOCK - pad;
+        memset(buf, 0, pad);
+        if (httpd_resp_send_chunk(req, buf, pad) != ESP_OK) return false;
+    }
+    return true;
+}
+
+/* Recurse the directory whose absolute path currently occupies tar_full[0..len).
+ * `skip` bytes are stripped to form the archive-relative member name. */
+static bool tar_walk(httpd_req_t *req, size_t len, size_t skip, int depth)
+{
+    DIR *d = opendir(tar_full);
+    if (!d) return true;
+    struct dirent *de;
+    bool ok = true;
+    while (ok && (de = readdir(d)) != NULL)
+    {
+        if (de->d_name[0] == '.') continue;
+        int add = snprintf(tar_full + len, sizeof(tar_full) - len, "/%s", de->d_name);
+        if (add < 0 || (size_t)add >= sizeof(tar_full) - len) { tar_full[len] = '\0'; continue; }
+        struct stat st;
+        if (stat(tar_full, &st) == 0)
+        {
+            if (S_ISDIR(st.st_mode))
+            {
+                if (depth > 0) ok = tar_walk(req, len + (size_t)add, skip, depth - 1);
+            }
+            else if (S_ISREG(st.st_mode))
+            {
+                ok = tar_send_file(req, tar_full, tar_full + skip, (uint64_t)st.st_size);
+            }
+        }
+        tar_full[len] = '\0';
+    }
+    closedir(d);
+    return ok;
+}
+
+/* Shared handler body: ?sel=a|b|c (pipe-separated, url-encoded members) OR
+ * ?p=<dir> (a single directory, default = mount root). */
+static esp_err_t tar_download(httpd_req_t *req, const char *mount)
+{
+    size_t skip = strlen(mount) + 1;
+    httpd_resp_set_type(req, "application/x-tar");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"download.tar\"");
+
+    char query[1024];
+    char sel[1024] = "";
+    char pdir[SD_PATH_MAX] = "";
+    bool have_sel = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        if (httpd_query_key_value(query, "sel", sel, sizeof(sel)) == ESP_OK)
+            have_sel = true;
+        else
+            httpd_query_key_value(query, "p", pdir, sizeof(pdir));
+    }
+
+    bool ok = true;
+    if (have_sel)
+    {
+        char *save = NULL;
+        for (char *tok = strtok_r(sel, "|", &save); tok && ok; tok = strtok_r(NULL, "|", &save))
+        {
+            url_decode(tok);
+            if (tok[0] == '\0' || strstr(tok, "..") || has_control_char(tok)) continue;
+            int fl = snprintf(tar_full, sizeof(tar_full), "%s/%s", mount, tok);
+            if (fl < 0 || (size_t)fl >= sizeof(tar_full)) continue;
+            struct stat st;
+            if (stat(tar_full, &st) != 0) continue;
+            if (S_ISDIR(st.st_mode))       ok = tar_walk(req, (size_t)fl, skip, TAR_MAX_DEPTH);
+            else if (S_ISREG(st.st_mode))  ok = tar_send_file(req, tar_full, tar_full + skip, (uint64_t)st.st_size);
+        }
+    }
+    else
+    {
+        url_decode(pdir);
+        if (strstr(pdir, "..") || has_control_char(pdir))
+        {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad path");
+            return ESP_FAIL;
+        }
+        int fl = pdir[0] ? snprintf(tar_full, sizeof(tar_full), "%s/%s", mount, pdir)
+                         : snprintf(tar_full, sizeof(tar_full), "%s", mount);
+        if (fl > 0 && (size_t)fl < sizeof(tar_full))
+            ok = tar_walk(req, (size_t)fl, skip, TAR_MAX_DEPTH);
+    }
+
+    if (ok)  /* two zero blocks terminate the archive */
+    {
+        memset(tar_hdr, 0, TAR_BLOCK);
+        httpd_resp_send_chunk(req, tar_hdr, TAR_BLOCK);
+        httpd_resp_send_chunk(req, tar_hdr, TAR_BLOCK);
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static esp_err_t sdcard_tar_handler(httpd_req_t *req)
+{
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+    if (!sdcard_is_mounted())
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no card");
+        return ESP_FAIL;
+    }
+    return tar_download(req, sdcard_mount_point());
+}
+
+static esp_err_t internal_tar_handler(httpd_req_t *req)
+{
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+    return tar_download(req, DATA_MOUNT);
+}
+
+/* ================================================================== */
 /*  /logs  -- view the SD log files inline in the browser             */
 /* ================================================================== */
 
@@ -1963,6 +2489,12 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
 
 void webserver_init(void)
 {
+    /* Browsers abort keep-alive connections all the time (page reloads via
+     * auto-refresh, navigating away) which logs a harmless
+     * "httpd_sock_err: error in recv : 104" (ECONNRESET) warning on every
+     * occurrence — pure noise, especially in the SD log. Only real errors. */
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+
     msg_ring_mutex = xSemaphoreCreateMutex();
     if (!msg_ring_mutex)
         ESP_LOGE(TAG, "Failed to create message ring mutex");
@@ -2020,6 +2552,11 @@ void webserver_init(void)
         { .uri = "/sdcard/delete",   .method = HTTP_POST, .handler = sdcard_delete_handler },
         { .uri = "/sdcard/format",   .method = HTTP_POST, .handler = sdcard_format_handler },
         { .uri = "/sdcard/mount",    .method = HTTP_POST, .handler = sdcard_mount_handler },
+        { .uri = "/fs",              .method = HTTP_GET,  .handler = internal_get_handler },
+        { .uri = "/fs/download",     .method = HTTP_GET,  .handler = internal_download_handler },
+        { .uri = "/fs/part",         .method = HTTP_GET,  .handler = partimg_download_handler },
+        { .uri = "/fs/tar",          .method = HTTP_GET,  .handler = internal_tar_handler },
+        { .uri = "/sdcard/tar",      .method = HTTP_GET,  .handler = sdcard_tar_handler },
         { .uri = "/logs",            .method = HTTP_GET,  .handler = logs_get_handler },
 #endif
     };

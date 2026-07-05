@@ -4,3 +4,4 @@
 /dependencies.lock
 /sdkconfig.old
 *.pcap
+/PROJECT_CONTEXT.md
