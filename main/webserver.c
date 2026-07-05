@@ -78,7 +78,7 @@ typedef enum {
     S_RUNNING, S_STOPPED, S_CONNECTED, S_DISCONNECTED,
     S_START, S_STOP, S_REBOOT, S_REBOOT_CONFIRM, S_REBOOTING,
     S_SNIFFER_LABEL, S_SNIFF_START, S_SNIFF_STOP, S_AUTO_REFRESH,
-    S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED,
+    S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
     S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
@@ -88,9 +88,10 @@ typedef enum {
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
     S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE, S_TYPE_HINT,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
-    S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL,
+    S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL, S_UPD_CHOOSE_FILE,
+    S_UPD_NOT_CONFIRMED,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
-    S_FS_INTERNAL, S_FS_NOTE, S_TAR_FOLDER, S_TAR_SELECTED, S_TAR_NONE,
+    S_FS_INTERNAL, S_FS_NOTE, S_TAR_SELECTED, S_TAR_NONE,
     S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
@@ -100,7 +101,6 @@ typedef enum {
     S_SYS_COL_STACK,
     S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
     S_LOGS_NONE, S_LOGS_TAIL,
-    S_LANG_OTHER, S_LANG_OTHER_CODE,
     S_COUNT
 } str_id_t;
 
@@ -153,6 +153,9 @@ static const char *STR[S_COUNT][2] = {
      * rather than the &auml; entity. */
     [S_CONFIRMED]       = { "Bestätigt. Rollback abgebrochen.",
                             "Confirmed. Rollback cancelled." },
+    /* Shown via alert(t) after fetch('/confirm').then(r=>r.text()) if
+     * ota_confirm() itself fails (very rare -- was hardcoded English before). */
+    [S_CONFIRM_ERROR]   = { "Fehler beim Bestätigen.", "Error confirming." },
     [S_MSG_INTRO]       = { "Die letzten %d empfangenen Frames, neueste zuerst (nur Vorschau, erste %d Bytes).",
                             "Last %d received frames, newest first (preview only, first %d bytes)." },
     [S_COL_NUM]         = { "#",                        "#" },
@@ -216,14 +219,37 @@ static const char *STR[S_COUNT][2] = {
                             "Select a firmware (.bin) file and click Upload. The device flashes it to the "
                             "inactive OTA partition and reboots. Afterwards you must confirm the update on "
                             "the status page, otherwise it will be rolled back." },
-    [S_UPLOAD]          = { "Hochladen",                "Upload" },
+    /* Deliberately says "flash" not just "upload" -- the button triggers an
+     * immediate flash + reboot in one step, no separate "apply" step, and
+     * that's easy to miss if it only said "Upload" (people click buttons
+     * without reading the paragraph above them). */
+    [S_UPLOAD]          = { "Hochladen &amp; flashen",   "Upload &amp; flash" },
     /* S_UPLOADING is injected into JS and shown via innerText, which does NOT
      * decode HTML entities. Use a JS \u escape (not &auml;) so it renders. */
     [S_UPLOADING]       = { "L\\u00e4dt hoch...",       "Uploading..." },
+    /* Same JS \u-escape reasoning as S_UPLOADING (this one is shown via
+     * alert(), which also doesn't decode HTML entities). Was hardcoded
+     * English before, showing "choose a file first" even in German. */
+    [S_UPD_CHOOSE_FILE] = { "Bitte zuerst eine Datei w\\u00e4hlen",
+                            "Please choose a file first" },
     [S_UPLOAD_OK]       = { "OK, erfolgreich geflasht. Neustart...",
                             "OK, flashed successfully. Rebooting..." },
     [S_UPLOAD_FAIL]     = { "Upload fehlgeschlagen (Verbindungsfehler)",
                             "Upload failed (connection error)" },
+    /* ESP-IDF refuses to start a new OTA while the running app is still
+     * unconfirmed (ESP_ERR_OTA_ROLLBACK_INVALID_STATE) -- by design, so you
+     * can't stack unconfirmed updates. Common right after flashing when the
+     * confirm step on the status page hasn't happened yet.
+     * This string is sent as a plain XHR response body and shown via
+     * .innerText (see update_post_handler / UPDATE_FORM_FMT's xhr.onload) --
+     * NOT parsed as HTML, so literal UTF-8 umlauts are used here, not
+     * &auml;-style entities (those would show up as literal garbage). */
+    [S_UPD_NOT_CONFIRMED] = { "Update nicht möglich: Die aktuell laufende Firmware ist noch nicht "
+                              "bestätigt. Bitte zuerst auf der Status-Seite bestätigen (oder "
+                              "zurückrollen), bevor ein neues Update gemacht wird.",
+                              "Update not possible: the currently running firmware hasn't been confirmed "
+                              "yet. Please confirm it (or roll it back) on the status page before "
+                              "attempting another update." },
     [S_NAV_SD]          = { "Dateiverwaltung",          "Files" },
     [S_TITLE_SD]        = { "Dateiverwaltung",          "File management" },
     [S_FS_PARTITIONS]   = { "Flash-Partitionen",        "Flash partitions" },
@@ -237,7 +263,6 @@ static const char *STR[S_COUNT][2] = {
                             "Only \"storage\" (/data) and the SD card are file systems with folders. "
                             "The other partitions are raw regions without files "
                             "(nvs = settings database, ota_* = firmware images) &ndash; downloadable only as a raw image." },
-    [S_TAR_FOLDER]      = { "Ordner (.tar)",            "Folder (.tar)" },
     [S_TAR_SELECTED]    = { "Auswahl (.tar)",           "Selection (.tar)" },
     [S_TAR_NONE]        = { "Nichts markiert.",         "Nothing selected." },
     [S_SD_NOT_MOUNTED]  = { "Keine SD-Karte eingebunden.", "No SD card mounted." },
@@ -284,8 +309,6 @@ static const char *STR[S_COUNT][2] = {
                             "No log file yet (logging enabled? SD mounted?)." },
     [S_LOGS_TAIL]       = { "Letzte %d KB, neueste Zeilen unten.",
                             "Last %d KB, newest lines at the bottom." },
-    [S_LANG_OTHER]      = { "English",                  "Deutsch" },
-    [S_LANG_OTHER_CODE] = { "en",                       "de" },
 };
 
 /* Per-request language, resolved from ?lang= or a cookie. Because
@@ -645,12 +668,33 @@ static const char PAGE_HEADER_FMT[] =
     "a{color:#5f9bff;text-decoration:none}a:hover{text-decoration:underline}"
     "h1{font-size:20px;font-weight:600;margin:6px 0 16px}"
     "h2{font-size:16px;font-weight:600;margin:22px 0 10px}"
-    "nav{display:flex;flex-wrap:wrap;gap:4px;padding:5px;background:#131c2a;border:1px solid #26303f;border-radius:11px;margin-bottom:18px;font-size:13px;align-items:center}"
+    "h3{font-size:14px;font-weight:600;margin:18px 0 8px;color:#c7d2e0}"
+    /* nav itself does NOT wrap -- .navlinks (the page links) wraps onto
+     * multiple rows internally instead, while .lang (the flag switch) stays
+     * a fixed sibling anchored top-right at all times. Without this split,
+     * .lang used to be just another wrappable flex item and would drop onto
+     * its own orphaned-looking full-width row on narrow screens once the
+     * page links needed more than one row. align-items:flex-start so .lang
+     * sits at the TOP of .navlinks' box even when that box grows taller
+     * (wrapped to several rows), rather than centering into its middle. */
+    "nav{display:flex;align-items:flex-start;gap:8px;padding:5px;background:#131c2a;border:1px solid #26303f;border-radius:11px;margin-bottom:18px;font-size:13px}"
+    ".navlinks{display:flex;flex-wrap:wrap;gap:4px;flex:1;min-width:0;align-items:center}"
     "nav a{color:#aeb9c9;padding:6px 12px;border-radius:8px}"
     "nav a:hover{background:#1c2636;text-decoration:none}"
     "nav a.active{background:#2f6fd0;color:#fff}"
-    "nav .lang{margin-left:auto}"
-    "table{width:100%%;border-collapse:collapse;background:#16202e;border:1px solid #26303f;border-radius:12px;margin:10px 0}"
+    /* Flag toggle: a small pill holding both flags, current language
+     * highlighted -- replaces the old plain text link (just the other
+     * language's name), which looked like a stray, unstyled afterthought
+     * next to the nav pill. */
+    "nav .lang{flex-shrink:0;display:flex;gap:2px;background:#0e1725;border-radius:20px;padding:2px;border:1px solid #26303f}"
+    "nav .lang a{padding:3px 8px;border-radius:16px;font-size:15px;line-height:1.3;opacity:.5}"
+    "nav .lang a:hover{background:#1c2636;text-decoration:none;opacity:.8}"
+    "nav .lang a.active{background:#2f6fd0;opacity:1}"
+    /* border-collapse:separate (not collapse!) -- browsers ignore
+     * border-radius on a <table> when its borders are collapsed, which made
+     * plain (non-.scroll) tables look square-cornered despite this rule.
+     * border-spacing:0 keeps cells touching, same look as collapse. */
+    "table{width:100%%;border-collapse:separate;border-spacing:0;background:#16202e;border:1px solid #26303f;border-radius:12px;margin:10px 0;overflow:hidden}"
     "th,td{text-align:left;padding:10px 14px;font-size:13.5px;border-bottom:1px solid #222c3a}"
     "tr:last-child>*{border-bottom:none}"
     "th{color:#8b98ab;font-weight:400}"
@@ -658,26 +702,79 @@ static const char PAGE_HEADER_FMT[] =
     ".scroll{overflow-x:auto;border:1px solid #26303f;border-radius:12px;margin:10px 0}"
     ".scroll table{border:none;border-radius:0;margin:0;width:auto;min-width:100%%}"
     ".scroll td,.scroll th{white-space:nowrap}"
+    /* Wrappable cells (hex preview, Type -- both can be long, both already
+     * break cleanly at spaces/colons) flow onto multiple lines at ANY width:
+     * the hex preview alone can be ~100 characters, wide enough to force
+     * horizontal scroll even inside the 1040px desktop content column, not
+     * just on phones. .scroll's own horizontal scroll remains as a fallback
+     * for genuinely wide tables that don't opt into wrapping (system/SD). */
+    ".scroll td.wrapcell{white-space:normal;word-break:break-word}"
+    /* On narrow screens only: tighten padding, and on the /messages table
+     * specifically (#mtbl) drop the "#" column -- it's just the row's
+     * position, redundant with reading top-to-bottom, and every column adds
+     * its own padding on top of its content width. */
+    "@media(max-width:640px){"
+    ".scroll th,.scroll td{padding:8px 6px}"
+    "#mtbl th:first-child,#mtbl td:first-child{display:none}"
+    /* .kv th is nowrap+shrink-to-fit, but that shrinks to the WIDEST label
+     * in the WHOLE table (shared column width) -- one long label (e.g.
+     * "Web-Passwort (Benutzer ...)") was enough to push that column, and so
+     * the whole table, wider than the screen on every row, not just its
+     * own. Wrapping it onto 2 lines above this width caps the damage. */
+    ".kv th{white-space:normal;max-width:38vw}"
+    "}"
     "button{background:#2f6fd0;color:#fff;border:none;font-size:13.5px;padding:9px 15px;border-radius:9px;margin:3px 5px 3px 0;cursor:pointer}"
     "button:hover{background:#3b7de0}"
     "input,select{background:#0e1725;color:#e6ebf2;border:1px solid #38455a;border-radius:8px;padding:7px 9px;font-size:13.5px;max-width:100%%}"
+    /* File inputs sit directly before an upload button (/update, file
+     * management); on narrow screens where they don't fit on one line, the
+     * button wrapped to its own line with NO gap above it, looking stuck to
+     * the field. margin-bottom gives that wrapped line some breathing room;
+     * harmless when they DO fit side by side (just a little extra space). */
+    "input[type=file]{margin:4px 8px 8px 0}"
     ".kv input:not([type=checkbox]):not([type=range]){width:100%%;max-width:360px}"
+    /* Range (the LED-brightness slider) was excluded from the rule above and
+     * so had NO width constraint at all -- left to the browser's own
+     * default intrinsic width, which contributed to the table being wider
+     * than necessary in auto layout (every column shares one width across
+     * all rows, so an oversized cell in any single row widens the whole
+     * column, and the whole table). */
+    ".kv input[type=range]{width:100%%;max-width:280px}"
+    /* IPv4 fields only ever hold up to "255.255.255.255" (15 chars) -- the
+     * generic 360px above is sized for long free-text fields (Node-ID,
+     * MQTT-URI) and was too wide for three of these side by side (the DNS
+     * row), overflowing the page especially with the wider German labels
+     * next to them. !important because the generic rule above is otherwise
+     * more specific (two :not() clauses). */
+    ".ipfield{max-width:140px!important}"
     ".ok{display:inline-block;color:#5fe0a0;background:#123726;padding:2px 10px;border-radius:20px;font-size:12px}"
     ".bad{display:inline-block;color:#ff8a8a;background:#3a1720;padding:2px 10px;border-radius:20px;font-size:12px}"
     ".warn{background:#3a2e0c;border:1px solid #7a5c12;color:#ffd77a;padding:12px 14px;border-radius:11px;margin:14px 0}"
-    ".lang{font-size:12px}small{color:#8b98ab}"
+    "small{color:#8b98ab}"
     ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:6px 0 4px}"
     ".card{background:#141d2b;border:1px solid #26303f;border-radius:11px;padding:12px 14px}"
     ".card .l{font-size:12px;color:#8b98ab;margin-bottom:3px}.card .v{font-size:22px;font-weight:600}"
     "pre{background:#0b1220;border:1px solid #26303f;border-radius:11px;color:#cfe3ff}"
     "</style><title>ITS G5 Node</title></head><body><div class='wrap'>"
-    "<nav><a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
+    /* .navlinks is a separate flex item from .lang (see CSS) so the page
+     * links can wrap onto multiple rows on narrow screens while the flag
+     * switch stays anchored top-right instead of dropping onto its own,
+     * disconnected-looking full-width row. */
+    "<nav><div class='navlinks'>"
+    "<a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
     "<a href='/system?lang=%s'>%s</a>"
 #if CONFIG_ENABLE_SD
     "<a href='/sdcard?lang=%s'>%s</a><a href='/logs?lang=%s'>%s</a>"
 #endif
-    "<span class='lang'><a href='?lang=%s'>%s</a></span></nav>"
+    "</div>"
+    /* Flag toggle (Austria/UK), current language highlighted -- replaces the
+     * old plain-text "other language" link. Flags are HTML numeric entities
+     * (regional indicator symbols), not raw UTF-8 in the C source. */
+    "<span class='lang'>"
+    "<a href='?lang=de' class='%s' title='Deutsch'>&#127462;&#127481;</a>"
+    "<a href='?lang=en' class='%s' title='English'>&#127468;&#127463;</a>"
+    "</span></nav>"
     "<h1>%s</h1>";
 
 static const char PAGE_FOOTER[] =
@@ -713,6 +810,8 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
     }
 
     const char *lc = current_lang == LANG_DE ? "de" : "en";
+    const char *lang_de_active = (current_lang == LANG_DE) ? "active" : "";
+    const char *lang_en_active = (current_lang == LANG_EN) ? "active" : "";
 
     char header[5120];
     snprintf(header, sizeof(header), PAGE_HEADER_FMT,
@@ -726,7 +825,7 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
              lc, T(S_NAV_SD),
              lc, T(S_NAV_LOGS),
 #endif
-             T(S_LANG_OTHER_CODE), T(S_LANG_OTHER),
+             lang_de_active, lang_en_active,
              heading);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send_chunk(req, header, HTTPD_RESP_USE_STRLEN);
@@ -857,12 +956,16 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     /* Confirm banner if this firmware is pending verification */
     if (ota_is_pending_verify())
     {
+        /* The POST carries no query string of its own; without ?lang= here,
+         * resolve_language() on that request defaults to German regardless
+         * of the page's actual language (same class of bug as /update). */
+        const char *lc = current_lang == LANG_DE ? "de" : "en";
         char banner[512];
         snprintf(banner, sizeof(banner),
             "<div class='warn'><p>%s</p>"
-            "<button onclick=\"fetch('/confirm',{method:'POST'}).then(r=>r.text()).then(t=>{alert(t);location.reload();})\">%s</button>"
+            "<button onclick=\"fetch('/confirm?lang=%s',{method:'POST'}).then(r=>r.text()).then(t=>{alert(t);location.reload();})\">%s</button>"
             "</div>",
-            T(S_CONFIRM_NEEDED), T(S_CONFIRM_BTN));
+            T(S_CONFIRM_NEEDED), lc, T(S_CONFIRM_BTN));
         httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -1071,7 +1174,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
 
     char thead[384];
     snprintf(thead, sizeof(thead),
-        "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
+        "<div class='scroll'><table id='mtbl'><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
         "<tbody id='msgtbody'>",
         T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE), T(S_COL_PREVIEW));
     httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
@@ -1109,7 +1212,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
 
         char row[640];
         snprintf(row, sizeof(row),
-            "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td><td>%s</td><td><code>%s</code></td></tr>",
+            "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td><td class='wrapcell'>%s</td><td class='wrapcell'><code>%s</code></td></tr>",
             n + 1, clock, rssi_str, (unsigned long)e->length, typeesc, hex);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
@@ -1129,7 +1232,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         "ws.onmessage=function(ev){"
         "var d=JSON.parse(ev.data);var h='';"
         "for(var i=0;i<d.length;i++){var m=d[i];"
-        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td>'+m.y+'</td><td><code>'+m.h+'</code></td></tr>';}"
+        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+m.y+'</td><td class=\"wrapcell\"><code>'+m.h+'</code></td></tr>';}"
         "document.getElementById('msgtbody').innerHTML=h;delay=1000;};"
         "ws.onclose=function(){setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
         "}"
@@ -1209,6 +1312,11 @@ static void settings_get_str(config_index_t index, char *out, size_t out_size)
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
+    /* The save() POST carries no query string of its own; without ?lang=
+     * here, resolve_language() on that request defaults to German
+     * regardless of the page's actual language (same bug class as /update
+     * and /confirm), so "X setting(s) saved." would always show German. */
+    const char *lc = current_lang == LANG_DE ? "de" : "en";
 
     char nodeid[CONFIG_NODEID_BUFFER_SIZE * 6] = {0};
     char mqtt_uri[CONFIG_MQTT_URI_BUFFER_SIZE * 6] = {0};
@@ -1276,8 +1384,17 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     snprintf(body, sizeof(body),
         "<p>%s</p>"
         "<table class='kv'>"
-        "<tr><th>%s</th><td><input id='nodeid' value='%s' size='24'></td></tr>"
-        "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='40'></td></tr>"
+        /* size='16' (not the field's natural full width) on purpose: on a
+         * table with auto layout, the HTML size attribute skews the
+         * browser's column-width computation even under a CSS width:100%
+         * rule, reserving far more column width than necessary (size=40 on
+         * mqtturi alone was enough to push the whole table wider than a
+         * phone screen). The input still shows/edits the full value
+         * (scrollable within the box); only the initial rendered width hint
+         * changes, and the CSS width/max-width rule still governs the
+         * actual size on wider screens. */
+        "<tr><th>%s</th><td><input id='nodeid' value='%s' size='16'></td></tr>"
+        "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='16'></td></tr>"
         "<tr><th>%s</th><td><select id='chan'>"
         "<option value='0'%s>%s</option>"
         "<option value='5900'%s>G5CC (5900)</option>"
@@ -1292,7 +1409,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<span id='ledval'>%u</span></td></tr>"
         "<tr><th>%s</th><td><input id='refreshsec' type='number' min='0' max='3600' value='%lu' size='6'></td></tr>"
         "<tr><th>%s</th><td>"
-        "<input type='password' id='webpasswd' size='24' autocomplete='new-password'>"
+        "<input type='password' id='webpasswd' size='16' autocomplete='new-password'>"
         "<br><small>%s</small>"
         "<br><label><input type='checkbox' id='webpwclear'> %s</label>"
         "</td></tr>"
@@ -1304,14 +1421,14 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 #endif
         "<tr><th></th><td>%s</td></tr>"
         "<tr><th>%s</th><td><input type='checkbox' id='dhcp'%s onchange='dhcpToggle()'></td></tr>"
-        "<tr><th>%s</th><td><input id='ethip' value='%s' size='16'></td></tr>"
-        "<tr><th>%s</th><td><input id='ethnm' value='%s' size='16'></td></tr>"
-        "<tr><th>%s</th><td><input id='ethgw' value='%s' size='16'></td></tr>"
-        "<tr><th>%s</th><td><input id='ethdns0' value='%s' size='16'> "
-        "<input id='ethdns1' value='%s' size='16'> "
-        "<input id='ethdns2' value='%s' size='16'>"
+        "<tr><th>%s</th><td><input class='ipfield' id='ethip' value='%s' size='16' maxlength='15'></td></tr>"
+        "<tr><th>%s</th><td><input class='ipfield' id='ethnm' value='%s' size='16' maxlength='15'></td></tr>"
+        "<tr><th>%s</th><td><input class='ipfield' id='ethgw' value='%s' size='16' maxlength='15'></td></tr>"
+        "<tr><th>%s</th><td><input class='ipfield' id='ethdns0' value='%s' size='16' maxlength='15'> "
+        "<input class='ipfield' id='ethdns1' value='%s' size='16' maxlength='15'> "
+        "<input class='ipfield' id='ethdns2' value='%s' size='16' maxlength='15'>"
         "<br><small>%s</small></td></tr>"
-        "<tr><th>%s</th><td><input id='ntpserver' value='%s' size='24'></td></tr>"
+        "<tr><th>%s</th><td><input id='ntpserver' value='%s' size='16'></td></tr>"
         "</table>"
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
         "<script>"
@@ -1337,7 +1454,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('ethdns0',document.getElementById('ethdns0').value);"
         "p.append('ethdns1',document.getElementById('ethdns1').value);"
         "p.append('ethdns2',document.getElementById('ethdns2').value);"
-        "fetch('/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
+        "fetch('/settings?lang=%s',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
         ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;});"
         "}"
         "function dhcpToggle(){var d=document.getElementById('dhcp').checked;"
@@ -1372,7 +1489,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
         T(S_ETH_NET_NOTE),
         T(S_NTP_SERVER), ntp_server,
-        T(S_SAVE)
+        T(S_SAVE),
+        lc
     );
 
     send_page_header(req, T(S_TITLE_SETTINGS));
@@ -1595,7 +1713,7 @@ static esp_err_t confirm_post_handler(httpd_req_t *req)
     resolve_language(req);
     bool ok = ota_confirm();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_sendstr(req, ok ? T(S_CONFIRMED) : "Error");
+    httpd_resp_sendstr(req, ok ? T(S_CONFIRMED) : T(S_CONFIRM_ERROR));
     return ok ? ESP_OK : ESP_FAIL;
 }
 
@@ -1656,19 +1774,25 @@ static esp_err_t manifest_get_handler(httpd_req_t *req)
 
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
+    bool de = (current_lang == LANG_DE);
     switch (r)
     {
-    case ESP_RST_POWERON:   return "Power-on";
-    case ESP_RST_EXT:       return "External";
-    case ESP_RST_SW:        return "Software";
-    case ESP_RST_PANIC:     return "Panic / exception";
-    case ESP_RST_INT_WDT:   return "Interrupt watchdog";
-    case ESP_RST_TASK_WDT:  return "Task watchdog";
-    case ESP_RST_WDT:       return "Other watchdog";
-    case ESP_RST_DEEPSLEEP: return "Deep-sleep wake";
-    case ESP_RST_BROWNOUT:  return "Brownout";
+    case ESP_RST_POWERON:   return de ? "Kaltstart (Strom angelegt)" : "Power-on (cold boot)";
+    case ESP_RST_EXT:       return de ? "Externer Reset (Pin/Taste)" : "External reset (pin/button)";
+    case ESP_RST_SW:        return de ? "Software (Neustart/Update)"  : "Software (restart/update)";
+    case ESP_RST_PANIC:     return de ? "Absturz (Exception)"        : "Panic / exception";
+    case ESP_RST_INT_WDT:   return de ? "Interrupt-Watchdog"         : "Interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return de ? "Task-Watchdog"              : "Task watchdog";
+    case ESP_RST_WDT:       return de ? "Watchdog"                   : "Other watchdog";
+    case ESP_RST_DEEPSLEEP: return de ? "Deep-Sleep-Aufwachen"       : "Deep-sleep wake";
+    case ESP_RST_BROWNOUT:  return de ? "Unterspannung (Brownout)"   : "Brownout (undervoltage)";
     case ESP_RST_SDIO:      return "SDIO";
-    default:                return "Unknown";
+    case ESP_RST_USB:       return de ? "USB-Reset"                  : "USB reset";
+    case ESP_RST_JTAG:      return de ? "JTAG-Reset"                 : "JTAG reset";
+    case ESP_RST_EFUSE:     return de ? "eFuse-Fehler"               : "eFuse error";
+    case ESP_RST_PWR_GLITCH:return de ? "Spannungs-Glitch"          : "Power glitch";
+    case ESP_RST_CPU_LOCKUP:return de ? "CPU-Lockup (Doppelfehler)"  : "CPU lockup (double fault)";
+    default:                return de ? "Unbekannt"                  : "Unknown";
     }
 }
 
@@ -1802,9 +1926,9 @@ static const char UPDATE_FORM_FMT[] =
     "<script>"
     "function upload(){"
     "var f=document.getElementById('fw').files[0];"
-    "if(!f){alert('choose a file first');return;}"
+    "if(!f){alert('%s');return;}"
     "var xhr=new XMLHttpRequest();"
-    "xhr.open('POST','/update');"
+    "xhr.open('POST','/update?lang=%s');"
     "xhr.onload=function(){document.getElementById('result').innerText=xhr.responseText;};"
     "xhr.onerror=function(){document.getElementById('result').innerText='%s';};"
     "document.getElementById('result').innerText='%s';"
@@ -1818,9 +1942,15 @@ static esp_err_t update_get_handler(httpd_req_t *req)
     if (!check_update_auth(req))
         return send_auth_required(req);
 
+    /* The upload POST carries no query string of its own, so it must be told
+     * the current language explicitly here -- otherwise resolve_language()
+     * on that request defaults to German regardless of what's displayed
+     * (this was the "OTA error always shows German" bug). */
+    const char *lc = current_lang == LANG_DE ? "de" : "en";
+
     char form[1024];
     snprintf(form, sizeof(form), UPDATE_FORM_FMT,
-             T(S_UPD_INTRO), T(S_UPLOAD), T(S_UPLOAD_FAIL), T(S_UPLOADING));
+             T(S_UPD_INTRO), T(S_UPLOAD), T(S_UPD_CHOOSE_FILE), lc, T(S_UPLOAD_FAIL), T(S_UPLOADING));
 
     send_page_header(req, T(S_TITLE_UPDATE));
     httpd_resp_send_chunk(req, form, HTTPD_RESP_USE_STRLEN);
@@ -1855,7 +1985,16 @@ static esp_err_t update_post_handler(httpd_req_t *req)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_begin failed");
+        if (err == ESP_ERR_OTA_ROLLBACK_INVALID_STATE)
+        {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, T(S_UPD_NOT_CONFIRMED));
+        }
+        else
+        {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "esp_ota_begin failed: %s", esp_err_to_name(err));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, msg);
+        }
         return ESP_FAIL;
     }
 
@@ -1892,15 +2031,23 @@ static esp_err_t update_post_handler(httpd_req_t *req)
     err = esp_ota_end(ota_handle);
     if (err != ESP_OK)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-            err == ESP_ERR_OTA_VALIDATE_FAILED ? "Image validation failed" : "esp_ota_end failed");
+        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+        char msg[96];
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED)
+            snprintf(msg, sizeof(msg), "Image validation failed (wrong/corrupt .bin file?)");
+        else
+            snprintf(msg, sizeof(msg), "esp_ota_end failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, msg);
         return ESP_FAIL;
     }
 
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK)
     {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "set_boot_partition failed");
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        char msg[96];
+        snprintf(msg, sizeof(msg), "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, msg);
         return ESP_FAIL;
     }
 
@@ -2773,6 +2920,23 @@ static esp_err_t tar_download(httpd_req_t *req, const char *mount)
     bool ok = true;
     if (have_sel)
     {
+        /* Some browsers/proxies percent-encode the '|' separator in query
+         * strings (the URL spec says leave it raw, but not everyone does).
+         * FAT filenames can never contain '|' (illegal char), so folding
+         * %7C/%7c back into '|' before splitting is unambiguous. */
+        char *r = sel, *w = sel;
+        while (*r)
+        {
+            if (r[0] == '%' && r[1] == '7' && (r[2] == 'C' || r[2] == 'c'))
+            {
+                *w++ = '|';
+                r += 3;
+            }
+            else
+                *w++ = *r++;
+        }
+        *w = '\0';
+
         char *save = NULL;
         for (char *tok = strtok_r(sel, "|", &save); tok && ok; tok = strtok_r(NULL, "|", &save))
         {
@@ -2958,15 +3122,6 @@ void webserver_init(void)
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &reboot_timer_handle));
 
-#if CONFIG_HTTPD_WS_SUPPORT
-    static esp_timer_handle_t ws_tick_handle;
-    esp_timer_create_args_t ws_tick_args = {
-        .callback = ws_broadcast_tick, .arg = NULL, .name = "ws_tick"
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&ws_tick_args, &ws_tick_handle));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(ws_tick_handle, 1000000)); /* 1s */
-#endif
-
     ESP_ERROR_CHECK(esp_event_handler_register(MQTT_EVENT_BASE, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
 
     /* Local timezone for /messages timestamps, and start NTP once we get an IP. */
@@ -2997,6 +3152,14 @@ void webserver_init(void)
     }
 #if CONFIG_HTTPD_WS_SUPPORT
     g_httpd_server = server;
+    /* Started only after httpd is up: the tick queues work onto the httpd
+     * task, so ticking earlier (or with a failed server) would be pointless. */
+    static esp_timer_handle_t ws_tick_handle;
+    esp_timer_create_args_t ws_tick_args = {
+        .callback = ws_broadcast_tick, .arg = NULL, .name = "ws_tick"
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&ws_tick_args, &ws_tick_handle));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(ws_tick_handle, 1000000)); /* 1s */
 #endif
 
     static const httpd_uri_t uris[] = {

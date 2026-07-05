@@ -31,7 +31,11 @@ static void temperature_read(void *)
 
         if (res == ESP_OK)
         {
-            ESP_LOGI(TAG, "temperature: %f", value);
+            /* Only log when the reading actually changed (the LM75 has a
+             * fixed step size, so an unchanged reading compares equal) --
+             * otherwise this fires every 10s forever for no new information. */
+            if (isnan(temperature) || value != temperature)
+                ESP_LOGI(TAG, "temperature: %f", value);
             temperature = value;
             return;
         }

@@ -3,6 +3,8 @@
 #if CONFIG_ENABLE_SD
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
@@ -27,6 +29,26 @@ static const char TAG[] = "SDCARD";
 
 static sdmmc_card_t *card = NULL;
 
+/* Serialises mount/unmount, which mutate `card` and touch the shared SPI bus.
+ * Needed because both the web UI (httpd task) and the system monitor's
+ * auto-remount can call these. First use is from app_main (single-threaded),
+ * so the lazy create below is race-free in practice. */
+static SemaphoreHandle_t sd_lock;
+
+static void sd_lock_take(void)
+{
+    if (!sd_lock)
+        sd_lock = xSemaphoreCreateMutex();
+    if (sd_lock)
+        xSemaphoreTake(sd_lock, portMAX_DELAY);
+}
+
+static void sd_lock_give(void)
+{
+    if (sd_lock)
+        xSemaphoreGive(sd_lock);
+}
+
 /* ================================================================== */
 /*  Public API                                                        */
 /* ================================================================== */
@@ -43,8 +65,11 @@ bool sdcard_is_mounted(void)
 
 esp_err_t sdcard_mount(void)
 {
-    if (card != NULL)
+    sd_lock_take();
+    if (card != NULL) {
+        sd_lock_give();
         return ESP_OK;  /* already mounted */
+    }
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
@@ -80,31 +105,43 @@ esp_err_t sdcard_mount(void)
             ESP_LOGE(TAG, "Failed to initialize the card (%s). Check pull-ups / card inserted.",
                      esp_err_to_name(ret));
         card = NULL;
+        sd_lock_give();
         return ret;
     }
     ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
+    sd_lock_give();
     return ESP_OK;
 }
 
 esp_err_t sdcard_unmount(void)
 {
-    if (card == NULL)
+    sd_lock_take();
+    if (card == NULL) {
+        sd_lock_give();
         return ESP_OK;
+    }
 
     esp_err_t ret = esp_vfs_fat_sdcard_unmount(MOUNT_POINT, card);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Card unmount failed: %s", esp_err_to_name(ret));
+        sd_lock_give();
         return ret;
     }
     card = NULL;
     ESP_LOGI(TAG, "Card unmounted");
+    sd_lock_give();
     return ESP_OK;
 }
 
 esp_err_t sdcard_format(void)
 {
-    if (card == NULL)
+    /* Held for the whole (multi-second) format so a concurrent unmount (e.g.
+     * from the console) can't free `card` mid-operation. */
+    sd_lock_take();
+    if (card == NULL) {
+        sd_lock_give();
         return ESP_ERR_INVALID_STATE;
+    }
 
     ESP_LOGW(TAG, "Formatting SD card...");
     esp_err_t ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, card);
@@ -112,6 +149,7 @@ esp_err_t sdcard_format(void)
         ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
     else
         ESP_LOGI(TAG, "Format done");
+    sd_lock_give();
     return ret;
 }
 

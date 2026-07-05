@@ -63,6 +63,12 @@ uint32_t sniffer_get_channel(void);
 /* True while the sniffer task is capturing. */
 bool sniffer_is_running(void);
 
+/* Monotonic counter bumped once per sniffer-task loop iteration (roughly every
+ * 100 ms while running, independent of traffic). A stalled value while the
+ * sniffer is running means the processing pipeline (MQTT/web/SD handlers) is
+ * wedged -- used by the system monitor for watchdog-style auto-recovery. */
+uint32_t sniffer_get_heartbeat(void);
+
 
 #ifdef __cplusplus
 }

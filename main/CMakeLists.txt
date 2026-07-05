@@ -14,6 +14,7 @@ idf_component_register(
         "sdlog.c"
         "spi.c"
         "spi_eppp.c"
+        "sysmon.c"
         "temperature.c"
         "webserver.c"
     PRIV_REQUIRES
@@ -25,7 +26,9 @@ idf_component_register(
         esp_https_ota
         esp_netif
         esp_wifi
+        esp_system
         fatfs
+        mdns
         nvs_flash
         spi_flash
     INCLUDE_DIRS

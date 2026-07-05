@@ -26,6 +26,7 @@
 #include "sdlog.h"
 #include "spi.h"
 #include "spi_eppp.h"
+#include "sysmon.h"
 #include "temperature.h"
 #include "webserver.h"
 
@@ -180,6 +181,10 @@ void app_main(void)
     register_ota_cmd();
 
     sniffer_autostart();
+
+    /* Supervisory monitor (watchdog auto-recovery, SD auto-remount, low-heap
+     * guard, mDNS). Started last, once everything it watches exists. */
+    sysmon_init();
 
     // start console REPL
     ESP_ERROR_CHECK(esp_console_start_repl(repl));

@@ -122,11 +122,22 @@ static esp_err_t eth_sniffer_cb(esp_eth_handle_t eth_handle, uint8_t *buffer, ui
     return ESP_OK;
 }
 
+static volatile uint32_t sniffer_heartbeat;
+
+uint32_t sniffer_get_heartbeat(void)
+{
+    return sniffer_heartbeat;
+}
+
 static void sniffer_task(void *)
 {
     sniffer_packet_info_t packet_info;
 
     while (is_running) {
+        /* Bump the heartbeat every iteration (even on the queue-receive
+         * timeout, i.e. when idle) so the system monitor can tell "alive but
+         * quiet" from "wedged in a packet handler". */
+        sniffer_heartbeat++;
         /* receive packet info from queue */
         if (xQueueReceive(work_queue, &packet_info, pdMS_TO_TICKS(SNIFFER_PROCESS_PACKET_TIMEOUT_MS)) != pdTRUE) {
             continue;
