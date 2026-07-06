@@ -1389,7 +1389,11 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "World_Imagery/MapServer/tile/{z}/{y}/{x}',"
         "{maxZoom:19,attribution:'Tiles &copy; Esri'});"
         "var baseLayers={};baseLayers[ITS_MAP_L_STREETS]=streets;baseLayers[ITS_MAP_L_SAT]=sat;"
-        "L.control.layers(baseLayers).addTo(map);"
+        /* collapsed:false -- the collapsed state's toggle icon references a
+         * Leaflet default image (images/layers.png) we didn't vendor (kept
+         * to just the emoji markers, no image assets at all), which would
+         * otherwise show as a blank white box until clicked/hovered. */
+        "L.control.layers(baseLayers,null,{collapsed:false}).addTo(map);"
         "var markers={};var haveView=false;"
         "var EMOJI={Ped:'\\ud83d\\udeb6',Cyclist:'\\ud83d\\udeb4',Moped:'\\ud83d\\udef5',"
         "Motorcycle:'\\ud83c\\udfcd',Car:'\\ud83d\\ude97',Bus:'\\ud83d\\ude8c',"
