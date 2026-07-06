@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -29,8 +30,22 @@ extern "C" {
  * in the table falls back to "GeoNet:<port>".
  *
  * `out` is always left as a valid, non-empty, NUL-terminated string, e.g.
- * "Bus CAM", "RSU SPATEM", "DENM", "Signed", "?". */
-void its_decode_msg_type(const uint8_t *frame, size_t len, char *out, size_t out_size);
+ * "Bus CAM", "RSU SPATEM", "DENM", "Signed", "?".
+ *
+ * For a CAM (messageId 2) whose position is available, this also decodes
+ * `basicContainer.referencePosition` (latitude/longitude) and the
+ * `ItsPduHeader.stationId` -- the one part of the message body actually
+ * parsed as ASN.1/UPER rather than a fixed-shape header, since it's what a
+ * live map needs. `*has_position` is set true and `*lat_e7`/`*lon_e7`
+ * (WGS84, in the CAM spec's own 1e-7-degree units) /`*station_id` filled in
+ * only in that case; left false/untouched for every other message type, an
+ * unavailable position (ETSI's dedicated sentinel value), or a truncated
+ * frame. `station_id` is stable per sender, meant as a key to track a moving
+ * vehicle's marker across successive messages -- it is NOT the GeoNetworking
+ * source address used for the station-type label above. */
+void its_decode_frame(const uint8_t *frame, size_t len, char *out, size_t out_size,
+                      bool *has_position, int32_t *lat_e7, int32_t *lon_e7,
+                      uint32_t *station_id);
 
 #ifdef __cplusplus
 }

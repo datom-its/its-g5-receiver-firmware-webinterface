@@ -60,6 +60,13 @@ extern const uint8_t icon_192_png_start[]         asm("_binary_icon_192_png_star
 extern const uint8_t icon_192_png_end[]           asm("_binary_icon_192_png_end");
 extern const uint8_t icon_512_png_start[]         asm("_binary_icon_512_png_start");
 extern const uint8_t icon_512_png_end[]           asm("_binary_icon_512_png_end");
+/* Vendored Leaflet (map JS library) for the /map page -- same embedding as
+ * the icons above, so the web UI stays self-contained; only the actual map
+ * tile images need the internet (see S_MAP_HINT). */
+extern const uint8_t leaflet_js_start[]           asm("_binary_leaflet_js_start");
+extern const uint8_t leaflet_js_end[]             asm("_binary_leaflet_js_end");
+extern const uint8_t leaflet_css_start[]          asm("_binary_leaflet_css_start");
+extern const uint8_t leaflet_css_end[]            asm("_binary_leaflet_css_end");
 
 static const char TAG[] = "WEBSERVER";
 
@@ -101,6 +108,7 @@ typedef enum {
     S_SYS_COL_STACK,
     S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
     S_LOGS_NONE, S_LOGS_TAIL,
+    S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT,
     S_COUNT
 } str_id_t;
 
@@ -309,6 +317,10 @@ static const char *STR[S_COUNT][2] = {
                             "No log file yet (logging enabled? SD mounted?)." },
     [S_LOGS_TAIL]       = { "Letzte %d KB, neueste Zeilen unten.",
                             "Last %d KB, newest lines at the bottom." },
+    [S_NAV_MAP]         = { "Karte",                    "Map" },
+    [S_TITLE_MAP]       = { "Live-Karte",               "Live map" },
+    [S_MAP_HINT]        = { "Positionen aus empfangenen CAM-Nachrichten (Fahrzeuge/RSUs), eingefärbt nach Stationstyp. Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) -- das Gerät selbst nicht.",
+                            "Positions from received CAM messages (vehicles/RSUs), colour-coded by station type. Markers disappear after 60 seconds without a new message from that sender. Loading the map tiles needs the browser to have internet access (OpenStreetMap) -- the device itself doesn't." },
 };
 
 /* Per-request language, resolved from ?lang= or a cookie. Because
@@ -413,6 +425,10 @@ typedef struct {
     int      rssi;
     uint8_t  preview[WEB_MSG_PREVIEW_LEN];
     char     msgtype[WEB_MSG_TYPE_LEN];
+    bool     has_position; /* true if lat_e7/lon_e7/station_id below are valid (CAM only) */
+    int32_t  lat_e7;       /* WGS84 latitude,  1e-7 degree units */
+    int32_t  lon_e7;       /* WGS84 longitude, 1e-7 degree units */
+    uint32_t station_id;   /* ItsPduHeader.stationId; stable per sender, only meaningful if has_position */
 } web_msg_entry_t;
 
 static web_msg_entry_t msg_ring[WEB_MSG_RING_SIZE];
@@ -515,7 +531,8 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     memcpy(e->preview, packet->payload, e->preview_len);
     /* Decoded from the full frame (not just the short preview above) -- CAM/
      * DENM's BTP header sits well past WEB_MSG_PREVIEW_LEN bytes in. */
-    its_decode_msg_type(packet->payload, packet->length, e->msgtype, sizeof(e->msgtype));
+    its_decode_frame(packet->payload, packet->length, e->msgtype, sizeof(e->msgtype),
+                      &e->has_position, &e->lat_e7, &e->lon_e7, &e->station_id);
     msg_type_stats_record(e->msgtype);
 
     msg_ring_head = (msg_ring_head + 1) % WEB_MSG_RING_SIZE;
@@ -763,6 +780,7 @@ static const char PAGE_HEADER_FMT[] =
     "<nav><div class='navlinks'>"
     "<a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
+    "<a href='/map?lang=%s'>%s</a>"
     "<a href='/system?lang=%s'>%s</a>"
 #if CONFIG_ENABLE_SD
     "<a href='/sdcard?lang=%s'>%s</a><a href='/logs?lang=%s'>%s</a>"
@@ -820,6 +838,7 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
              lc, T(S_NAV_MESSAGES),
              lc, T(S_NAV_SETTINGS),
              lc, T(S_NAV_UPDATE),
+             lc, T(S_NAV_MAP),
              lc, T(S_NAV_SYSTEM),
 #if CONFIG_ENABLE_SD
              lc, T(S_NAV_SD),
@@ -1060,7 +1079,10 @@ static uint32_t ws_last_broadcast_count = UINT32_MAX;
 
 /* Same snapshot-then-render shape as messages_get_handler, but as compact
  * JSON for the browser to turn into table rows. Field names are single
- * letters (t/r/l/y/h) purely to keep the payload small on a 10 Mbit link. */
+ * letters (t/r/l/y/h, plus a/o/i for CAM position -- lAtitude e7, lOngitude
+ * e7, station Id) purely to keep the payload small on a 10 Mbit link. a/o/i
+ * are only present when a message actually has a decoded position (CAM
+ * only), so the common case (no position) costs nothing extra on the wire. */
 static size_t build_msg_json(char *out, size_t out_size)
 {
     static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
@@ -1093,13 +1115,18 @@ static size_t build_msg_json(char *out, size_t out_size)
         else
             snprintf(rssi_str, sizeof(rssi_str), "-");
 
+        char possuffix[96] = "";
+        if (e->has_position)
+            snprintf(possuffix, sizeof(possuffix), ",\"a\":%ld,\"o\":%ld,\"i\":%lu",
+                     (long)e->lat_e7, (long)e->lon_e7, (unsigned long)e->station_id);
+
         /* msgtype/clock/rssi_str/hex only ever contain digits, letters,
-         * spaces, ':', '-', '.' (see its_decode_msg_type/format_clock) --
+         * spaces, ':', '-', '.' (see its_decode_frame/format_clock) --
          * never attacker- or frame-controlled bytes, so no JSON escaping is
          * needed for them. */
         o += snprintf(out + o, o < out_size ? out_size - o : 0,
-            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"}",
-            n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length, e->msgtype, hex);
+            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"%s}",
+            n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length, e->msgtype, hex, possuffix);
     }
     if (o + 2 <= out_size)
     {
@@ -1258,6 +1285,103 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         "connect();"
         "})();</script>";
     httpd_resp_send_chunk(req, ws_script, HTTPD_RESP_USE_STRLEN);
+#endif
+
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ================================================================== */
+/*  GET /map -- live positions decoded from CAM frames                */
+/* ================================================================== */
+
+static esp_err_t map_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    send_page_header(req, T(S_TITLE_MAP));
+
+    char hint[1024];
+    snprintf(hint, sizeof(hint),
+        "<p><small>%s</small></p>"
+        "<link rel='stylesheet' href='/leaflet.css'>"
+        "<script src='/leaflet.js'></script>"
+        "<div id='map' style='height:70vh;border-radius:12px;overflow:hidden'></div>",
+        T(S_MAP_HINT));
+    httpd_resp_send_chunk(req, hint, HTTPD_RESP_USE_STRLEN);
+
+    /* Seed the map from whatever's already in the ring buffer, same
+     * snapshot-then-render pattern as messages_get_handler above, so the map
+     * isn't empty for up to ~1s waiting for the next /ws tick. msgtype only
+     * ever contains digits/letters/spaces/':'/'-'/'.' (see its_decode_frame),
+     * so it's safe to embed directly in this JS string literal, same as the
+     * existing build_msg_json (no attacker-controlled bytes to escape). */
+    httpd_resp_send_chunk(req, "<script>var ITS_MAP_SEED=[", HTTPD_RESP_USE_STRLEN);
+
+    static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
+    size_t count = 0;
+    if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        count = msg_ring_count;
+        size_t start = (msg_ring_head + WEB_MSG_RING_SIZE - count) % WEB_MSG_RING_SIZE;
+        for (size_t i = 0; i < count; i++)
+            snapshot[i] = msg_ring[(start + i) % WEB_MSG_RING_SIZE];
+        xSemaphoreGive(msg_ring_mutex);
+    }
+
+    bool first = true;
+    for (size_t n = 0; n < count; n++)
+    {
+        web_msg_entry_t *e = &snapshot[n];
+        if (!e->has_position)
+            continue;
+        char entry[128];
+        snprintf(entry, sizeof(entry), "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\"}",
+                 first ? "" : ",", (unsigned long)e->station_id,
+                 (long)e->lat_e7, (long)e->lon_e7, e->msgtype);
+        httpd_resp_send_chunk(req, entry, HTTPD_RESP_USE_STRLEN);
+        first = false;
+    }
+    httpd_resp_send_chunk(req, "];</script>", HTTPD_RESP_USE_STRLEN);
+
+#if CONFIG_HTTPD_WS_SUPPORT
+    /* Reuses the exact same /ws feed and JSON shape as /messages -- this
+     * script just also reads the a/o/i keys that /messages ignores. Markers
+     * are L.circleMarker (Leaflet core's own SVG rendering), not the default
+     * L.marker, so no marker-icon image assets are needed at all. Keyed by
+     * station_id so a given vehicle's dot moves rather than accumulating;
+     * swept every 5s, evicted after 60s without an update. */
+    static const char MAP_SCRIPT[] =
+        "<script>(function(){"
+        "var map=L.map('map').setView([20,0],2);"
+        "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',"
+        "{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);"
+        "var markers={};var haveView=false;"
+        "var COLORS={Ped:'#ffd76a',Cyclist:'#7ad1ff',Moped:'#7ad1ff',Motorcycle:'#7ad1ff',"
+        "Car:'#5fe0a0',Bus:'#ff9f4a',LTruck:'#ff6a6a',HTruck:'#ff6a6a',"
+        "Trailer:'#c8a0ff',Special:'#c8a0ff',Tram:'#ff9f4a',RSU:'#8b98ab'};"
+        "function colorFor(y){for(var k in COLORS){if(y===k||y.indexOf(k+' ')===0)return COLORS[k];}return '#2f6fd0';}"
+        "function apply(arr){var now=Date.now();"
+        "for(var i=0;i<arr.length;i++){var m=arr[i];if(m.a===undefined)continue;"
+        "var lat=m.a/1e7,lon=m.o/1e7,key=String(m.i);"
+        "if(markers[key]){markers[key].marker.setLatLng([lat,lon]);}"
+        "else{markers[key]={marker:L.circleMarker([lat,lon],{radius:6,weight:1,fillOpacity:.85,"
+        "color:colorFor(m.y||'')}).addTo(map)};}"
+        "markers[key].lastSeen=now;"
+        "if(!haveView){map.setView([lat,lon],15);haveView=true;}}}"
+        "apply(window.ITS_MAP_SEED||[]);"
+        "setInterval(function(){var now=Date.now();for(var k in markers){"
+        "if(now-markers[k].lastSeen>60000){map.removeLayer(markers[k].marker);delete markers[k];}}},5000);"
+        "var delay=1000;"
+        "function connect(){"
+        "var proto=location.protocol==='https:'?'wss://':'ws://';"
+        "var ws=new WebSocket(proto+location.host+'/ws');"
+        "ws.onmessage=function(ev){apply(JSON.parse(ev.data));delay=1000;};"
+        "ws.onclose=function(){setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
+        "}"
+        "connect();"
+        "})();</script>";
+    httpd_resp_send_chunk(req, MAP_SCRIPT, HTTPD_RESP_USE_STRLEN);
 #endif
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -1740,11 +1864,32 @@ static esp_err_t confirm_post_handler(httpd_req_t *req)
 /*  Icons + PWA web-app manifest                                      */
 /* ================================================================== */
 
+static esp_err_t send_asset(httpd_req_t *req, const uint8_t *start, const uint8_t *end,
+                             const char *content_type, const char *cache_control)
+{
+    httpd_resp_set_type(req, content_type);
+    httpd_resp_set_hdr(req, "Cache-Control", cache_control);
+    return httpd_resp_send(req, (const char *)start, end - start);
+}
+
 static esp_err_t send_png(httpd_req_t *req, const uint8_t *start, const uint8_t *end)
 {
-    httpd_resp_set_type(req, "image/png");
-    httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
-    return httpd_resp_send(req, (const char *)start, end - start);
+    return send_asset(req, start, end, "image/png", "max-age=86400");
+}
+
+/* Vendored Leaflet -- see the extern decls above. 1-year "immutable" cache is
+ * safe: the file only changes when the whole device gets reflashed with a
+ * new firmware, which is a brand new binary regardless of any URL. */
+static esp_err_t leaflet_js_get_handler(httpd_req_t *req)
+{
+    return send_asset(req, leaflet_js_start, leaflet_js_end,
+                       "application/javascript", "max-age=31536000, immutable");
+}
+
+static esp_err_t leaflet_css_get_handler(httpd_req_t *req)
+{
+    return send_asset(req, leaflet_css_start, leaflet_css_end,
+                       "text/css", "max-age=31536000, immutable");
 }
 
 /* Browser tab / favicon. Wildcard-matched (/favicon*) so favicon.ico probes
@@ -3176,7 +3321,7 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 30;
+    config.max_uri_handlers = 34; /* 28 routes today + /map, /leaflet.js, /leaflet.css, plus a little headroom */
     /* One extra over the default 7: the /ws live feed holds a socket open for
      * as long as /messages is open in a browser tab, on top of normal
      * requests. */
@@ -3215,6 +3360,9 @@ void webserver_init(void)
         { .uri = "/reboot",   .method = HTTP_POST, .handler = reboot_post_handler },
         { .uri = "/confirm",  .method = HTTP_POST, .handler = confirm_post_handler },
         { .uri = "/system",   .method = HTTP_GET,  .handler = system_get_handler },
+        { .uri = "/map",         .method = HTTP_GET, .handler = map_get_handler },
+        { .uri = "/leaflet.js",  .method = HTTP_GET, .handler = leaflet_js_get_handler },
+        { .uri = "/leaflet.css", .method = HTTP_GET, .handler = leaflet_css_get_handler },
         { .uri = "/favicon*",          .method = HTTP_GET, .handler = favicon_get_handler },
         { .uri = "/apple-touch-icon*", .method = HTTP_GET, .handler = apple_icon_get_handler },
         { .uri = "/icon-192.png",      .method = HTTP_GET, .handler = icon192_get_handler },

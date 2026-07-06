@@ -38,5 +38,7 @@ idf_component_register(
         "assets/apple-touch-icon.png"
         "assets/icon-192.png"
         "assets/icon-512.png"
+        "assets/leaflet.js"
+        "assets/leaflet.css"
 )
 
