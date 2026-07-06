@@ -108,7 +108,7 @@ typedef enum {
     S_SYS_COL_STACK,
     S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
     S_LOGS_NONE, S_LOGS_TAIL,
-    S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT,
+    S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT, S_MAP_LAYER_STREETS, S_MAP_LAYER_SATELLITE,
     S_COUNT
 } str_id_t;
 
@@ -319,8 +319,10 @@ static const char *STR[S_COUNT][2] = {
                             "Last %d KB, newest lines at the bottom." },
     [S_NAV_MAP]         = { "Karte",                    "Map" },
     [S_TITLE_MAP]       = { "Live-Karte",               "Live map" },
-    [S_MAP_HINT]        = { "Positionen aus empfangenen CAM-Nachrichten (Fahrzeuge/RSUs), eingefärbt nach Stationstyp. Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) -- das Gerät selbst nicht.",
-                            "Positions from received CAM messages (vehicles/RSUs), colour-coded by station type. Markers disappear after 60 seconds without a new message from that sender. Loading the map tiles needs the browser to have internet access (OpenStreetMap) -- the device itself doesn't." },
+    [S_MAP_HINT]        = { "Positionen aus empfangenen CAM-Nachrichten (Fahrzeuge/RSUs), als Symbol je Stationstyp. Anklicken zeigt Details. Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) -- das Gerät selbst nicht.",
+                            "Positions from received CAM messages (vehicles/RSUs), shown as an icon per station type. Click a marker for details. Markers disappear after 60 seconds without a new message from that sender. Loading the map tiles needs the browser to have internet access (OpenStreetMap) -- the device itself doesn't." },
+    [S_MAP_LAYER_STREETS] = { "Karte",                  "Map" },
+    [S_MAP_LAYER_SATELLITE] = { "Satellit",             "Satellite" },
 };
 
 /* Per-request language, resolved from ?lang= or a cookie. Because
@@ -1306,16 +1308,26 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "<p><small>%s</small></p>"
         "<link rel='stylesheet' href='/leaflet.css'>"
         "<script src='/leaflet.js'></script>"
+        "<style>.its-emoji-icon{font-size:20px;line-height:26px;text-align:center}</style>"
         "<div id='map' style='height:70vh;border-radius:12px;overflow:hidden'></div>",
         T(S_MAP_HINT));
     httpd_resp_send_chunk(req, hint, HTTPD_RESP_USE_STRLEN);
 
+    /* Layer-control labels, the only two localized strings the client script
+     * needs -- passed in as JS vars so MAP_SCRIPT below can stay one fixed
+     * static string, not a per-request snprintf. */
+    char labels[192];
+    snprintf(labels, sizeof(labels), "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\";</script>",
+             T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE));
+    httpd_resp_send_chunk(req, labels, HTTPD_RESP_USE_STRLEN);
+
     /* Seed the map from whatever's already in the ring buffer, same
      * snapshot-then-render pattern as messages_get_handler above, so the map
-     * isn't empty for up to ~1s waiting for the next /ws tick. msgtype only
-     * ever contains digits/letters/spaces/':'/'-'/'.' (see its_decode_frame),
-     * so it's safe to embed directly in this JS string literal, same as the
-     * existing build_msg_json (no attacker-controlled bytes to escape). */
+     * isn't empty for up to ~1s waiting for the next /ws tick. msgtype/hex
+     * only ever contain digits/letters/spaces/':'/'-'/'.' (see
+     * its_decode_frame/format_clock), so it's safe to embed directly in this
+     * JS string literal, same as the existing build_msg_json (no
+     * attacker-controlled bytes to escape). */
     httpd_resp_send_chunk(req, "<script>var ITS_MAP_SEED=[", HTTPD_RESP_USE_STRLEN);
 
     static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
@@ -1335,10 +1347,17 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         web_msg_entry_t *e = &snapshot[n];
         if (!e->has_position)
             continue;
-        char entry[128];
-        snprintf(entry, sizeof(entry), "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\"}",
+        char clock[24];
+        format_clock(e->seconds, e->microseconds, clock, sizeof(clock));
+        char rssi_str[16];
+        if (e->rssi != 0) snprintf(rssi_str, sizeof(rssi_str), "%d dBm", e->rssi);
+        else              snprintf(rssi_str, sizeof(rssi_str), "-");
+        char entry[224];
+        snprintf(entry, sizeof(entry),
+                 "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\",\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu}",
                  first ? "" : ",", (unsigned long)e->station_id,
-                 (long)e->lat_e7, (long)e->lon_e7, e->msgtype);
+                 (long)e->lat_e7, (long)e->lon_e7, e->msgtype, clock, rssi_str,
+                 (unsigned long)e->length);
         httpd_resp_send_chunk(req, entry, HTTPD_RESP_USE_STRLEN);
         first = false;
     }
@@ -1347,26 +1366,46 @@ static esp_err_t map_get_handler(httpd_req_t *req)
 #if CONFIG_HTTPD_WS_SUPPORT
     /* Reuses the exact same /ws feed and JSON shape as /messages -- this
      * script just also reads the a/o/i keys that /messages ignores. Markers
-     * are L.circleMarker (Leaflet core's own SVG rendering), not the default
-     * L.marker, so no marker-icon image assets are needed at all. Keyed by
-     * station_id so a given vehicle's dot moves rather than accumulating;
-     * swept every 5s, evicted after 60s without an update. */
+     * are L.marker with a divIcon (an emoji glyph, per station type) rather
+     * than an image -- no marker-icon asset needed, and richer than a plain
+     * dot. bindPopup() makes them clickable, showing whatever fields exist.
+     * Keyed by station_id so a given vehicle's marker moves rather than
+     * accumulating; swept every 5s, evicted after 60s without an update.
+     * Initial view is guessed from the browser's IANA timezone (works over
+     * plain HTTP; the Geolocation API needs HTTPS/localhost, which this
+     * device's plain-HTTP LAN address doesn't satisfy) -- overridden as soon
+     * as a real position arrives (first fix recenters once, see haveView). */
     static const char MAP_SCRIPT[] =
         "<script>(function(){"
-        "var map=L.map('map').setView([20,0],2);"
-        "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',"
+        "var TZVIEW={'Europe/Vienna':[47.6,14.5,7],'Europe/Berlin':[51,10.3,6],"
+        "'Europe/Zurich':[46.9,8.2,7],'Europe':[50,10,4],'Africa':[2,20,3],"
+        "'America':[40,-95,3],'Asia':[30,100,3],'Australia':[-25,135,4],'Pacific':[-20,-140,3]};"
+        "var tz='';try{tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){}"
+        "var g=TZVIEW[tz]||TZVIEW[tz.split('/')[0]]||[20,0,2];"
+        "var map=L.map('map').setView([g[0],g[1]],g[2]);"
+        "var streets=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',"
         "{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);"
+        "var sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/"
+        "World_Imagery/MapServer/tile/{z}/{y}/{x}',"
+        "{maxZoom:19,attribution:'Tiles &copy; Esri'});"
+        "var baseLayers={};baseLayers[ITS_MAP_L_STREETS]=streets;baseLayers[ITS_MAP_L_SAT]=sat;"
+        "L.control.layers(baseLayers).addTo(map);"
         "var markers={};var haveView=false;"
-        "var COLORS={Ped:'#ffd76a',Cyclist:'#7ad1ff',Moped:'#7ad1ff',Motorcycle:'#7ad1ff',"
-        "Car:'#5fe0a0',Bus:'#ff9f4a',LTruck:'#ff6a6a',HTruck:'#ff6a6a',"
-        "Trailer:'#c8a0ff',Special:'#c8a0ff',Tram:'#ff9f4a',RSU:'#8b98ab'};"
-        "function colorFor(y){for(var k in COLORS){if(y===k||y.indexOf(k+' ')===0)return COLORS[k];}return '#2f6fd0';}"
+        "var EMOJI={Ped:'\\ud83d\\udeb6',Cyclist:'\\ud83d\\udeb4',Moped:'\\ud83d\\udef5',"
+        "Motorcycle:'\\ud83c\\udfcd',Car:'\\ud83d\\ude97',Bus:'\\ud83d\\ude8c',"
+        "LTruck:'\\ud83d\\ude9a',HTruck:'\\ud83d\\ude9b',Trailer:'\\ud83d\\ude9b',"
+        "Special:'\\ud83d\\udea7',Tram:'\\ud83d\\ude8a',RSU:'\\ud83d\\udce1'};"
+        "function emojiFor(y){for(var k in EMOJI){if(y===k||y.indexOf(k+' ')===0)return EMOJI[k];}return '\\ud83d\\udccd';}"
+        "function iconFor(y){return L.divIcon({html:emojiFor(y),className:'its-emoji-icon',"
+        "iconSize:[26,26],iconAnchor:[13,13]});}"
+        "function popupHtml(m){return '<b>'+(m.y||'?')+'</b><br>'+(m.t||'-')+' &middot; '"
+        "+(m.r||'-')+' &middot; '+(m.l||'-')+' B<br>#'+m.i;}"
         "function apply(arr){var now=Date.now();"
         "for(var i=0;i<arr.length;i++){var m=arr[i];if(m.a===undefined)continue;"
         "var lat=m.a/1e7,lon=m.o/1e7,key=String(m.i);"
         "if(markers[key]){markers[key].marker.setLatLng([lat,lon]);}"
-        "else{markers[key]={marker:L.circleMarker([lat,lon],{radius:6,weight:1,fillOpacity:.85,"
-        "color:colorFor(m.y||'')}).addTo(map)};}"
+        "else{markers[key]={marker:L.marker([lat,lon],{icon:iconFor(m.y||'')}).addTo(map)};}"
+        "markers[key].marker.bindPopup(popupHtml(m));"
         "markers[key].lastSeen=now;"
         "if(!haveView){map.setView([lat,lon],15);haveView=true;}}}"
         "apply(window.ITS_MAP_SEED||[]);"
