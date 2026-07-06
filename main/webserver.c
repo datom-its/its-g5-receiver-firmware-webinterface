@@ -848,14 +848,33 @@ static void render_activity_stats(httpd_req_t *req)
     uint64_t now_sec = esp_timer_get_time() / 1000000ull;
     uint32_t counts[RATE_WINDOW_SECS];
     uint32_t maxcount = 1;
-    for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
+    /* rate_buckets[]/msg_type_stats[] are written under msg_ring_mutex (see
+     * webserver_handle_packet -> rate_record_packet/msg_type_stats_record),
+     * but were previously read here without it -- a label could be observed
+     * mid-strlcpy, torn between old and new bytes (harmless since both sides
+     * use fixed-size arrays, just a cosmetically wrong/flickering label, but
+     * worth doing correctly). Snapshot both under the same lock, then render
+     * from the snapshot so the lock isn't held during the (slower) chunked
+     * HTTP writes below. */
+    static msg_type_stat_t type_snapshot[MSG_TYPE_STATS_SLOTS];
+    if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
-        uint64_t sec = now_sec - (RATE_WINDOW_SECS - 1 - i);
-        rate_bucket_t *b = &rate_buckets[sec % RATE_WINDOW_SECS];
-        uint32_t c = (b->sec == sec) ? b->count : 0;
-        counts[i] = c;
-        if (c > maxcount) maxcount = c;
+        for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
+        {
+            uint64_t sec = now_sec - (RATE_WINDOW_SECS - 1 - i);
+            rate_bucket_t *b = &rate_buckets[sec % RATE_WINDOW_SECS];
+            counts[i] = (b->sec == sec) ? b->count : 0;
+        }
+        memcpy(type_snapshot, msg_type_stats, sizeof(type_snapshot));
+        xSemaphoreGive(msg_ring_mutex);
     }
+    else
+    {
+        memset(counts, 0, sizeof(counts));
+        memset(type_snapshot, 0, sizeof(type_snapshot));
+    }
+    for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
+        if (counts[i] > maxcount) maxcount = counts[i];
 
     static EXT_RAM_BSS_ATTR char svg[6144];
     size_t o = 0;
@@ -875,12 +894,12 @@ static void render_activity_stats(httpd_req_t *req)
     size_t tl = 0;
     for (size_t i = 0; i < MSG_TYPE_STATS_SLOTS; i++)
     {
-        if (msg_type_stats[i].label[0] == '\0')
+        if (type_snapshot[i].label[0] == '\0')
             continue;
         char typeesc[WEB_MSG_TYPE_LEN * 6];
-        html_escape(msg_type_stats[i].label, typeesc, sizeof(typeesc));
+        html_escape(type_snapshot[i].label, typeesc, sizeof(typeesc));
         int n = snprintf(typeline + tl, sizeof(typeline) - tl, "%s%s %lu",
-            tl ? " &middot; " : "", typeesc, (unsigned long)msg_type_stats[i].count);
+            tl ? " &middot; " : "", typeesc, (unsigned long)type_snapshot[i].count);
         if (n > 0 && (size_t)n < sizeof(typeline) - tl)
             tl += (size_t)n;
     }
@@ -2109,6 +2128,20 @@ static bool has_control_char(const char *s)
     return false;
 }
 
+/* Copies `name` into `out`, replacing '"' with '_'. Used to build the
+ * filename value of a Content-Disposition header: a bare '"' in the source
+ * filename would otherwise break out of the quoted value. Belt-and-braces
+ * defense-in-depth -- upload rejects '"' in new filenames already, but this
+ * also covers files that reached the card some other way (e.g. copied onto
+ * it directly with a card reader, bypassing that check entirely). */
+static void sanitize_disp_filename(const char *name, char *out, size_t out_size)
+{
+    size_t o = 0;
+    for (; *name && o + 1 < out_size; name++)
+        out[o++] = (*name == '"') ? '_' : *name;
+    out[o] = '\0';
+}
+
 static bool sd_get_relpath(httpd_req_t *req, char *rel, size_t rel_size)
 {
     rel[0] = '\0';
@@ -2410,8 +2443,10 @@ static esp_err_t sdcard_download_handler(httpd_req_t *req)
     }
     const char *base = strrchr(rel, '/');
     base = base ? base + 1 : rel;
+    char basesafe[SD_PATH_MAX];
+    sanitize_disp_filename(base, basesafe, sizeof(basesafe));
     char disp[SD_PATH_MAX + 64];
-    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", base);
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", basesafe);
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Content-Disposition", disp);
 
@@ -2458,8 +2493,13 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
             strlcpy(name, v, sizeof(name));
         }
     }
-    /* A filename must be a single path component. */
-    if (name[0] == '\0' || strchr(name, '/') || strstr(name, "..") || has_control_char(name))
+    /* A filename must be a single path component. Also reject '"': it's later
+     * spliced unescaped into the download's Content-Disposition header value
+     * (filename="..."), so a name containing one could break out of that
+     * quoted value. FatFs's own name validation likely already rejects '"'
+     * at fopen() time, but don't rely solely on that. */
+    if (name[0] == '\0' || strchr(name, '/') || strstr(name, "..") ||
+        strchr(name, '"') || has_control_char(name))
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad name");
         return ESP_FAIL;
@@ -2710,8 +2750,10 @@ static esp_err_t internal_download_handler(httpd_req_t *req)
     }
     const char *base = strrchr(rel, '/');
     base = base ? base + 1 : rel;
+    char basesafe[SD_PATH_MAX];
+    sanitize_disp_filename(base, basesafe, sizeof(basesafe));
     char disp[SD_PATH_MAX + 64];
-    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", base);
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", basesafe);
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Content-Disposition", disp);
 

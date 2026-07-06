@@ -166,11 +166,14 @@ static void sysmon_event_handler(void *arg, esp_event_base_t base,
         start_mdns();
 }
 
-void sysmon_init(void)
+void sysmon_register_events(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_register(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP,
                                                sysmon_event_handler, NULL));
+}
 
+void sysmon_init(void)
+{
     /* Low priority: supervision must never starve the sniffer/network tasks. */
     if (xTaskCreate(sysmon_task, "sysmon", 4096, NULL, 2, NULL) != pdPASS)
         ESP_LOGE(TAG, "failed to create sysmon task");

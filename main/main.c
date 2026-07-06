@@ -143,6 +143,10 @@ void app_main(void)
 
     // Make sure MQTT has registered its event handlers before Ethernet goes up
     mqtt_init();
+    /* Same reason: a static-IP config posts APP_ETHERNET_MGMT_INTERFACE_GOT_IP
+     * synchronously from within initialize_ethernet() below, so the mDNS
+     * trigger must be registered before that call, not later in sysmon_init(). */
+    sysmon_register_events();
 
     /*--- Initialize Network ---*/
     /* Initialize WiFi */
@@ -182,8 +186,10 @@ void app_main(void)
 
     sniffer_autostart();
 
-    /* Supervisory monitor (watchdog auto-recovery, SD auto-remount, low-heap
-     * guard, mDNS). Started last, once everything it watches exists. */
+    /* Supervisory monitor task (watchdog auto-recovery, SD auto-remount,
+     * low-heap guard). Its mDNS event handler was already registered above
+     * via sysmon_register_events(); started last here since the task itself
+     * has no boot-order sensitivity. */
     sysmon_init();
 
     // start console REPL
