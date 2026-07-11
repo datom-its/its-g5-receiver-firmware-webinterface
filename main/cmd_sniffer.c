@@ -23,6 +23,7 @@
 #include "events.h"
 #include "mqtt.h"
 #include "sdlog.h"
+#include "sdpcap.h"
 #include "webserver.h"
 
 #include "cmd_sniffer.h"
@@ -43,6 +44,10 @@ typedef struct {
 } wlan_filter_table_t;
 
 static bool is_running;
+/* Serialises sniffer_start()/sniffer_stop() against each other -- both the
+ * console REPL task and the web UI (httpd task, /sniffer POST) can call
+ * them, and the bare is_running check alone isn't atomic across tasks. */
+static SemaphoreHandle_t ctl_lock;
 static bool write_pcap;
 static sniffer_intf_t interf;
 static uint32_t interf_num;
@@ -150,6 +155,7 @@ static void sniffer_task(void *)
         mqtt_handle_packet(&packet_info);
         webserver_handle_packet(&packet_info);
         sdlog_handle_packet(&packet_info);
+        sdpcap_handle_packet(&packet_info);
 
         esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_RECEIVED_PACKET, NULL, 0, 0);
 
@@ -164,6 +170,9 @@ static esp_err_t sniffer_stop()
 {
     bool eth_set_promiscuous;
     esp_err_t ret = ESP_OK;
+
+    if (ctl_lock)
+        xSemaphoreTake(ctl_lock, portMAX_DELAY);
 
     ESP_GOTO_ON_FALSE(is_running, ESP_ERR_INVALID_STATE, err, TAG, "sniffer is already stopped");
 
@@ -206,6 +215,8 @@ static esp_err_t sniffer_stop()
     esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_STOPPED, NULL, 0, 0);
 
 err:
+    if (ctl_lock)
+        xSemaphoreGive(ctl_lock);
     return ret;
 }
 
@@ -218,6 +229,9 @@ static esp_err_t sniffer_start()
     pcap_link_type_t link_type;
     wifi_promiscuous_filter_t wifi_filter;
     bool eth_set_promiscuous;
+
+    if (ctl_lock)
+        xSemaphoreTake(ctl_lock, portMAX_DELAY);
 
     ESP_GOTO_ON_FALSE(!is_running, ESP_ERR_INVALID_STATE, err, TAG, "sniffer is already running");
 
@@ -272,6 +286,8 @@ static esp_err_t sniffer_start()
 
     esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_STARTED, NULL, 0, 0);
 
+    if (ctl_lock)
+        xSemaphoreGive(ctl_lock);
     return ret;
 err_start:
     // task was already started, need to shut it down gracefully
@@ -283,6 +299,8 @@ err_task:
     if (write_pcap)
         sniff_packet_stop();
 err:
+    if (ctl_lock)
+        xSemaphoreGive(ctl_lock);
     return ret;
 }
 
@@ -430,6 +448,9 @@ void sniffer_init(void)
 
     sem_task_over = xSemaphoreCreateBinary();
     ESP_GOTO_ON_FALSE(sem_task_over, ESP_FAIL, err, TAG, "create semaphore failed");
+
+    ctl_lock = xSemaphoreCreateMutex();
+    ESP_GOTO_ON_FALSE(ctl_lock, ESP_FAIL, err, TAG, "create ctl mutex failed");
 
     work_queue = xQueueCreate(CONFIG_SNIFFER_WORK_QUEUE_LEN, sizeof(sniffer_packet_info_t));
     ESP_GOTO_ON_FALSE(work_queue, ESP_FAIL, err, TAG, "create work queue failed");

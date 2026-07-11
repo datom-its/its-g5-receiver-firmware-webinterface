@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/md.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "argtable3/argtable3.h"
@@ -63,6 +64,12 @@ static esp_err_t config_get_log_frames(uint8_t *out);
 static esp_err_t config_get_log_max_mb(uint32_t *out);
 static esp_err_t config_get_refresh_sec(uint32_t *out);
 static esp_err_t config_get_ntp_server(char *out, size_t *size);
+static esp_err_t config_get_pcap_enable(uint8_t *out);
+static esp_err_t config_get_pcap_retain_hours(uint32_t *out);
+static esp_err_t config_get_pcap_max_mb(uint32_t *out);
+static esp_err_t config_get_pcap_buf_mb(uint32_t *out);
+static esp_err_t config_get_pcap_flush_sec(uint32_t *out);
+static esp_err_t config_set_web_password(const char *value);
 
 static const config_key_t config_keys[] = {
     [CONFIG_INDEX_NODEID]             = { "nodeid",        NVS_TYPE_STR, CONFIG_NODEID_BUFFER_SIZE,   config_get_node_id,            NULL },
@@ -77,12 +84,20 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_BROADCAST_ONLY]     = { "broadcastonly", NVS_TYPE_U8,  0,                           config_get_broadcast_only,     NULL },
     [CONFIG_INDEX_LED_BRIGHTNESS]     = { "ledbrightness", NVS_TYPE_U8,  0,                           config_get_led_brightness,     NULL },
     [CONFIG_INDEX_LED_OVERRIDE_COLOR] = { "ledoverride",   NVS_TYPE_U32, 0,                           config_get_led_override_color, NULL },
-    [CONFIG_INDEX_WEB_PASSWORD]       = { "webpasswd",     NVS_TYPE_STR, CONFIG_WEB_PASSWORD_BUFFER_SIZE, NULL,                       NULL },
+    /* buffer_size doubles as the max accepted RAW password length (65) --
+     * the actual NVS value is always a fixed 64-char hash, see
+     * config_set_web_password. */
+    [CONFIG_INDEX_WEB_PASSWORD]       = { "webpasswd",     NVS_TYPE_STR, CONFIG_WEB_PASSWORD_BUFFER_SIZE, NULL,      config_set_web_password },
     [CONFIG_INDEX_LOG_SYS]            = { "logsys",        NVS_TYPE_U8,  0,                           config_get_log_sys,            NULL },
     [CONFIG_INDEX_LOG_FRAMES]         = { "logframes",     NVS_TYPE_U8,  0,                           config_get_log_frames,         NULL },
     [CONFIG_INDEX_LOG_MAX_MB]         = { "logmaxmb",      NVS_TYPE_U32, 0,                           config_get_log_max_mb,         NULL },
     [CONFIG_INDEX_REFRESH_SEC]        = { "refreshsec",    NVS_TYPE_U32, 0,                           config_get_refresh_sec,        NULL },
     [CONFIG_INDEX_NTP_SERVER]         = { "ntpserver",     NVS_TYPE_STR, CONFIG_NTP_SERVER_BUFFER_SIZE, config_get_ntp_server,        NULL },
+    [CONFIG_INDEX_PCAP_ENABLE]        = { "pcapen",        NVS_TYPE_U8,  0,                           config_get_pcap_enable,        NULL },
+    [CONFIG_INDEX_PCAP_RETAIN_HOURS]  = { "pcaphours",     NVS_TYPE_U32, 0,                           config_get_pcap_retain_hours,  NULL },
+    [CONFIG_INDEX_PCAP_MAX_MB]        = { "pcapmaxmb",     NVS_TYPE_U32, 0,                           config_get_pcap_max_mb,        NULL },
+    [CONFIG_INDEX_PCAP_BUF_MB]        = { "pcapbufmb",     NVS_TYPE_U32, 0,                           config_get_pcap_buf_mb,        NULL },
+    [CONFIG_INDEX_PCAP_FLUSH_SEC]     = { "pcapflushsec",  NVS_TYPE_U32, 0,                           config_get_pcap_flush_sec,     NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -322,6 +337,126 @@ static esp_err_t config_get_refresh_sec(uint32_t *out_val)
     }
     *out_val = out;
     return ESP_OK;
+}
+
+static esp_err_t config_get_pcap_enable(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "pcapen", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 0;  /* default: off (flash-wear/capacity cost on an unattended device) */
+    }
+    *out_val = !!out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_pcap_retain_hours(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "pcaphours", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 24;  /* default: 24h */
+    }
+    if (out == 0)
+        out = 24;
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_pcap_max_mb(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "pcapmaxmb", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 300;  /* default: 300 MiB safety-net budget */
+    }
+    if (out == 0)
+        out = 300;
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_pcap_buf_mb(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "pcapbufmb", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 1;  /* default: 1 MiB */
+    }
+    if (out == 0)
+        out = 1;
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_pcap_flush_sec(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "pcapflushsec", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 300;  /* default: 5 minutes */
+    }
+    if (out == 0)
+        out = 300;
+    *out_val = out;
+    return ESP_OK;
+}
+
+/* Salted with the device's own MAC (no extra NVS storage needed) so a
+ * leaked hash can't be checked against a generic rainbow table. Public via
+ * config.h so webserver.c's auth check can hash an attempted password the
+ * identical way. */
+void config_hash_web_password(const char *raw, char out_hex[65])
+{
+    uint8_t mac[6];
+    ethernet_get_mac(mac);
+
+    char salted[300];
+    int n = snprintf(salted, sizeof(salted), "%02x%02x%02x%02x%02x%02x:%s",
+                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], raw);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof(salted)) n = sizeof(salted) - 1;
+
+    unsigned char digest[32];
+    mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+              (const unsigned char *)salted, (size_t)n, digest);
+
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++)
+    {
+        out_hex[i * 2]     = hexd[digest[i] >> 4];
+        out_hex[i * 2 + 1] = hexd[digest[i] & 0xF];
+    }
+    out_hex[64] = '\0';
+}
+
+/* Custom setter (not the generic nvs_set_str passthrough) so every caller --
+ * the web UI and the `config_set webpasswd` console command alike -- stores
+ * a hash, never the raw password. Empty stays empty (disables protection,
+ * check_update_auth's existing sentinel). */
+static esp_err_t config_set_web_password(const char *value)
+{
+    if (value[0] == '\0')
+        return nvs_set_str(handle, "webpasswd", "");
+
+    char hash[65];
+    config_hash_web_password(value, hash);
+    return nvs_set_str(handle, "webpasswd", hash);
 }
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out)
@@ -709,9 +844,9 @@ esp_err_t config_get_blob(config_index_t index, uint8_t *out, size_t *size)
 {
     const config_key_t *key = &config_keys[index];
 
-    if (key->type != NVS_TYPE_STR)
+    if (key->type != NVS_TYPE_BLOB)
     {
-        ESP_LOGE(TAG, "Attempt to get key %s with wrong type str", key->name);
+        ESP_LOGE(TAG, "Attempt to get key %s with wrong type blob", key->name);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -884,6 +1019,11 @@ static int cmd_config_set(int argc, char **argv)
     case NVS_TYPE_BLOB:
         {
             unsigned char *buf = malloc(key->buffer_size);
+            if (!buf)
+            {
+                ESP_LOGE(TAG, "out of memory");
+                return 1;
+            }
             size_t olen;
             int result = mbedtls_base64_decode(buf, key->buffer_size, &olen, (const uint8_t *)value_str, strlen(value_str));
             if (result != 0)
@@ -1026,6 +1166,11 @@ static int cmd_config_get(int argc, char **argv)
         break;
     case NVS_TYPE_STR:
         char *value = malloc(key->buffer_size);
+        if (!value)
+        {
+            ESP_LOGE(TAG, "out of memory");
+            return 1;
+        }
         size_t size = key->buffer_size;
 
         res = config_get_str(index, value, &size);
@@ -1038,7 +1183,13 @@ static int cmd_config_get(int argc, char **argv)
     case NVS_TYPE_BLOB:
         {
             unsigned char *buf = malloc(key->buffer_size);
-            size_t actual_size;
+            if (!buf)
+            {
+                ESP_LOGE(TAG, "out of memory");
+                return 1;
+            }
+            /* in/out for nvs_get_blob: in = capacity of buf, out = actual size */
+            size_t actual_size = key->buffer_size;
 
             res = config_get_blob(index, buf, &actual_size);
 
@@ -1050,6 +1201,12 @@ static int cmd_config_get(int argc, char **argv)
 
             const size_t base64_buffer_size = (((4 * key->buffer_size / 3) + 3) & ~3) + 1;
             unsigned char *base64_buf = malloc(base64_buffer_size);
+            if (!base64_buf)
+            {
+                ESP_LOGE(TAG, "out of memory");
+                free(buf);
+                return 1;
+            }
             size_t olen;
             int result = mbedtls_base64_encode(base64_buf, base64_buffer_size, &olen, (const uint8_t *)buf, actual_size);
             if (result != 0)

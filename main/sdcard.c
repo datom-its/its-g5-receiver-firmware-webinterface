@@ -82,6 +82,10 @@ esp_err_t sdcard_mount(void)
     /* The SPI bus is initialised elsewhere (shared with Ethernet). */
     ESP_LOGI(TAG, "Mounting SD card (SPI)");
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    /* 15 MHz, not the 20 MHz default: the SD card shares one SPI bus with
+     * the Ethernet controller, and a slower clock gives more setup/hold
+     * margin under concurrent traffic (see reference-sd-spi-bug in memory). */
+    host.max_freq_khz = 15000;
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
@@ -164,10 +168,18 @@ esp_err_t sdcard_usage(uint64_t *total_bytes, uint64_t *free_bytes)
 /*  Console commands (thin wrappers around the API)                   */
 /* ================================================================== */
 
+/* mount and unmount each get their OWN argtable -- they used to share one,
+ * which meant the second esp_console_cmd_register() silently repointed both
+ * commands at freshly-allocated args and leaked the first pair. */
 static struct {
     struct arg_str *device;
     struct arg_end *end;
 } mount_args;
+
+static struct {
+    struct arg_str *device;
+    struct arg_end *end;
+} unmount_args;
 
 static int cmd_mount(int argc, char **argv)
 {
@@ -202,12 +214,12 @@ void register_mount(void)
 
 static int cmd_unmount(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&mount_args);
+    int nerrors = arg_parse(argc, argv, (void **)&unmount_args);
     if (nerrors != 0) {
-        arg_print_errors(stderr, mount_args.end, argv[0]);
+        arg_print_errors(stderr, unmount_args.end, argv[0]);
         return 1;
     }
-    if (strncmp(mount_args.device->sval[0], "sd", 2) != 0)
+    if (strncmp(unmount_args.device->sval[0], "sd", 2) != 0)
         return 1;
 
     return sdcard_unmount() == ESP_OK ? 0 : -1;
@@ -215,14 +227,14 @@ static int cmd_unmount(int argc, char **argv)
 
 void register_unmount(void)
 {
-    mount_args.device = arg_str1(NULL, NULL, "<sd>", "choose a proper device to mount/unmount");
-    mount_args.end = arg_end(1);
+    unmount_args.device = arg_str1(NULL, NULL, "<sd>", "choose a proper device to mount/unmount");
+    unmount_args.end = arg_end(1);
     const esp_console_cmd_t cmd = {
         .command = "unmount",
         .help = "unmount the filesystem",
         .hint = NULL,
         .func = &cmd_unmount,
-        .argtable = &mount_args
+        .argtable = &unmount_args
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
 }

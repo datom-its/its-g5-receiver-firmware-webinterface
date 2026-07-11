@@ -4,14 +4,10 @@
 extern "C" {
 #endif
 
-/* Registers the event handler that triggers mDNS startup on
- * APP_ETHERNET_MGMT_INTERFACE_GOT_IP. Call this EARLY in app_main, before
- * initialize_ethernet() -- a static-IP configuration posts that event
- * synchronously from within initialize_ethernet() itself, so registering
- * any later risks the default event loop dispatching (and losing) that
- * one-shot event before this handler exists, permanently skipping mDNS for
- * that boot. DHCP is safe either way since lease acquisition takes far
- * longer than the rest of app_main's init sequence, but static IP is not. */
+/* Call EARLY in app_main, before initialize_ethernet() -- a static-IP config
+ * posts APP_ETHERNET_MGMT_INTERFACE_GOT_IP synchronously from inside that
+ * call, so registering later can miss the one-shot event and skip mDNS for
+ * that boot. DHCP is unaffected (lease acquisition takes much longer). */
 void sysmon_register_events(void);
 
 /* System monitor: a low-priority supervisory task. Handles:

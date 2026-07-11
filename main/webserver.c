@@ -20,6 +20,7 @@
 #include "esp_attr.h"
 #include "esp_chip_info.h"
 #include "esp_console.h"
+#include "esp_core_dump.h"
 #include "esp_event.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -44,6 +45,7 @@
 #include "ota.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
+#include "sdpcap.h"
 #endif
 #ifdef CONFIG_ENABLE_TEMPERATURE
 #include "temperature.h"
@@ -88,6 +90,10 @@ typedef enum {
     S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
+    S_SET_GROUP_GENERAL, S_SET_GROUP_NETWORK, S_SET_GROUP_MQTT,
+    S_SET_GROUP_STORAGE, S_SET_GROUP_SECURITY,
+    S_BROADCAST_ONLY, S_BROADCAST_ONLY_HINT,
+    S_LED_OVERRIDE, S_LED_OVERRIDE_HINT,
     S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
     S_WEB_PASSWORD, S_WEB_PASSWORD_SET, S_WEB_PASSWORD_NONE, S_WEB_PASSWORD_CLEAR,
     S_REFRESH_SEC,
@@ -95,10 +101,14 @@ typedef enum {
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
     S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE, S_TYPE_HINT,
     S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
+    S_PCAP_ENABLE, S_PCAP_RETAIN_HOURS, S_PCAP_MAX_MB, S_PCAP_HINT,
+    S_PCAP_BUF_MB, S_PCAP_BUF_HINT, S_PCAP_FLUSH_SEC,
+    S_PLAYBACK_FROM, S_PLAYBACK_TO, S_PLAYBACK_LOAD, S_PLAYBACK_LIVE, S_PLAYBACK_NONE, S_PLAYBACK_ERROR,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL, S_UPD_CHOOSE_FILE,
     S_UPD_NOT_CONFIRMED,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
-    S_FS_INTERNAL, S_FS_NOTE, S_TAR_SELECTED, S_TAR_NONE,
+    S_FS_INTERNAL, S_FS_NOTE, S_TAR_SELECTED, S_TAR_NONE, S_TAR_HINT,
+    S_SD_DELETE_SELECTED, S_SD_DELETE_SEL_CONFIRM,
     S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
@@ -108,7 +118,8 @@ typedef enum {
     S_SYS_COL_STACK,
     S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
     S_LOGS_NONE, S_LOGS_TAIL,
-    S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT, S_MAP_LAYER_STREETS, S_MAP_LAYER_SATELLITE,
+    S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT, S_MAP_HELP, S_MAP_LAYER_STREETS, S_MAP_LAYER_SATELLITE,
+    S_SYS_COREDUMP, S_SYS_COREDUMP_DOWNLOAD, S_SYS_COREDUMP_CLEAR, S_SYS_COREDUMP_CLEAR_CONFIRM,
     S_COUNT
 } str_id_t;
 
@@ -176,6 +187,17 @@ static const char *STR[S_COUNT][2] = {
     [S_MQTT_URI]        = { "MQTT-URI",                 "MQTT URI" },
     [S_AUTOSTART_CHAN]  = { "Autostart-Kanal",          "Autostart channel" },
     [S_CHAN_NONE]       = { "(keiner)",                 "(none)" },
+    [S_SET_GROUP_GENERAL] = { "Allgemein",              "General" },
+    [S_SET_GROUP_NETWORK] = { "Netzwerk",               "Network" },
+    [S_SET_GROUP_MQTT]    = { "MQTT",                   "MQTT" },
+    [S_SET_GROUP_STORAGE] = { "Speicher (SD)",          "Storage (SD)" },
+    [S_SET_GROUP_SECURITY]= { "Sicherheit",             "Security" },
+    [S_BROADCAST_ONLY]  = { "Nur Broadcast erfassen",   "Capture broadcast only" },
+    [S_BROADCAST_ONLY_HINT] = { "Aus: erfasst auch Unicast-Frames (deutlich mehr Datenaufkommen).",
+                                "Off: also captures unicast frames (significantly more traffic)." },
+    [S_LED_OVERRIDE]     = { "Feste LED-Farbe",          "Fixed LED color" },
+    [S_LED_OVERRIDE_HINT] = { "&Uuml;bersteuert die normale Status-Anzeige. Schwarz = normales Verhalten (aus).",
+                              "Overrides the normal status indication. Black = normal behaviour (off)." },
     [S_LED_BRIGHTNESS]  = { "LED-Helligkeit",           "LED brightness" },
     [S_SAVE]            = { "Speichern",                "Save" },
     [S_SAVED]           = { "%d Einstellung(en) gespeichert.", "Saved %d setting(s)." },
@@ -221,6 +243,22 @@ static const char *STR[S_COUNT][2] = {
     [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
     [S_LOG_HINT]        = { "Logs unter /sdcard/logs/, rotierend. Braucht eine eingebundene SD-Karte.",
                             "Logs in /sdcard/logs/, rotating. Requires a mounted SD card." },
+    [S_PCAP_ENABLE]       = { "Rollierende PCAP-Aufzeichnung auf SD", "Rolling PCAP capture to SD" },
+    [S_PCAP_RETAIN_HOURS] = { "PCAP-Aufbewahrung (Std.)",             "PCAP retention (hours)" },
+    [S_PCAP_MAX_MB]       = { "PCAP-Speicher-Obergrenze (MB)",        "PCAP storage ceiling (MB)" },
+    [S_PCAP_HINT]         = { "Rohe 802.11-Frames unter /sdcard/pcap/, stündlich rotierend, mit tshark/Wireshark lesbar. Braucht eine eingebundene SD-Karte.",
+                              "Raw 802.11 frames in /sdcard/pcap/, rotating hourly, readable with tshark/Wireshark. Requires a mounted SD card." },
+    [S_PCAP_BUF_MB]       = { "PCAP-RAM-Puffer (MB)",                "PCAP RAM buffer (MB)" },
+    [S_PCAP_BUF_HINT]     = { "Frames werden erst im PSRAM gesammelt und dann in einem Rutsch geschrieben, statt bei jedem Frame einzeln auf die (mit Ethernet geteilte) SD-Bus zuzugreifen. Wirkt erst nach einem Neustart.",
+                              "Frames are collected in PSRAM first and written in one batch, instead of touching the SD bus (shared with Ethernet) for every single frame. Takes effect after a reboot." },
+    [S_PCAP_FLUSH_SEC]    = { "Sp&auml;testens schreiben nach (Sek.)", "Flush to SD at least every (sec)" },
+    [S_PLAYBACK_FROM]   = { "Von",                       "From" },
+    [S_PLAYBACK_TO]     = { "bis",                       "to" },
+    [S_PLAYBACK_LOAD]   = { "Laden",                     "Load" },
+    [S_PLAYBACK_LIVE]   = { "Live",                      "Live" },
+    [S_PLAYBACK_NONE]   = { "Keine Positionsdaten (CAM) in diesem Zeitraum gefunden.",
+                            "No position data (CAM) found in this time range." },
+    [S_PLAYBACK_ERROR]  = { "Fehler beim Laden.", "Error loading." },
     [S_UPD_INTRO]       = { "W&auml;hle eine Firmware-Datei (.bin) und klicke Hochladen. Das Ger&auml;t "
                             "flasht sie auf die inaktive OTA-Partition und startet neu. Danach musst du "
                             "das Update im Status best&auml;tigen, sonst wird es zur&uuml;ckgerollt.",
@@ -244,14 +282,9 @@ static const char *STR[S_COUNT][2] = {
                             "OK, flashed successfully. Rebooting..." },
     [S_UPLOAD_FAIL]     = { "Upload fehlgeschlagen (Verbindungsfehler)",
                             "Upload failed (connection error)" },
-    /* ESP-IDF refuses to start a new OTA while the running app is still
-     * unconfirmed (ESP_ERR_OTA_ROLLBACK_INVALID_STATE) -- by design, so you
-     * can't stack unconfirmed updates. Common right after flashing when the
-     * confirm step on the status page hasn't happened yet.
-     * This string is sent as a plain XHR response body and shown via
-     * .innerText (see update_post_handler / UPDATE_FORM_FMT's xhr.onload) --
-     * NOT parsed as HTML, so literal UTF-8 umlauts are used here, not
-     * &auml;-style entities (those would show up as literal garbage). */
+    /* Hit when a new OTA is attempted while the running app is still
+     * unconfirmed (ESP-IDF refuses by design). Shown via .innerText, so
+     * literal UTF-8 umlauts, not &auml;-style entities. */
     [S_UPD_NOT_CONFIRMED] = { "Update nicht möglich: Die aktuell laufende Firmware ist noch nicht "
                               "bestätigt. Bitte zuerst auf der Status-Seite bestätigen (oder "
                               "zurückrollen), bevor ein neues Update gemacht wird.",
@@ -273,6 +306,11 @@ static const char *STR[S_COUNT][2] = {
                             "(nvs = settings database, ota_* = firmware images) &ndash; downloadable only as a raw image." },
     [S_TAR_SELECTED]    = { "Auswahl (.tar)",           "Selection (.tar)" },
     [S_TAR_NONE]        = { "Nichts markiert.",         "Nothing selected." },
+    [S_TAR_HINT]        = { "Hinweis: Gr&ouml;&szlig;ere Downloads k&ouml;nnen wegen der "
+                             "Ger&auml;te-Architektur mehrere Minuten dauern &ndash; die "
+                             "Weboberfl&auml;che ist w&auml;hrenddessen nicht bedienbar.",
+                             "Note: larger downloads can take several minutes due to the "
+                             "device architecture &ndash; the web UI is unresponsive meanwhile." },
     [S_SD_NOT_MOUNTED]  = { "Keine SD-Karte eingebunden.", "No SD card mounted." },
     [S_SD_MOUNT]        = { "Einbinden",               "Mount" },
     [S_SD_USAGE]        = { "Belegung",                 "Usage" },
@@ -284,6 +322,12 @@ static const char *STR[S_COUNT][2] = {
     [S_SD_DELETE]       = { "L&ouml;schen",             "Delete" },
     /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
     [S_SD_DELETE_CONFIRM] = { "Datei löschen?",         "Delete file?" },
+    [S_SD_DELETE_SELECTED] = { "Auswahl l&ouml;schen",  "Delete selection" },
+    /* Used inside a JS confirm() call, not HTML text -- raw UTF-8, not HTML
+     * entities (script-tag content isn't HTML-entity-decoded by the
+     * browser), same as the existing S_SD_DELETE_CONFIRM right above. */
+    [S_SD_DELETE_SEL_CONFIRM] = { "Ausgewählte Dateien/Ordner löschen?",
+                                  "Delete selected files/folders?" },
     [S_SD_FORMAT]       = { "Karte formatieren",        "Format card" },
     /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
     [S_SD_FORMAT_CONFIRM] = { "Karte wirklich formatieren? Alle Daten gehen verloren!",
@@ -319,10 +363,16 @@ static const char *STR[S_COUNT][2] = {
                             "Last %d KB, newest lines at the bottom." },
     [S_NAV_MAP]         = { "Karte",                    "Map" },
     [S_TITLE_MAP]       = { "Live-Karte",               "Live map" },
-    [S_MAP_HINT]        = { "Positionen aus empfangenen CAM-Nachrichten (Fahrzeuge/RSUs), als Symbol je Stationstyp. Anklicken zeigt Details. Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) -- das Gerät selbst nicht.",
-                            "Positions from received CAM messages (vehicles/RSUs), shown as an icon per station type. Click a marker for details. Markers disappear after 60 seconds without a new message from that sender. Loading the map tiles needs the browser to have internet access (OpenStreetMap) -- the device itself doesn't." },
+    [S_MAP_HINT]        = { "Positionen aus empfangenen V2X-Nachrichten: Fahrzeuge (CAM) und ortsfeste Sender wie Ampeln/RSUs (Position aus der GeoNetworking-Schicht). Symbol je Stationstyp; Anklicken zeigt Details (Typ, Zeit, RSSI, bei Fahrzeugen auch km/h). Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) &ndash; das Ger&auml;t selbst nicht.<br><br>Verlauf/Wiedergabe: W&auml;hle unten einen Zeitbereich (Von/bis) und klicke Laden, dann kannst du mit dem Regler und der Play-Taste die Positionen aus diesem Zeitraum abspielen. Diese Daten stammen aus der rollierenden PCAP-Aufzeichnung auf der SD-Karte (falls aktiviert).",
+                            "Positions from received V2X messages: vehicles (CAM) and stationary senders such as traffic lights/RSUs (position from the GeoNetworking layer). Icon per station type; click for details (type, time, RSSI, and km/h for vehicles). Markers disappear after 60 seconds without a new message from that sender. Loading the map tiles needs the browser to have internet access (OpenStreetMap) &ndash; the device itself doesn't.<br><br>History/playback: pick a time range (from/to) below and click Load, then use the slider and Play button to replay positions from that period. This data comes from the rolling PCAP recording on the SD card (if enabled)." },
+    [S_MAP_HELP]        = { "Info &amp; Hilfe",           "Info &amp; help" },
     [S_MAP_LAYER_STREETS] = { "Karte",                  "Map" },
     [S_MAP_LAYER_SATELLITE] = { "Satellit",             "Satellite" },
+    [S_SYS_COREDUMP]      = { "&#9888; Crash-Dump verf&uuml;gbar", "&#9888; Crash dump available" },
+    [S_SYS_COREDUMP_DOWNLOAD] = { "Herunterladen",      "Download" },
+    [S_SYS_COREDUMP_CLEAR] = { "L&ouml;schen",          "Delete" },
+    /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
+    [S_SYS_COREDUMP_CLEAR_CONFIRM] = { "Crash-Dump löschen?", "Delete crash dump?" },
 };
 
 /* Per-request language, resolved from ?lang= or a cookie. Because
@@ -427,13 +477,17 @@ typedef struct {
     int      rssi;
     uint8_t  preview[WEB_MSG_PREVIEW_LEN];
     char     msgtype[WEB_MSG_TYPE_LEN];
-    bool     has_position; /* true if lat_e7/lon_e7/station_id below are valid (CAM only) */
+    bool     has_position; /* true if lat_e7/lon_e7/station_id below are valid (CAM's own
+                             * referencePosition, or a GN-layer fallback for anything else
+                             * that reached an ITS PDU header -- see its_decode_frame) */
     int32_t  lat_e7;       /* WGS84 latitude,  1e-7 degree units */
     int32_t  lon_e7;       /* WGS84 longitude, 1e-7 degree units */
     uint32_t station_id;   /* ItsPduHeader.stationId; stable per sender, only meaningful if has_position */
+    bool     has_speed;    /* true if speed_cmps below is valid (vehicles only, not RSUs) */
+    int32_t  speed_cmps;   /* speed in cm/s (0.01 m/s units, matches the wire encoding) */
 } web_msg_entry_t;
 
-static web_msg_entry_t msg_ring[WEB_MSG_RING_SIZE];
+static EXT_RAM_BSS_ATTR web_msg_entry_t msg_ring[WEB_MSG_RING_SIZE];
 static size_t msg_ring_head;
 static size_t msg_ring_count;
 static uint32_t msg_total_count;
@@ -534,7 +588,8 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     /* Decoded from the full frame (not just the short preview above) -- CAM/
      * DENM's BTP header sits well past WEB_MSG_PREVIEW_LEN bytes in. */
     its_decode_frame(packet->payload, packet->length, e->msgtype, sizeof(e->msgtype),
-                      &e->has_position, &e->lat_e7, &e->lon_e7, &e->station_id);
+                      &e->has_position, &e->lat_e7, &e->lon_e7, &e->station_id,
+                      &e->has_speed, &e->speed_cmps);
     msg_type_stats_record(e->msgtype);
 
     msg_ring_head = (msg_ring_head + 1) % WEB_MSG_RING_SIZE;
@@ -675,64 +730,96 @@ static const char PAGE_HEADER_FMT[] =
     "<link rel='icon' href='/favicon.png?v=2' type='image/png'>"
     "<link rel='apple-touch-icon' sizes='180x180' href='/apple-touch-icon.png?v=2'>"
     "<link rel='manifest' href='/manifest.webmanifest'>"
-    "<meta name='theme-color' content='#1c56be'>"
+    "<meta name='theme-color' content='#f2b134'>"
     "<meta name='apple-mobile-web-app-capable' content='yes'>"
     "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
     "<meta name='apple-mobile-web-app-title' content='ITS G5 Node'>"
     "%s"  /* optional auto-refresh script */
     "<style>"
-    "*{box-sizing:border-box}"
-    "body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;background:#0e1725;color:#e6ebf2;line-height:1.5}"
+    "*{box-sizing:border-box;accent-color:#f2b134}"
+    /* Amber accent (device's subject is vehicles/traffic lights), signal-
+     * blue kept distinct for links so they're never mistaken for buttons. */
+    /* min-height:100vh: on a page shorter than the viewport (e.g. /update),
+     * body's own background otherwise stops at its content height, showing
+     * bare layers underneath as visible horizontal bands. Deliberately no
+     * explicit html{background} here -- that disables the CSS canvas-
+     * background-propagation rule (body's background becomes the viewport's
+     * own canvas paint, body's own box then paints transparent), which is
+     * what let body::before's radar sweep (z-index:-1, otherwise stacked
+     * BEHIND body's own now-opaque background) show through at all. */
+    "body{min-height:100vh;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;color:#edf0f2;line-height:1.5;position:relative;"
+    "background:"
+    "radial-gradient(circle at 12%% -8%%,rgba(242,177,52,.13),transparent 42%%),"
+    "radial-gradient(circle at 100%% 12%%,rgba(79,184,224,.11),transparent 40%%),"
+    "repeating-linear-gradient(0deg,rgba(255,255,255,.018) 0 1px,transparent 1px 34px),"
+    "repeating-linear-gradient(90deg,rgba(255,255,255,.012) 0 1px,transparent 1px 34px),"
+    "#0c1013}"
+    "body::before{content:'';position:fixed;top:50%%;left:50%%;width:220vmax;height:220vmax;"
+    "margin:-110vmax 0 0 -110vmax;z-index:-1;pointer-events:none;"
+    "background:conic-gradient(from 0deg,transparent 0deg,rgba(242,177,52,.12) 8deg,transparent 30deg,transparent 360deg);"
+    "mix-blend-mode:screen;animation:sweep 22s linear infinite}"
+    "@keyframes sweep{to{transform:rotate(360deg)}}"
+    "@media(prefers-reduced-motion:reduce){body::before{animation:none;display:none}}"
     ".wrap{width:100%%;max-width:1040px;margin:0 auto;padding:18px clamp(14px,4vw,32px) 48px}"
-    "a{color:#5f9bff;text-decoration:none}a:hover{text-decoration:underline}"
+    "a{color:#4fb8e0;text-decoration:none}a:hover{text-decoration:underline}"
     "h1{font-size:20px;font-weight:600;margin:6px 0 16px}"
     "h2{font-size:16px;font-weight:600;margin:22px 0 10px}"
     "h3{font-size:14px;font-weight:600;margin:18px 0 8px;color:#c7d2e0}"
-    /* nav itself does NOT wrap -- .navlinks (the page links) wraps onto
-     * multiple rows internally instead, while .lang (the flag switch) stays
-     * a fixed sibling anchored top-right at all times. Without this split,
-     * .lang used to be just another wrappable flex item and would drop onto
-     * its own orphaned-looking full-width row on narrow screens once the
-     * page links needed more than one row. align-items:flex-start so .lang
-     * sits at the TOP of .navlinks' box even when that box grows taller
-     * (wrapped to several rows), rather than centering into its middle. */
-    "nav{display:flex;align-items:flex-start;gap:8px;padding:5px;background:#131c2a;border:1px solid #26303f;border-radius:11px;margin-bottom:18px;font-size:13px}"
+    /* nav itself doesn't wrap -- .navlinks wraps internally instead, while
+     * .lang stays a fixed sibling anchored top-right (else it drops onto
+     * its own orphaned row once the links need more than one line). */
+    "nav{display:flex;align-items:flex-start;gap:8px;padding:5px;background:#15191d;border:1px solid #2a2f34;border-radius:10px;margin-bottom:18px;font-size:13px}"
     ".navlinks{display:flex;flex-wrap:wrap;gap:4px;flex:1;min-width:0;align-items:center}"
-    "nav a{color:#aeb9c9;padding:6px 12px;border-radius:8px}"
-    "nav a:hover{background:#1c2636;text-decoration:none}"
-    "nav a.active{background:#2f6fd0;color:#fff}"
+    "nav a{color:#94a0a8;padding:6px 12px;border-radius:7px;transition:background .12s,color .12s}"
+    "nav a:hover{background:#1d2227;color:#edf0f2;text-decoration:none}"
+    "nav a.active{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;font-weight:600;"
+    "box-shadow:0 0 0 1px rgba(242,177,52,.35),0 2px 10px -2px rgba(242,177,52,.5)}"
+    /* Hamburger toggle: hidden on desktop (the full link row fits), shown
+     * only on narrow screens via the media query below. Pure CSS -- a hidden
+     * checkbox (.nvt) whose :checked state reveals .navlinks, toggled by the
+     * <label> button, so no JS is needed and it degrades gracefully. */
+    "nav .brgr{display:none;color:#94a0a8;padding:6px 12px;border-radius:7px;cursor:pointer;font-size:18px;line-height:1;user-select:none}"
+    "nav .brgr:hover{background:#1d2227}"
+    "nav .nvt{display:none}"
     /* Flag toggle: a small pill holding both flags, current language
      * highlighted -- replaces the old plain text link (just the other
      * language's name), which looked like a stray, unstyled afterthought
      * next to the nav pill. */
-    "nav .lang{flex-shrink:0;display:flex;gap:2px;background:#0e1725;border-radius:20px;padding:2px;border:1px solid #26303f}"
+    "nav .lang{flex-shrink:0;display:flex;gap:2px;background:#0c1013;border-radius:20px;padding:2px;border:1px solid #2a2f34}"
     "nav .lang a{padding:3px 8px;border-radius:16px;font-size:15px;line-height:1.3;opacity:.5}"
-    "nav .lang a:hover{background:#1c2636;text-decoration:none;opacity:.8}"
-    "nav .lang a.active{background:#2f6fd0;opacity:1}"
+    "nav .lang a:hover{background:#1d2227;text-decoration:none;opacity:.8}"
+    "nav .lang a.active{background:linear-gradient(160deg,#f2b134,#d99a1f);opacity:1}"
     /* border-collapse:separate (not collapse!) -- browsers ignore
      * border-radius on a <table> when its borders are collapsed, which made
      * plain (non-.scroll) tables look square-cornered despite this rule.
      * border-spacing:0 keeps cells touching, same look as collapse. */
-    "table{width:100%%;border-collapse:separate;border-spacing:0;background:#16202e;border:1px solid #26303f;border-radius:12px;margin:10px 0;overflow:hidden}"
-    "th,td{text-align:left;padding:10px 14px;font-size:13.5px;border-bottom:1px solid #222c3a}"
+    "table{width:100%%;border-collapse:separate;border-spacing:0;background:#15191d;border:1px solid #2a2f34;border-radius:10px;margin:10px 0;overflow:hidden}"
+    "th,td{text-align:left;padding:10px 14px;font-size:13.5px;border-bottom:1px solid #20252a}"
     "tr:last-child>*{border-bottom:none}"
-    "th{color:#8b98ab;font-weight:400}"
+    "tr:hover>td{background:#1a1f24}"
+    "th{color:#94a0a8;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}"
+    "td{font-variant-numeric:tabular-nums}"
     ".kv th{width:1px;white-space:nowrap;padding-right:32px}.kv td{overflow-wrap:anywhere}"
-    ".scroll{overflow-x:auto;border:1px solid #26303f;border-radius:12px;margin:10px 0}"
+    ".scroll{overflow-x:auto;border:1px solid #2a2f34;border-radius:10px;margin:10px 0}"
     ".scroll table{border:none;border-radius:0;margin:0;width:auto;min-width:100%%}"
     ".scroll td,.scroll th{white-space:nowrap}"
-    /* Wrappable cells (hex preview, Type -- both can be long, both already
-     * break cleanly at spaces/colons) flow onto multiple lines at ANY width:
-     * the hex preview alone can be ~100 characters, wide enough to force
-     * horizontal scroll even inside the 1040px desktop content column, not
-     * just on phones. .scroll's own horizontal scroll remains as a fallback
-     * for genuinely wide tables that don't opt into wrapping (system/SD). */
+    /* Hex preview/Type cells wrap at ANY width -- the hex preview alone can
+     * be ~100 chars, wide enough to force scroll even on desktop. */
     ".scroll td.wrapcell{white-space:normal;word-break:break-word}"
-    /* On narrow screens only: tighten padding, and on the /messages table
-     * specifically (#mtbl) drop the "#" column -- it's just the row's
-     * position, redundant with reading top-to-bottom, and every column adds
-     * its own padding on top of its content width. */
+    /* Narrow screens: tighter padding, #mtbl drops its redundant "#" column. */
     "@media(max-width:640px){"
+    /* Collapse nav to a hamburger: burger+flags row, links drop into a
+     * dropdown on tap (.nvt:checked). Sticky so the dropdown stays reachable
+     * while scrolling. z-index:1000, not lower -- Leaflet's own panes
+     * (/map only) go up to 700 and would otherwise render on top of an
+     * open dropdown. */
+    "nav{flex-wrap:wrap;align-items:center;position:sticky;top:0;z-index:1000}"
+    "nav .brgr{display:block;order:1}"
+    "nav .lang{order:2;margin-left:auto}"
+    "nav .navlinks{display:none;order:3;flex-basis:100%%;flex-direction:column;gap:2px;margin-top:6px;"
+    "max-height:calc(100vh - 60px);overflow-y:auto}"
+    "nav .nvt:checked~.navlinks{display:flex}"
+    "nav .navlinks a{padding:9px 12px}"
     ".scroll th,.scroll td{padding:8px 6px}"
     "#mtbl th:first-child,#mtbl td:first-child{display:none}"
     /* .kv th is nowrap+shrink-to-fit, but that shrinks to the WIDEST label
@@ -742,9 +829,12 @@ static const char PAGE_HEADER_FMT[] =
      * own. Wrapping it onto 2 lines above this width caps the damage. */
     ".kv th{white-space:normal;max-width:38vw}"
     "}"
-    "button{background:#2f6fd0;color:#fff;border:none;font-size:13.5px;padding:9px 15px;border-radius:9px;margin:3px 5px 3px 0;cursor:pointer}"
-    "button:hover{background:#3b7de0}"
-    "input,select{background:#0e1725;color:#e6ebf2;border:1px solid #38455a;border-radius:8px;padding:7px 9px;font-size:13.5px;max-width:100%%}"
+    "button{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;font-weight:600;border:none;font-size:13.5px;padding:9px 15px;border-radius:8px;margin:3px 5px 3px 0;cursor:pointer;"
+    "box-shadow:0 2px 12px -3px rgba(242,177,52,.5);transition:box-shadow .15s,transform .08s}"
+    "button:hover{background:linear-gradient(160deg,#ffc861,#e2a52b);box-shadow:0 3px 16px -2px rgba(242,177,52,.65)}"
+    "button:active{transform:translateY(1px)}"
+    "input,select{background:#0c1013;color:#edf0f2;border:1px solid #333a41;border-radius:7px;padding:7px 9px;font-size:13.5px;max-width:100%%}"
+    "input:focus,select:focus{outline:none;border-color:#4fb8e0;box-shadow:0 0 0 3px rgba(79,184,224,.18)}"
     /* File inputs sit directly before an upload button (/update, file
      * management); on narrow screens where they don't fit on one line, the
      * button wrapped to its own line with NO gap above it, looking stuck to
@@ -752,34 +842,39 @@ static const char PAGE_HEADER_FMT[] =
      * harmless when they DO fit side by side (just a little extra space). */
     "input[type=file]{margin:4px 8px 8px 0}"
     ".kv input:not([type=checkbox]):not([type=range]){width:100%%;max-width:360px}"
-    /* Range (the LED-brightness slider) was excluded from the rule above and
-     * so had NO width constraint at all -- left to the browser's own
-     * default intrinsic width, which contributed to the table being wider
-     * than necessary in auto layout (every column shares one width across
-     * all rows, so an oversized cell in any single row widens the whole
-     * column, and the whole table). */
+    /* Range inputs were excluded above and need their own width cap, else
+     * the browser's intrinsic width widens the whole table column. */
     ".kv input[type=range]{width:100%%;max-width:280px}"
-    /* IPv4 fields only ever hold up to "255.255.255.255" (15 chars) -- the
-     * generic 360px above is sized for long free-text fields (Node-ID,
-     * MQTT-URI) and was too wide for three of these side by side (the DNS
-     * row), overflowing the page especially with the wider German labels
-     * next to them. !important because the generic rule above is otherwise
-     * more specific (two :not() clauses). */
+    /* IPv4 fields only need "255.255.255.255" (15 chars); !important since
+     * the generic 360px rule above is otherwise more specific. */
     ".ipfield{max-width:140px!important}"
-    ".ok{display:inline-block;color:#5fe0a0;background:#123726;padding:2px 10px;border-radius:20px;font-size:12px}"
-    ".bad{display:inline-block;color:#ff8a8a;background:#3a1720;padding:2px 10px;border-radius:20px;font-size:12px}"
-    ".warn{background:#3a2e0c;border:1px solid #7a5c12;color:#ffd77a;padding:12px 14px;border-radius:11px;margin:14px 0}"
-    "small{color:#8b98ab}"
+    /* ::before dot gives each badge a small "status light" even where the
+     * colour alone might be hard to tell apart (colour-blindness, a dim
+     * screen) -- purely CSS, no change needed anywhere the .ok/.bad spans
+     * themselves get built. */
+    ".ok{display:inline-block;color:#5fd88a;background:#122019;padding:2px 10px;border-radius:20px;font-size:12px}"
+    ".bad{display:inline-block;color:#ff6b6b;background:#241315;padding:2px 10px;border-radius:20px;font-size:12px}"
+    ".ok::before,.bad::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%%;"
+    "background:currentColor;margin-right:5px;vertical-align:middle}"
+    ".warn{background:#241c0d;border:1px solid #7a5c12;color:#f2b134;padding:12px 14px;border-radius:10px;margin:14px 0}"
+    "small{color:#94a0a8}"
     ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:6px 0 4px}"
-    ".card{background:#141d2b;border:1px solid #26303f;border-radius:11px;padding:12px 14px}"
-    ".card .l{font-size:12px;color:#8b98ab;margin-bottom:3px}.card .v{font-size:22px;font-weight:600}"
-    "pre{background:#0b1220;border:1px solid #26303f;border-radius:11px;color:#cfe3ff}"
+    ".card{background:#15191d;border:1px solid #2a2f34;border-radius:10px;padding:12px 14px}"
+    ".card .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#94a0a8;margin-bottom:5px}"
+    ".card .v{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}"
+    "pre{background:#0a0d0f;border:1px solid #2a2f34;border-radius:9px;color:#cfe8f0}"
     "</style><title>ITS G5 Node</title></head><body><div class='wrap'>"
     /* .navlinks is a separate flex item from .lang (see CSS) so the page
      * links can wrap onto multiple rows on narrow screens while the flag
      * switch stays anchored top-right instead of dropping onto its own,
      * disconnected-looking full-width row. */
-    "<nav><div class='navlinks'>"
+    "<nav>"
+    /* Hidden checkbox + label = the CSS-only hamburger toggle (see the .brgr
+     * / .nvt rules). Placed before .navlinks so the ".nvt:checked~.navlinks"
+     * sibling selector can reveal it. &#9776; = the hamburger glyph. */
+    "<input type='checkbox' id='nvt' class='nvt'>"
+    "<label for='nvt' class='brgr' aria-label='Men&uuml;'>&#9776;</label>"
+    "<div class='navlinks'>"
     "<a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
     "<a href='/map?lang=%s'>%s</a>"
@@ -808,7 +903,13 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
     /* Auto-refresh is JS-based (not a <meta> tag) so a floating button can
      * pause/resume it (persisted per-browser in localStorage) and the interval
      * is configurable (0 = off). ⏸ = pause, ▶ = play. */
-    char refresh_tag[768] = "";
+    /* static EXT_RAM_BSS_ATTR, not a stack buffer -- the httpd task's stack
+     * is only 16384 bytes total (see webserver_init), and header[] growing
+     * on-stack is exactly what caused a real crash once. */
+    static EXT_RAM_BSS_ATTR char refresh_tag[768];
+    /* Static doesn't auto-reset between calls; clear explicitly so a page
+     * with refresh_secs<=0 can't inherit a previous request's script. */
+    refresh_tag[0] = '\0';
     if (refresh_secs > 0)
     {
         uint32_t ri = 5;
@@ -833,7 +934,7 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
     const char *lang_de_active = (current_lang == LANG_DE) ? "active" : "";
     const char *lang_en_active = (current_lang == LANG_EN) ? "active" : "";
 
-    char header[5120];
+    static EXT_RAM_BSS_ATTR char header[9216];
     snprintf(header, sizeof(header), PAGE_HEADER_FMT,
              lc, refresh_tag,
              lc, T(S_NAV_STATUS),
@@ -857,26 +958,17 @@ static void send_page_header(httpd_req_t *req, const char *heading)
     send_page_header_refresh(req, heading, 0);
 }
 
-/* Renders the 60-second packet-rate sparkline + per-message-type breakdown
- * shown on the status page under "Activity". Reuses state that already
- * exists (rate_buckets fed by rate_record_packet, msg_type_stats fed by
- * msg_type_stats_record -- both in webserver_handle_packet) rather than
- * adding new counters. Only one channel is ever active at a time (see
- * sniffer_get_channel), so this is framed as activity/signal over time
- * rather than a per-channel breakdown. */
+/* Renders the status page's "Activity" sparkline + message-type breakdown,
+ * from counters rate_record_packet/msg_type_stats_record already fill in
+ * webserver_handle_packet. */
 static void render_activity_stats(httpd_req_t *req)
 {
     uint64_t now_sec = esp_timer_get_time() / 1000000ull;
     uint32_t counts[RATE_WINDOW_SECS];
     uint32_t maxcount = 1;
-    /* rate_buckets[]/msg_type_stats[] are written under msg_ring_mutex (see
-     * webserver_handle_packet -> rate_record_packet/msg_type_stats_record),
-     * but were previously read here without it -- a label could be observed
-     * mid-strlcpy, torn between old and new bytes (harmless since both sides
-     * use fixed-size arrays, just a cosmetically wrong/flickering label, but
-     * worth doing correctly). Snapshot both under the same lock, then render
-     * from the snapshot so the lock isn't held during the (slower) chunked
-     * HTTP writes below. */
+    /* rate_buckets[]/msg_type_stats[] are written under msg_ring_mutex;
+     * snapshot both under the same lock, then render from the snapshot so
+     * the lock isn't held during the slower chunked HTTP writes below. */
     static msg_type_stat_t type_snapshot[MSG_TYPE_STATS_SLOTS];
     if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
@@ -906,7 +998,7 @@ static void render_activity_stats(httpd_req_t *req)
     {
         int h = counts[i] ? (int)(4 + (counts[i] * 32) / maxcount) : 1;
         o += snprintf(svg + o, sizeof(svg) - o,
-            "<rect x='%d' y='%d' width='3' height='%d' rx='1' fill='#2f6fd0'/>",
+            "<rect x='%d' y='%d' width='3' height='%d' rx='1' fill='#f2b134'/>",
             (int)i * 4, 40 - h, h);
     }
     o += snprintf(svg + o, sizeof(svg) - o, "</svg>");
@@ -1079,15 +1171,12 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 static httpd_handle_t g_httpd_server;
 static uint32_t ws_last_broadcast_count = UINT32_MAX;
 
-/* Same snapshot-then-render shape as messages_get_handler, but as compact
- * JSON for the browser to turn into table rows. Field names are single
- * letters (t/r/l/y/h, plus a/o/i for CAM position -- lAtitude e7, lOngitude
- * e7, station Id) purely to keep the payload small on a 10 Mbit link. a/o/i
- * are only present when a message actually has a decoded position (CAM
- * only), so the common case (no position) costs nothing extra on the wire. */
+/* Compact JSON for the browser to turn into table rows; single-letter field
+ * names (t/r/l/y/h, a/o/i for lat/lon/stationId) to keep the payload small.
+ * a/o/i only present when a position was decoded. */
 static size_t build_msg_json(char *out, size_t out_size)
 {
-    static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
+    static EXT_RAM_BSS_ATTR web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
     size_t count = 0;
     if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
@@ -1117,10 +1206,14 @@ static size_t build_msg_json(char *out, size_t out_size)
         else
             snprintf(rssi_str, sizeof(rssi_str), "-");
 
-        char possuffix[96] = "";
+        char possuffix[128] = "";
         if (e->has_position)
-            snprintf(possuffix, sizeof(possuffix), ",\"a\":%ld,\"o\":%ld,\"i\":%lu",
+        {
+            size_t po = snprintf(possuffix, sizeof(possuffix), ",\"a\":%ld,\"o\":%ld,\"i\":%lu",
                      (long)e->lat_e7, (long)e->lon_e7, (unsigned long)e->station_id);
+            if (e->has_speed && po < sizeof(possuffix))
+                snprintf(possuffix + po, sizeof(possuffix) - po, ",\"s\":%ld", (long)e->speed_cmps);
+        }
 
         /* msgtype/clock/rssi_str/hex only ever contain digits, letters,
          * spaces, ':', '-', '.' (see its_decode_frame/format_clock) --
@@ -1155,7 +1248,11 @@ static void ws_broadcast_work(void *arg)
     httpd_ws_frame_t frame = { .type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)json, .len = len };
     for (size_t i = 0; i < max_fds; i++)
         if (httpd_ws_get_fd_info(g_httpd_server, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
-            httpd_ws_send_frame_async(g_httpd_server, client_fds[i], &frame);
+            /* A failed send means the client is gone, but esp_http_server
+             * won't notice on its own -- the dead session would occupy a
+             * max_open_sockets slot forever otherwise. */
+            if (httpd_ws_send_frame_async(g_httpd_server, client_fds[i], &frame) != ESP_OK)
+                httpd_sess_trigger_close(g_httpd_server, client_fds[i]);
 }
 
 /* Fires roughly once a second (see webserver_init); cheap no-op when nothing
@@ -1227,7 +1324,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE), T(S_COL_PREVIEW));
     httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
 
-    static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
+    static EXT_RAM_BSS_ATTR web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
     size_t count = 0;
     if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
@@ -1273,18 +1370,22 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
      * without JS/WebSocket, just without the live updates. */
     static const char ws_script[] =
         "<script>(function(){"
-        "var delay=1000;"
+        "var delay=1000,ws,closing=false;"
         "function connect(){"
         "var proto=location.protocol==='https:'?'wss://':'ws://';"
-        "var ws=new WebSocket(proto+location.host+'/ws');"
+        "ws=new WebSocket(proto+location.host+'/ws');"
         "ws.onmessage=function(ev){"
         "var d=JSON.parse(ev.data);var h='';"
         "for(var i=0;i<d.length;i++){var m=d[i];"
         "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+m.y+'</td><td class=\"wrapcell\"><code>'+m.h+'</code></td></tr>';}"
         "document.getElementById('msgtbody').innerHTML=h;delay=1000;};"
-        "ws.onclose=function(){setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
+        "ws.onclose=function(){if(closing)return;setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
         "}"
         "connect();"
+        /* Navigating away/reloading without this leaves the socket to be
+         * reaped later by the server-side dead-client check in
+         * ws_broadcast_work instead of freeing it immediately. */
+        "window.addEventListener('pagehide',function(){closing=true;if(ws)ws.close();});"
         "})();</script>";
     httpd_resp_send_chunk(req, ws_script, HTTPD_RESP_USE_STRLEN);
 #endif
@@ -1303,34 +1404,62 @@ static esp_err_t map_get_handler(httpd_req_t *req)
     resolve_language(req);
     send_page_header(req, T(S_TITLE_MAP));
 
-    char hint[1024];
+    /* Collapsible (native <details>, no JS) and collapsed by default -- the
+     * full explanation is long and eats a lot of vertical space on a phone,
+     * where it pushed the map itself below the fold; the summary is one line. */
+    char hint[1536];
     snprintf(hint, sizeof(hint),
-        "<p><small>%s</small></p>"
+        "<details style='margin:6px 0'>"
+        "<summary style='cursor:pointer'><small>%s</small></summary>"
+        "<p><small>%s</small></p></details>"
         "<link rel='stylesheet' href='/leaflet.css'>"
         "<script src='/leaflet.js'></script>"
         "<style>.its-emoji-icon{font-size:20px;line-height:26px;text-align:center}</style>"
         "<div id='map' style='height:70vh;border-radius:12px;overflow:hidden'></div>",
-        T(S_MAP_HINT));
+        T(S_MAP_HELP), T(S_MAP_HINT));
     httpd_resp_send_chunk(req, hint, HTTPD_RESP_USE_STRLEN);
+
+#if CONFIG_ENABLE_SD && CONFIG_HTTPD_WS_SUPPORT
+    /* Playback controls: hidden until pbLoad() (see MAP_SCRIPT) finds at
+     * least one entry. Default from/to values are filled in by JS, not
+     * here, since datetime-local needs the *browser's* local time. */
+    char pbctl[640];
+    snprintf(pbctl, sizeof(pbctl),
+        "<div style='margin:8px 0'>"
+        "<label>%s <input type='datetime-local' id='pbfrom'></label> "
+        "<label>%s <input type='datetime-local' id='pbto'></label> "
+        "<button id='pbload'>%s</button> "
+        "<span id='pbmsg'></span>"
+        "<span id='pbctl' style='display:none'>"
+        "<button id='pbplay'>&#9654;</button> "
+        "<input id='pbslider' type='range' min='0' max='0' value='0' "
+        "style='width:220px;vertical-align:middle'> "
+        "<span id='pbtime'></span>"
+        /* Own row with real top margin -- on phone, Live would otherwise
+         * wrap directly under Play with no gap, easy to fat-finger. */
+        "<div style='margin-top:10px'><button id='pblive'>%s</button></div>"
+        "</span></div>",
+        T(S_PLAYBACK_FROM), T(S_PLAYBACK_TO), T(S_PLAYBACK_LOAD), T(S_PLAYBACK_LIVE));
+    httpd_resp_send_chunk(req, pbctl, HTTPD_RESP_USE_STRLEN);
+#endif
 
     /* Layer-control labels, the only two localized strings the client script
      * needs -- passed in as JS vars so MAP_SCRIPT below can stay one fixed
      * static string, not a per-request snprintf. */
-    char labels[192];
-    snprintf(labels, sizeof(labels), "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\";</script>",
-             T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE));
+    char labels[384];
+    snprintf(labels, sizeof(labels),
+             "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\","
+             "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\";</script>",
+             T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE),
+             T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR));
     httpd_resp_send_chunk(req, labels, HTTPD_RESP_USE_STRLEN);
 
-    /* Seed the map from whatever's already in the ring buffer, same
-     * snapshot-then-render pattern as messages_get_handler above, so the map
-     * isn't empty for up to ~1s waiting for the next /ws tick. msgtype/hex
-     * only ever contain digits/letters/spaces/':'/'-'/'.' (see
-     * its_decode_frame/format_clock), so it's safe to embed directly in this
-     * JS string literal, same as the existing build_msg_json (no
-     * attacker-controlled bytes to escape). */
+    /* Seed the map from the ring buffer so it isn't empty for up to ~1s
+     * waiting for the next /ws tick. msgtype/hex only ever contain
+     * digits/letters/spaces/':'/'-'/'.', safe to embed unescaped. */
     httpd_resp_send_chunk(req, "<script>var ITS_MAP_SEED=[", HTTPD_RESP_USE_STRLEN);
 
-    static web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
+    static EXT_RAM_BSS_ATTR web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
     size_t count = 0;
     if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
@@ -1352,29 +1481,26 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         char rssi_str[16];
         if (e->rssi != 0) snprintf(rssi_str, sizeof(rssi_str), "%d dBm", e->rssi);
         else              snprintf(rssi_str, sizeof(rssi_str), "-");
-        char entry[224];
+        char speedsuffix[24] = "";
+        if (e->has_speed)
+            snprintf(speedsuffix, sizeof(speedsuffix), ",\"s\":%ld", (long)e->speed_cmps);
+        char entry[248];
         snprintf(entry, sizeof(entry),
-                 "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\",\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu}",
+                 "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\",\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu%s}",
                  first ? "" : ",", (unsigned long)e->station_id,
                  (long)e->lat_e7, (long)e->lon_e7, e->msgtype, clock, rssi_str,
-                 (unsigned long)e->length);
+                 (unsigned long)e->length, speedsuffix);
         httpd_resp_send_chunk(req, entry, HTTPD_RESP_USE_STRLEN);
         first = false;
     }
     httpd_resp_send_chunk(req, "];</script>", HTTPD_RESP_USE_STRLEN);
 
 #if CONFIG_HTTPD_WS_SUPPORT
-    /* Reuses the exact same /ws feed and JSON shape as /messages -- this
-     * script just also reads the a/o/i keys that /messages ignores. Markers
-     * are L.marker with a divIcon (an emoji glyph, per station type) rather
-     * than an image -- no marker-icon asset needed, and richer than a plain
-     * dot. bindPopup() makes them clickable, showing whatever fields exist.
-     * Keyed by station_id so a given vehicle's marker moves rather than
-     * accumulating; swept every 5s, evicted after 60s without an update.
-     * Initial view is guessed from the browser's IANA timezone (works over
-     * plain HTTP; the Geolocation API needs HTTPS/localhost, which this
-     * device's plain-HTTP LAN address doesn't satisfy) -- overridden as soon
-     * as a real position arrives (first fix recenters once, see haveView). */
+    /* Reuses the /ws feed from /messages, also reading its a/o/i keys.
+     * Markers are emoji divIcons (no image asset needed), keyed by
+     * station_id, evicted after 60s without an update. Initial view guessed
+     * from the browser's IANA timezone (Geolocation API needs HTTPS, which
+     * this plain-HTTP device doesn't have) -- overridden on first real fix. */
     static const char MAP_SCRIPT[] =
         "<script>(function(){"
         "var TZVIEW={'Europe/Vienna':[47.6,14.5,7],'Europe/Berlin':[51,10.3,6],"
@@ -1394,16 +1520,18 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * to just the emoji markers, no image assets at all), which would
          * otherwise show as a blank white box until clicked/hovered. */
         "L.control.layers(baseLayers,null,{collapsed:false}).addTo(map);"
-        "var markers={};var haveView=false;"
+        "var markers={};var haveView=false;var liveMode=true;"
         "var EMOJI={Ped:'\\ud83d\\udeb6',Cyclist:'\\ud83d\\udeb4',Moped:'\\ud83d\\udef5',"
         "Motorcycle:'\\ud83c\\udfcd',Car:'\\ud83d\\ude97',Bus:'\\ud83d\\ude8c',"
         "LTruck:'\\ud83d\\ude9a',HTruck:'\\ud83d\\ude9b',Trailer:'\\ud83d\\ude9b',"
-        "Special:'\\ud83d\\udea7',Tram:'\\ud83d\\ude8a',RSU:'\\ud83d\\udce1'};"
+        "Special:'\\ud83d\\udea7',Tram:'\\ud83d\\ude8a',RSU:'\\ud83d\\udea6'};"
         "function emojiFor(y){for(var k in EMOJI){if(y===k||y.indexOf(k+' ')===0)return EMOJI[k];}return '\\ud83d\\udccd';}"
         "function iconFor(y){return L.divIcon({html:emojiFor(y),className:'its-emoji-icon',"
         "iconSize:[26,26],iconAnchor:[13,13]});}"
-        "function popupHtml(m){return '<b>'+(m.y||'?')+'</b><br>'+(m.t||'-')+' &middot; '"
-        "+(m.r||'-')+' &middot; '+(m.l||'-')+' B<br>#'+m.i;}"
+        "function popupHtml(m){var h='<b>'+(m.y||'?')+'</b><br>'+(m.t||'-')+' &middot; '"
+        "+(m.r||'-')+' &middot; '+(m.l||'-')+' B<br>#'+m.i;"
+        "if(m.s!==undefined)h+='<br>'+(m.s*0.036).toFixed(1)+' km/h';"
+        "return h;}"
         "function apply(arr){var now=Date.now();"
         "for(var i=0;i<arr.length;i++){var m=arr[i];if(m.a===undefined)continue;"
         "var lat=m.a/1e7,lon=m.o/1e7,key=String(m.i);"
@@ -1413,16 +1541,101 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "markers[key].lastSeen=now;"
         "if(!haveView){map.setView([lat,lon],15);haveView=true;}}}"
         "apply(window.ITS_MAP_SEED||[]);"
-        "setInterval(function(){var now=Date.now();for(var k in markers){"
-        "if(now-markers[k].lastSeen>60000){map.removeLayer(markers[k].marker);delete markers[k];}}},5000);"
-        "var delay=1000;"
+        /* Named (not anonymous) so playback can pause/resume it -- it uses
+         * real Date.now(), meaningless against historical/scrubbed
+         * timestamps, so it must not run while replaying the past. */
+        "var sweepTimer;"
+        "function startSweep(){sweepTimer=setInterval(function(){var now=Date.now();"
+        "for(var k in markers){if(now-markers[k].lastSeen>60000){"
+        "map.removeLayer(markers[k].marker);delete markers[k];}}},5000);}"
+        "startSweep();"
+        "var delay=1000,ws,closing=false;"
         "function connect(){"
         "var proto=location.protocol==='https:'?'wss://':'ws://';"
-        "var ws=new WebSocket(proto+location.host+'/ws');"
-        "ws.onmessage=function(ev){apply(JSON.parse(ev.data));delay=1000;};"
-        "ws.onclose=function(){setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
+        "ws=new WebSocket(proto+location.host+'/ws');"
+        "ws.onmessage=function(ev){if(liveMode)apply(JSON.parse(ev.data));delay=1000;};"
+        "ws.onclose=function(){if(closing)return;setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
         "}"
         "connect();"
+        "window.addEventListener('pagehide',function(){closing=true;if(ws)ws.close();});"
+        /* Playback: /map/playback returns the same {t,i,a,o,y} shape (plus
+         * t=unix seconds) as /ws, so scrubbing just re-derives "current state
+         * per station at time T" from the loaded dataset and feeds it
+         * through the exact same apply(). */
+        "var pbData=null,pbTimer=null,pbPlaying=false;"
+        "function pbSeek(t){t=+t;document.getElementById('pbslider').value=t;"
+        "document.getElementById('pbtime').textContent=new Date(t*1000).toLocaleTimeString();"
+        "var latest={};"
+        "for(var i=0;i<pbData.length;i++){var e=pbData[i];if(e.t>t)break;latest[e.i]=e;}"
+        /* Same 60s staleness rule as the live sweep, but measured in
+         * playback time (t - entry.t) rather than real Date.now() -- a
+         * station's last-known position shouldn't keep showing forever
+         * just because it's the most recent entry found so far. */
+        "for(var k in latest){if(t-latest[k].t>60)delete latest[k];}"
+        /* Remove markers for stations not yet present at time t -- apply()
+         * only ever adds/moves markers for what's in the array it's given,
+         * it never removes ones that are absent, so without this, seeking
+         * backward left every "future" station's marker stuck in place. */
+        "for(var k in markers){if(!(k in latest)){map.removeLayer(markers[k].marker);delete markers[k];}}"
+        "apply(Object.keys(latest).map(function(k){return latest[k];}));}"
+        "function pbLoad(){"
+        "var from=Math.floor(new Date(document.getElementById('pbfrom').value).getTime()/1000);"
+        "var to=Math.floor(new Date(document.getElementById('pbto').value).getTime()/1000);"
+        "var msg=document.getElementById('pbmsg');msg.textContent='';"
+        "if(!from||!to||to<=from){msg.textContent=ITS_PB_ERROR;return;}"
+        "fetch('/map/playback?from='+from+'&to='+to).then(function(r){"
+        "if(!r.ok)throw new Error('http '+r.status);return r.json();"
+        "}).then(function(data){"
+        "pbData=data;"
+        "if(!pbData.length){msg.textContent=ITS_PB_NONE;return;}"
+        "liveMode=false;clearInterval(sweepTimer);"
+        "for(var k in markers){map.removeLayer(markers[k].marker);}markers={};"
+        "var sl=document.getElementById('pbslider');"
+        "sl.min=pbData[0].t;sl.max=pbData[pbData.length-1].t;"
+        "document.getElementById('pbctl').style.display='';"
+        /* Always reframe on the loaded window's own coverage -- apply()'s
+         * own auto-zoom-on-first-fix (haveView) only fires once, whenever
+         * the very first position (live or seed) ever arrived, so relying
+         * on that here would only zoom to playback data by accident. */
+        "map.fitBounds(L.latLngBounds(pbData.map(function(e){return [e.a/1e7,e.o/1e7];})),"
+        "{padding:[30,30],maxZoom:16});"
+        "haveView=true;"
+        /* Start at the beginning, not the end -- seeking to sl.max meant
+         * every station's *final* position for the whole window was
+         * already showing on load, so pressing Play had nothing left to
+         * play: the slider was already at its own stop condition. */
+        "pbSeek(sl.min);"
+        "}).catch(function(){msg.textContent=ITS_PB_ERROR;});}"
+        "function pbToggle(){pbPlaying=!pbPlaying;"
+        "document.getElementById('pbplay').innerHTML=pbPlaying?'&#9208;':'&#9654;';"
+        "if(pbPlaying){var sl=document.getElementById('pbslider');"
+        /* x20 replay speed: a 60-minute window replays in ~3 minutes. */
+        "pbTimer=setInterval(function(){var t=+sl.value+20;"
+        "if(t>=+sl.max){t=+sl.max;pbPlaying=false;"
+        "document.getElementById('pbplay').innerHTML='&#9654;';clearInterval(pbTimer);}"
+        "pbSeek(t);},1000);}else{clearInterval(pbTimer);}}"
+        "function pbLive(){liveMode=true;pbPlaying=false;clearInterval(pbTimer);"
+        "document.getElementById('pbplay').innerHTML='&#9654;';"
+        "document.getElementById('pbctl').style.display='none';"
+        "for(var k in markers){map.removeLayer(markers[k].marker);}markers={};"
+        "apply(window.ITS_MAP_SEED||[]);startSweep();}"
+        /* Wired up here (not inline HTML onclick=/oninput=) because those
+         * run in the *global* scope, not inside this IIFE -- an inline
+         * onclick='pbLoad()' can't see pbLoad at all, since it's private to
+         * this closure. This is exactly why nothing happened when clicking
+         * Load: a silent "pbLoad is not defined" in the console. */
+        "document.getElementById('pbload').onclick=pbLoad;"
+        "document.getElementById('pbplay').onclick=pbToggle;"
+        "document.getElementById('pbslider').oninput=function(){pbSeek(this.value);};"
+        "document.getElementById('pblive').onclick=pbLive;"
+        /* Default to "the last hour"; built from getFullYear()/etc rather
+         * than toISOString() since datetime-local needs local time, not UTC. */
+        "(function(){function p(n){return (n<10?'0':'')+n;}"
+        "function fmt(d){return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())"
+        "+'T'+p(d.getHours())+':'+p(d.getMinutes());}"
+        "var now=new Date();"
+        "document.getElementById('pbto').value=fmt(now);"
+        "document.getElementById('pbfrom').value=fmt(new Date(now.getTime()-3600000));})();"
         "})();</script>";
     httpd_resp_send_chunk(req, MAP_SCRIPT, HTTPD_RESP_USE_STRLEN);
 #endif
@@ -1433,20 +1646,85 @@ static esp_err_t map_get_handler(httpd_req_t *req)
 }
 
 /* ================================================================== */
+/*  GET /map/playback -- historical positions from stored PCAP files  */
+/* ================================================================== */
+
+#if CONFIG_ENABLE_SD
+typedef struct {
+    httpd_req_t *req;
+    bool first;
+} playback_ctx_t;
+
+/* msgtype/label only ever contains digits/letters/spaces/':'/'-'/'.' (see
+ * its_decode_frame), same as everywhere else it's embedded in JSON in this
+ * file -- no attacker-controlled bytes, no escaping needed. */
+static void playback_emit(uint32_t sec, uint32_t usec, uint32_t station_id,
+                          int32_t lat_e7, int32_t lon_e7, bool has_speed, int32_t speed_cmps,
+                          const char *label, void *ctx_)
+{
+    (void)usec;
+    playback_ctx_t *ctx = (playback_ctx_t *)ctx_;
+    char speedsuffix[24] = "";
+    if (has_speed)
+        snprintf(speedsuffix, sizeof(speedsuffix), ",\"s\":%ld", (long)speed_cmps);
+    char entry[216];
+    snprintf(entry, sizeof(entry), "%s{\"t\":%lu,\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\"%s}",
+             ctx->first ? "" : ",", (unsigned long)sec, (unsigned long)station_id,
+             (long)lat_e7, (long)lon_e7, label, speedsuffix);
+    httpd_resp_send_chunk(ctx->req, entry, HTTPD_RESP_USE_STRLEN);
+    ctx->first = false;
+}
+
+static esp_err_t playback_get_handler(httpd_req_t *req)
+{
+    /* Explicit from/to (unix seconds) rather than "last N minutes from now",
+     * so any stored window is reachable -- not just a recent one -- now that
+     * retention can span a full day or more. */
+    time_t now = time(NULL);
+    long from = (long)now - 3600, to = (long)now;
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char val[16];
+        if (httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK)
+            from = strtol(val, NULL, 10);
+        if (httpd_query_key_value(query, "to", val, sizeof(val)) == ESP_OK)
+            to = strtol(val, NULL, 10);
+    }
+    if (to > (long)now) to = (long)now;  /* can't play back the future */
+    if (from < 0)       from = 0;
+    if (to <= from)      to = from + 60;
+    if (to - from > 240L * 60)  /* bound how many hourly files one request walks */
+        to = from + 240L * 60;
+
+    uint32_t from_sec = (uint32_t)from;
+    uint32_t to_sec = (uint32_t)to;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
+    playback_ctx_t ctx = { req, true };
+    sdpcap_read_positions(from_sec, to_sec, playback_emit, &ctx);
+    httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+#endif
+
+/* ================================================================== */
 /*  Basic Auth for /update and /settings write                        */
 /* ================================================================== */
 
 static bool check_update_auth(httpd_req_t *req)
 {
-    char password[CONFIG_WEB_PASSWORD_BUFFER_SIZE] = {0};
-    size_t pw_size = sizeof(password);
-    esp_err_t res = config_get_str(CONFIG_INDEX_WEB_PASSWORD, password, &pw_size);
+    char stored_hash[CONFIG_WEB_PASSWORD_BUFFER_SIZE] = {0};
+    size_t hash_size = sizeof(stored_hash);
+    esp_err_t res = config_get_str(CONFIG_INDEX_WEB_PASSWORD, stored_hash, &hash_size);
 
-    if (res != ESP_OK || pw_size <= 1)
+    if (res != ESP_OK || hash_size <= 1)
         return true;  /* no password set => open */
 
     size_t hdr_len = httpd_req_get_hdr_value_len(req, "Authorization");
-    if (hdr_len == 0)
+    if (hdr_len == 0 || hdr_len > 512)
         return false;
 
     char *auth_hdr = malloc(hdr_len + 1);
@@ -1454,20 +1732,21 @@ static bool check_update_auth(httpd_req_t *req)
         return false;
 
     bool ok = false;
-    if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, hdr_len + 1) == ESP_OK)
+    if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, hdr_len + 1) == ESP_OK &&
+        strncmp(auth_hdr, "Basic ", 6) == 0)
     {
-        char credentials[6 + CONFIG_WEB_PASSWORD_BUFFER_SIZE] = "admin:";
-        strncat(credentials, password, sizeof(credentials) - strlen(credentials) - 1);
-
-        unsigned char b64[128];
-        size_t olen = 0;
-        if (mbedtls_base64_encode(b64, sizeof(b64) - 1, &olen,
-                                  (const unsigned char *)credentials, strlen(credentials)) == 0)
+        unsigned char decoded[384];
+        size_t declen = 0;
+        if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &declen,
+                                  (const unsigned char *)auth_hdr + 6, strlen(auth_hdr + 6)) == 0)
         {
-            b64[olen] = '\0';
-            char expected[8 + sizeof(b64)];
-            snprintf(expected, sizeof(expected), "Basic %s", b64);
-            ok = strcmp(auth_hdr, expected) == 0;
+            decoded[declen] = '\0';
+            if (strncmp((char *)decoded, "admin:", 6) == 0)
+            {
+                char attempt_hash[65];
+                config_hash_web_password((char *)decoded + 6, attempt_hash);
+                ok = strcmp(attempt_hash, stored_hash) == 0;
+            }
         }
     }
     free(auth_hdr);
@@ -1513,8 +1792,12 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 
     uint32_t chan = 0;
     config_get_u32(CONFIG_INDEX_AUTOSTART_CHAN, &chan);
+    uint8_t broadcast_only = 1;
+    config_get_u8(CONFIG_INDEX_BROADCAST_ONLY, &broadcast_only);
     uint8_t brightness = 0;
     config_get_u8(CONFIG_INDEX_LED_BRIGHTNESS, &brightness);
+    uint32_t led_override = 0;
+    config_get_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, &led_override);
     uint32_t refresh_sec = 5;
     config_get_u32(CONFIG_INDEX_REFRESH_SEC, &refresh_sec);
 
@@ -1531,6 +1814,14 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u8(CONFIG_INDEX_LOG_SYS, &log_sys);
     config_get_u8(CONFIG_INDEX_LOG_FRAMES, &log_frames);
     config_get_u32(CONFIG_INDEX_LOG_MAX_MB, &log_mb);
+
+    uint8_t pcap_en = 0;
+    uint32_t pcap_hours = 24, pcap_mb = 300, pcap_buf_mb = 1, pcap_flush_sec = 300;
+    config_get_u8(CONFIG_INDEX_PCAP_ENABLE, &pcap_en);
+    config_get_u32(CONFIG_INDEX_PCAP_RETAIN_HOURS, &pcap_hours);
+    config_get_u32(CONFIG_INDEX_PCAP_MAX_MB, &pcap_mb);
+    config_get_u32(CONFIG_INDEX_PCAP_BUF_MB, &pcap_buf_mb);
+    config_get_u32(CONFIG_INDEX_PCAP_FLUSH_SEC, &pcap_flush_sec);
 #endif
 
     /* Ethernet: no static IP stored → DHCP. DNS applies in either mode. */
@@ -1565,22 +1856,29 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         snprintf(cur_line, sizeof(cur_line), "%s: %s", T(S_ETH_CURRENT), T(S_ETH_CUR_NOT_UP));
     }
 
-    /* Large; keep off the httpd task stack (single-task, sequential handlers). */
-    static EXT_RAM_BSS_ATTR char body[8192];
-    snprintf(body, sizeof(body),
-        "<p>%s</p>"
-        "<table class='kv'>"
-        /* size='16' (not the field's natural full width) on purpose: on a
-         * table with auto layout, the HTML size attribute skews the
-         * browser's column-width computation even under a CSS width:100%
-         * rule, reserving far more column width than necessary (size=40 on
-         * mqtturi alone was enough to push the whole table wider than a
-         * phone screen). The input still shows/edits the full value
-         * (scrollable within the box); only the initial rendered width hint
-         * changes, and the CSS width/max-width rule still governs the
-         * actual size on wider screens. */
+    /* LED override is stored as a plain 24-bit RGB value (see led.c); render
+     * it as a #rrggbb string for the <input type=color> picker. */
+    char led_color[8];
+    snprintf(led_color, sizeof(led_color), "#%06lx", (unsigned long)(led_override & 0xFFFFFFUL));
+
+    send_page_header(req, T(S_TITLE_SETTINGS));
+
+    char intro[256];
+    snprintf(intro, sizeof(intro), "<p>%s</p>", T(S_SET_INTRO));
+    httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
+
+    /* Each section is its own chunk, same multi-chunk pattern as
+     * render_activity_stats; EXT_RAM_BSS_ATTR/static keeps them off the
+     * httpd task's stack. */
+
+    /* --- General: identity, sniffer filtering, LED, UI refresh --- */
+    static EXT_RAM_BSS_ATTR char general[4096];
+    snprintf(general, sizeof(general),
+        "<h2>%s</h2><table class='kv'>"
+        /* size='16', not the field's full width: the HTML size attribute
+         * skews auto-layout column width even under a CSS width:100% rule
+         * (size=40 alone pushed the table wider than a phone screen). */
         "<tr><th>%s</th><td><input id='nodeid' value='%s' size='16'></td></tr>"
-        "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='16'></td></tr>"
         "<tr><th>%s</th><td><select id='chan'>"
         "<option value='0'%s>%s</option>"
         "<option value='5900'%s>G5CC (5900)</option>"
@@ -1589,22 +1887,35 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<option value='5870'%s>G5SC3 (5870)</option>"
         "<option value='5860'%s>G5SC4 (5860)</option>"
         "</select></td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='broadcastonly'%s>"
+        "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td>"
         "<input type='range' id='led' min='0' max='255' value='%u' "
         "oninput=\"document.getElementById('ledval').innerText=this.value\">"
         "<span id='ledval'>%u</span></td></tr>"
-        "<tr><th>%s</th><td><input id='refreshsec' type='number' min='0' max='3600' value='%lu' size='6'></td></tr>"
-        "<tr><th>%s</th><td>"
-        "<input type='password' id='webpasswd' size='16' autocomplete='new-password'>"
-        "<br><small>%s</small>"
-        "<br><label><input type='checkbox' id='webpwclear'> %s</label>"
-        "</td></tr>"
-#if CONFIG_ENABLE_SD
-        "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
-        "<tr><th>%s</th><td><input type='checkbox' id='logframes'%s></td></tr>"
-        "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' value='%lu' size='6'>"
+        "<tr><th>%s</th><td><input type='color' id='ledoverride' value='%s'>"
         "<br><small>%s</small></td></tr>"
-#endif
+        "<tr><th>%s</th><td><input id='refreshsec' type='number' min='0' max='3600' value='%lu' size='6'></td></tr>"
+        "</table>",
+        T(S_SET_GROUP_GENERAL),
+        T(S_NODEID), nodeid,
+        T(S_AUTOSTART_CHAN),
+        chan == 0 ? " selected" : "", T(S_CHAN_NONE),
+        chan == 5900 ? " selected" : "",
+        chan == 5890 ? " selected" : "",
+        chan == 5880 ? " selected" : "",
+        chan == 5870 ? " selected" : "",
+        chan == 5860 ? " selected" : "",
+        T(S_BROADCAST_ONLY), broadcast_only ? " checked" : "", T(S_BROADCAST_ONLY_HINT),
+        T(S_LED_BRIGHTNESS), brightness, brightness,
+        T(S_LED_OVERRIDE), led_color, T(S_LED_OVERRIDE_HINT),
+        T(S_REFRESH_SEC), (unsigned long)refresh_sec);
+    httpd_resp_send_chunk(req, general, HTTPD_RESP_USE_STRLEN);
+
+    /* --- Network --- */
+    static EXT_RAM_BSS_ATTR char network[4096];
+    snprintf(network, sizeof(network),
+        "<h2>%s</h2><table class='kv'>"
         "<tr><th></th><td>%s</td></tr>"
         "<tr><th>%s</th><td><input type='checkbox' id='dhcp'%s onchange='dhcpToggle()'></td></tr>"
         "<tr><th>%s</th><td><input class='ipfield' id='ethip' value='%s' size='16' maxlength='15'></td></tr>"
@@ -1615,7 +1926,74 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<input class='ipfield' id='ethdns2' value='%s' size='16' maxlength='15'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='ntpserver' value='%s' size='16'></td></tr>"
-        "</table>"
+        "</table>",
+        T(S_SET_GROUP_NETWORK),
+        cur_line,
+        T(S_ETH_DHCP), dhcp ? " checked" : "",
+        T(S_ETH_IP), ethip,
+        T(S_ETH_NETMASK), ethnm,
+        T(S_ETH_GATEWAY), ethgw,
+        T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
+        T(S_ETH_NET_NOTE),
+        T(S_NTP_SERVER), ntp_server);
+    httpd_resp_send_chunk(req, network, HTTPD_RESP_USE_STRLEN);
+
+    /* --- MQTT --- */
+    static EXT_RAM_BSS_ATTR char mqtt_block[2048];
+    snprintf(mqtt_block, sizeof(mqtt_block),
+        "<h2>%s</h2><table class='kv'>"
+        "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='16'></td></tr>"
+        "</table>",
+        T(S_SET_GROUP_MQTT), T(S_MQTT_URI), mqtt_uri);
+    httpd_resp_send_chunk(req, mqtt_block, HTTPD_RESP_USE_STRLEN);
+
+#if CONFIG_ENABLE_SD
+    /* --- Storage (SD): logging + PCAP capture --- */
+    static EXT_RAM_BSS_ATTR char storage[3072];
+    snprintf(storage, sizeof(storage),
+        "<h2>%s</h2><table class='kv'>"
+        "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='logframes'%s></td></tr>"
+        "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' value='%lu' size='6'>"
+        "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='pcapen'%s></td></tr>"
+        "<tr><th>%s</th><td><input id='pcaphours' type='number' min='1' max='720' value='%lu' size='6'></td></tr>"
+        "<tr><th>%s</th><td><input id='pcapmaxmb' type='number' min='1' value='%lu' size='6'>"
+        "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input id='pcapbufmb' type='number' min='1' max='4' value='%lu' size='6'>"
+        "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input id='pcapflushsec' type='number' min='8' max='3600' value='%lu' size='6'></td></tr>"
+        "</table>",
+        T(S_SET_GROUP_STORAGE),
+        T(S_LOG_SYS), log_sys ? " checked" : "",
+        T(S_LOG_FRAMES), log_frames ? " checked" : "",
+        T(S_LOG_BUDGET), (unsigned long)log_mb, T(S_LOG_HINT),
+        T(S_PCAP_ENABLE), pcap_en ? " checked" : "",
+        T(S_PCAP_RETAIN_HOURS), (unsigned long)pcap_hours,
+        T(S_PCAP_MAX_MB), (unsigned long)pcap_mb, T(S_PCAP_HINT),
+        T(S_PCAP_BUF_MB), (unsigned long)pcap_buf_mb, T(S_PCAP_BUF_HINT),
+        T(S_PCAP_FLUSH_SEC), (unsigned long)pcap_flush_sec);
+    httpd_resp_send_chunk(req, storage, HTTPD_RESP_USE_STRLEN);
+#endif
+
+    /* --- Security --- */
+    static EXT_RAM_BSS_ATTR char security[1024];
+    snprintf(security, sizeof(security),
+        "<h2>%s</h2><table class='kv'>"
+        "<tr><th>%s</th><td>"
+        "<input type='password' id='webpasswd' size='16' autocomplete='new-password'>"
+        "<br><small>%s</small>"
+        "<br><label><input type='checkbox' id='webpwclear'> %s</label>"
+        "</td></tr>"
+        "</table>",
+        T(S_SET_GROUP_SECURITY),
+        T(S_WEB_PASSWORD),
+        pw_set ? T(S_WEB_PASSWORD_SET) : T(S_WEB_PASSWORD_NONE),
+        T(S_WEB_PASSWORD_CLEAR));
+    httpd_resp_send_chunk(req, security, HTTPD_RESP_USE_STRLEN);
+
+    static EXT_RAM_BSS_ATTR char save_block[4096];
+    snprintf(save_block, sizeof(save_block),
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
         "<script>"
         "function save(){"
@@ -1623,7 +2001,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('nodeid',document.getElementById('nodeid').value);"
         "p.append('mqtturi',document.getElementById('mqtturi').value);"
         "p.append('chan',document.getElementById('chan').value);"
+        "p.append('broadcastonly',document.getElementById('broadcastonly').checked?'1':'0');"
         "p.append('led',document.getElementById('led').value);"
+        "p.append('ledoverride',parseInt(document.getElementById('ledoverride').value.substring(1),16));"
         "p.append('refreshsec',document.getElementById('refreshsec').value);"
         "p.append('ntpserver',document.getElementById('ntpserver').value);"
         "p.append('webpasswd',document.getElementById('webpasswd').value);"
@@ -1632,6 +2012,11 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('logsys',document.getElementById('logsys').checked?'1':'0');"
         "p.append('logframes',document.getElementById('logframes').checked?'1':'0');"
         "p.append('logmaxmb',document.getElementById('logmaxmb').value);"
+        "p.append('pcapen',document.getElementById('pcapen').checked?'1':'0');"
+        "p.append('pcaphours',document.getElementById('pcaphours').value);"
+        "p.append('pcapmaxmb',document.getElementById('pcapmaxmb').value);"
+        "p.append('pcapbufmb',document.getElementById('pcapbufmb').value);"
+        "p.append('pcapflushsec',document.getElementById('pcapflushsec').value);"
 #endif
         "p.append('dhcp',document.getElementById('dhcp').checked?'1':'0');"
         "p.append('ethip',document.getElementById('ethip').value);"
@@ -1647,40 +2032,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "['ethip','ethnm','ethgw'].forEach(function(i){document.getElementById(i).disabled=d;});}"
         "dhcpToggle();"
         "</script>",
-        T(S_SET_INTRO),
-        T(S_NODEID), nodeid,
-        T(S_MQTT_URI), mqtt_uri,
-        T(S_AUTOSTART_CHAN),
-        chan == 0 ? " selected" : "", T(S_CHAN_NONE),
-        chan == 5900 ? " selected" : "",
-        chan == 5890 ? " selected" : "",
-        chan == 5880 ? " selected" : "",
-        chan == 5870 ? " selected" : "",
-        chan == 5860 ? " selected" : "",
-        T(S_LED_BRIGHTNESS), brightness, brightness,
-        T(S_REFRESH_SEC), (unsigned long)refresh_sec,
-        T(S_WEB_PASSWORD),
-        pw_set ? T(S_WEB_PASSWORD_SET) : T(S_WEB_PASSWORD_NONE),
-        T(S_WEB_PASSWORD_CLEAR),
-#if CONFIG_ENABLE_SD
-        T(S_LOG_SYS), log_sys ? " checked" : "",
-        T(S_LOG_FRAMES), log_frames ? " checked" : "",
-        T(S_LOG_BUDGET), (unsigned long)log_mb, T(S_LOG_HINT),
-#endif
-        cur_line,
-        T(S_ETH_DHCP), dhcp ? " checked" : "",
-        T(S_ETH_IP), ethip,
-        T(S_ETH_NETMASK), ethnm,
-        T(S_ETH_GATEWAY), ethgw,
-        T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
-        T(S_ETH_NET_NOTE),
-        T(S_NTP_SERVER), ntp_server,
-        T(S_SAVE),
-        lc
-    );
+        T(S_SAVE), lc);
+    httpd_resp_send_chunk(req, save_block, HTTPD_RESP_USE_STRLEN);
 
-    send_page_header(req, T(S_TITLE_SETTINGS));
-    httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -1707,20 +2061,37 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (!check_update_auth(req))
         return send_auth_required(req);
 
-    if (req->content_len == 0 || req->content_len > 2048)
+    char buf[2048];
+    if (req->content_len == 0 || req->content_len > sizeof(buf) - 1)
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
         return ESP_FAIL;
     }
 
-    char buf[2048] = {0};
-    int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (received <= 0)
+    /* Loop until the whole declared body arrived -- a single recv may return
+     * only part of it (TCP segmentation), and parsing a truncated form would
+     * silently drop whatever settings came after the cut. Same retry pattern
+     * as update_post_handler/sdcard_upload_handler. */
+    size_t got = 0;
+    int retries = 0;
+    while (got < req->content_len)
+    {
+        int received = httpd_req_recv(req, buf + got, req->content_len - got);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT)
+        {
+            if (++retries > 5) break;
+            continue;
+        }
+        if (received <= 0) break;
+        retries = 0;
+        got += received;
+    }
+    if (got < req->content_len)
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
         return ESP_FAIL;
     }
-    buf[received] = '\0';
+    buf[got] = '\0';
 
     char value[256];
     int saved = 0;
@@ -1740,6 +2111,10 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         url_decode(value);
         if (config_set_u32(CONFIG_INDEX_AUTOSTART_CHAN, (uint32_t)strtoul(value, NULL, 10)) == ESP_OK) saved++;
     }
+    if (httpd_query_key_value(buf, "broadcastonly", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_BROADCAST_ONLY, strcmp(value, "1") == 0 ? 1 : 0) == ESP_OK) saved++;
+    }
     if (httpd_query_key_value(buf, "led", value, sizeof(value)) == ESP_OK)
     {
         url_decode(value);
@@ -1748,6 +2123,12 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         if (b > 255) b = 255;
         /* config_set_u8 fires a config event, so LED brightness updates live */
         if (config_set_u8(CONFIG_INDEX_LED_BRIGHTNESS, (uint8_t)b) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "ledoverride", value, sizeof(value)) == ESP_OK)
+    {
+        /* Decimal (converted client-side from the color picker's hex); 24-bit RGB. */
+        unsigned long v = strtoul(value, NULL, 10);
+        if (config_set_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, (uint32_t)(v & 0xFFFFFFUL)) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "refreshsec", value, sizeof(value)) == ESP_OK)
     {
@@ -1771,6 +2152,9 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     else if (httpd_query_key_value(buf, "webpasswd", value, sizeof(value)) == ESP_OK)
     {
         url_decode(value);
+        /* config_set_str hashes it (see config_set_web_password) -- same
+         * path the console's `config_set webpasswd` command also goes
+         * through, so both ways of setting it end up consistent. */
         if (value[0] && config_set_str(CONFIG_INDEX_WEB_PASSWORD, value) == ESP_OK) saved++;
     }
 #if CONFIG_ENABLE_SD
@@ -1789,6 +2173,34 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         unsigned long mb = strtoul(value, NULL, 10);
         if (mb >= 1 && mb <= 100000 &&
             config_set_u32(CONFIG_INDEX_LOG_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "pcapen", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_PCAP_ENABLE, strcmp(value, "1") == 0 ? 1 : 0) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "pcaphours", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long h = strtoul(value, NULL, 10);
+        if (h >= 1 && h <= 720 &&
+            config_set_u32(CONFIG_INDEX_PCAP_RETAIN_HOURS, (uint32_t)h) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "pcapbufmb", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long mb = strtoul(value, NULL, 10);
+        if (mb >= 1 && mb <= 4 &&
+            config_set_u32(CONFIG_INDEX_PCAP_BUF_MB, (uint32_t)mb) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "pcapflushsec", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long s = strtoul(value, NULL, 10);
+        if (s >= 8 && s <= 3600 &&
+            config_set_u32(CONFIG_INDEX_PCAP_FLUSH_SEC, (uint32_t)s) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "pcapmaxmb", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long mb = strtoul(value, NULL, 10);
+        if (mb >= 1 && mb <= 100000 &&
+            config_set_u32(CONFIG_INDEX_PCAP_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
     }
 #endif
     /* Ethernet / network — only touched when the form submitted the block, so a
@@ -1965,8 +2377,8 @@ static esp_err_t manifest_get_handler(httpd_req_t *req)
 {
     static const char m[] =
         "{\"name\":\"ITS G5 Node\",\"short_name\":\"ITS G5\",\"start_url\":\"/\","
-        "\"display\":\"standalone\",\"background_color\":\"#0a1c3a\","
-        "\"theme_color\":\"#1c56be\",\"icons\":["
+        "\"display\":\"standalone\",\"background_color\":\"#0c1013\","
+        "\"theme_color\":\"#f2b134\",\"icons\":["
         "{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\"},"
         "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\"},"
         "{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\"}]}";
@@ -2003,6 +2415,16 @@ static const char *reset_reason_str(esp_reset_reason_t r)
     }
 }
 
+/* Same auth model as reboot_post_handler -- /system itself is unauthenticated,
+ * and this only discards diagnostic data, not user data. */
+static esp_err_t coredump_clear_post_handler(httpd_req_t *req)
+{
+    esp_err_t e = esp_core_dump_image_erase();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, e == ESP_OK ? "OK" : "Error");
+    return e == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
 static const char *task_state_str(eTaskState s)
 {
     switch (s)
@@ -2020,6 +2442,29 @@ static esp_err_t system_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
     send_page_header(req, T(S_TITLE_SYSTEM));
+
+    /* image_check validates the SHA256, so this can't false-positive on
+     * stale flash content. Reuses the generic partition download below
+     * (/fs/part?label=coredump) rather than a new route. */
+    if (esp_core_dump_image_check() == ESP_OK)
+    {
+        esp_core_dump_summary_t *sum = malloc(sizeof(esp_core_dump_summary_t));
+        char detail[96] = "";
+        if (sum && esp_core_dump_get_summary(sum) == ESP_OK)
+            snprintf(detail, sizeof(detail), "<br><small>Task %s &middot; PC 0x%08lx</small>",
+                     sum->exc_task, (unsigned long)sum->exc_pc);
+        free(sum);
+
+        char banner[640];
+        snprintf(banner, sizeof(banner),
+            "<div class='warn'><p>%s%s</p>"
+            "<a href='/fs/part?label=coredump'>&#8595; %s</a> "
+            "<button onclick=\"if(confirm('%s'))fetch('/system/coredump/clear',{method:'POST'}).then(()=>location.reload());\">%s</button>"
+            "</div>",
+            T(S_SYS_COREDUMP), detail, T(S_SYS_COREDUMP_DOWNLOAD),
+            T(S_SYS_COREDUMP_CLEAR_CONFIRM), T(S_SYS_COREDUMP_CLEAR));
+        httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
+    }
 
     esp_chip_info_t chip;
     esp_chip_info(&chip);
@@ -2039,6 +2484,23 @@ static esp_err_t system_get_handler(httpd_req_t *req)
     char uptime_str[48];
     format_uptime(esp_timer_get_time() / 1000000ull, uptime_str, sizeof(uptime_str));
 
+    /* Live IP + link speed. Same source (ethernet_get_status) already used
+     * for /settings' read-only "currently in effect" line, just formatted
+     * as its own row here instead of a full sentence. */
+    ethernet_status_t eth_now;
+    ethernet_get_status(&eth_now);
+    char eth_line[128];
+    if (eth_now.up)
+    {
+        eth_speed_t spd = ethernet_get_mgmt_if_link_speed();
+        snprintf(eth_line, sizeof(eth_line), "%s &middot; %s",
+                 eth_now.ip, spd == ETH_SPEED_100M ? "100 MBit/s" : "10 MBit/s");
+    }
+    else
+    {
+        snprintf(eth_line, sizeof(eth_line), "%s", T(S_ETH_CUR_NOT_UP));
+    }
+
     char ri_f[24], ri_m[24], ri_t[24], rp_f[24], rp_m[24], rp_t[24];
     format_bytes(heap_caps_get_free_size(MALLOC_CAP_INTERNAL), ri_f, sizeof(ri_f));
     format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), ri_m, sizeof(ri_m));
@@ -2047,13 +2509,14 @@ static esp_err_t system_get_handler(httpd_req_t *req)
     format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), rp_m, sizeof(rp_m));
     format_bytes(heap_caps_get_total_size(MALLOC_CAP_SPIRAM), rp_t, sizeof(rp_t));
 
-    char info[1400];
+    char info[1792];
     snprintf(info, sizeof(info),
         "<table class='kv'>"
         "<tr><th>%s</th><td>%s rev %d, %s</td></tr>"
         "<tr><th>%s</th><td>%d</td></tr>"
         "<tr><th>%s</th><td>%d MHz</td></tr>"
         "<tr><th>%s</th><td>%s (IDF %s, %s %s)</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
@@ -2067,6 +2530,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         T(S_SYS_IDF), esp_get_idf_version(),
         T(S_SYS_RESET), reset_reason_str(esp_reset_reason()),
         T(S_UPTIME), uptime_str,
+        T(S_ETH_IP), eth_line,
         T(S_SYS_RAM_INT), T(S_SYS_TRIPLE), ri_f, ri_m, ri_t,
         T(S_SYS_RAM_PSRAM), T(S_SYS_TRIPLE), rp_f, rp_m, rp_t,
         T(S_SYS_TASKS));
@@ -2316,12 +2780,9 @@ static bool has_control_char(const char *s)
     return false;
 }
 
-/* Copies `name` into `out`, replacing '"' with '_'. Used to build the
- * filename value of a Content-Disposition header: a bare '"' in the source
- * filename would otherwise break out of the quoted value. Belt-and-braces
- * defense-in-depth -- upload rejects '"' in new filenames already, but this
- * also covers files that reached the card some other way (e.g. copied onto
- * it directly with a card reader, bypassing that check entirely). */
+/* Replaces '"' with '_' so a filename can't break out of a quoted
+ * Content-Disposition value -- defense-in-depth for files that reached the
+ * card some other way than our own upload check. */
 static void sanitize_disp_filename(const char *name, char *out, size_t out_size)
 {
     size_t o = 0;
@@ -2481,7 +2942,9 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "<p>%s: <input type='file' id='fw'><button onclick='up()'>%s</button> "
         "<span id='ur'></span></p>"
         "<p><button onclick='fmt()'>%s</button> <span id='fr'></span></p>"
-        "<p><button onclick='seltar()'>&#8595; %s</button></p>"
+        "<p><button onclick='seltar()'>&#8595; %s</button> "
+        "<button onclick='seldel()'>%s</button></p>"
+        "<p><small>%s</small></p>"
         "<script>"
         "var P='%s';"
         "function up(){var f=document.getElementById('fw').files[0];if(!f){return;}"
@@ -2500,16 +2963,22 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
         "function(c){s.push(encodeURIComponent(c.value));});"
         "if(!s.length){alert('%s');return;}location.href='/sdcard/tar?sel='+s.join('|');}"
+        "function seldel(){var s=[];document.querySelectorAll('.sel:checked').forEach("
+        "function(c){s.push(encodeURIComponent(c.value));});"
+        "if(!s.length){alert('%s');return;}if(!confirm('%s'))return;"
+        "var x=new XMLHttpRequest();x.open('POST','/sdcard/delete?sel='+s.join('|'));"
+        "x.onload=function(){location.reload();};x.send();}"
         "</script>",
         usage,
         T(S_SD_UP_HERE), T(S_SD_UP_BTN),
         T(S_SD_FORMAT),
-        T(S_TAR_SELECTED),
+        T(S_TAR_SELECTED), T(S_SD_DELETE_SELECTED),
+        T(S_TAR_HINT),
         relenc,
         T(S_UPLOADING),
         T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING),
         T(S_SD_DELETE_CONFIRM),
-        T(S_TAR_NONE));
+        T(S_TAR_NONE), T(S_TAR_NONE), T(S_SD_DELETE_SEL_CONFIRM));
     httpd_resp_send_chunk(req, top, HTTPD_RESP_USE_STRLEN);
 
     /* Own (small) chunk: the path breadcrumb is attacker-controlled (?p=), so
@@ -2745,6 +3214,47 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no card");
         return ESP_FAIL;
     }
+
+    /* Bulk path: ?sel=a|b|c, same encoding as /sdcard/tar's ?sel= (percent-
+     * encoded '|' folded back first). Non-empty dirs/bad paths are silently
+     * skipped, best-effort. */
+    char query[1024];
+    char sel[1024] = "";
+    bool have_sel = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+        have_sel = httpd_query_key_value(query, "sel", sel, sizeof(sel)) == ESP_OK;
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+
+    if (have_sel)
+    {
+        char *r = sel, *w = sel;
+        while (*r)
+        {
+            if (r[0] == '%' && r[1] == '7' && (r[2] == 'C' || r[2] == 'c'))
+            {
+                *w++ = '|';
+                r += 3;
+            }
+            else
+                *w++ = *r++;
+        }
+        *w = '\0';
+
+        int failed = 0;
+        char *save = NULL;
+        for (char *tok = strtok_r(sel, "|", &save); tok; tok = strtok_r(NULL, "|", &save))
+        {
+            url_decode(tok);
+            if (tok[0] == '\0' || strstr(tok, "..") || has_control_char(tok)) { failed++; continue; }
+            char full[SD_PATH_MAX];
+            sd_full_path(tok, full, sizeof(full));
+            if (remove(full) != 0) failed++;
+        }
+        httpd_resp_sendstr(req, failed == 0 ? "OK" : "Error");
+        return failed == 0 ? ESP_OK : ESP_FAIL;
+    }
+
     char rel[SD_PATH_MAX];
     if (!sd_get_relpath(req, rel, sizeof(rel)) || rel[0] == '\0')
     {
@@ -2753,7 +3263,6 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     }
     char full[SD_PATH_MAX];
     sd_full_path(rel, full, sizeof(full));
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
     if (remove(full) == 0)
     {
         httpd_resp_sendstr(req, "OK");
@@ -2827,6 +3336,7 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
         "<h2>%s &middot; /data</h2>"
         "<p><a href='/sdcard?lang=%s'>&larr; %s</a></p>"
         "<p><button onclick='seltar()'>&#8595; %s</button></p>"
+        "<p><small>%s</small></p>"
         "<script>function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
         "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
         "function(c){s.push(encodeURIComponent(c.value));});"
@@ -2835,7 +3345,9 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
         "<tr><th><input type='checkbox' onclick='selall(this)'></th>"
         "<th>%s</th><th>%s</th></tr>",
         T(S_FS_INTERNAL), lq, T(S_TITLE_SD),
-        T(S_TAR_SELECTED), T(S_TAR_NONE),
+        T(S_TAR_SELECTED),
+        T(S_TAR_HINT),
+        T(S_TAR_NONE),
         relesc, T(S_SD_NAME), T(S_SD_SIZE));
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
 
@@ -3364,11 +3876,11 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 34; /* 28 routes today + /map, /leaflet.js, /leaflet.css, plus a little headroom */
-    /* One extra over the default 7: the /ws live feed holds a socket open for
-     * as long as /messages is open in a browser tab, on top of normal
-     * requests. */
-    config.max_open_sockets = 8;
+    config.max_uri_handlers = 36; /* 33 routes today, plus a little headroom */
+    /* /messages and /map each hold a /ws socket open for as long as the tab
+     * is open -- 8 proved too tight once /map existed (accept() failures as
+     * dead WS sessions piled up, see the reaping in ws_broadcast_work). */
+    config.max_open_sockets = 11;
     /* Wildcard matching lets one handler answer all the icon variants a browser
      * probes (/favicon*, /apple-touch-icon*). Exact routes still match exactly. */
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -3403,6 +3915,7 @@ void webserver_init(void)
         { .uri = "/reboot",   .method = HTTP_POST, .handler = reboot_post_handler },
         { .uri = "/confirm",  .method = HTTP_POST, .handler = confirm_post_handler },
         { .uri = "/system",   .method = HTTP_GET,  .handler = system_get_handler },
+        { .uri = "/system/coredump/clear", .method = HTTP_POST, .handler = coredump_clear_post_handler },
         { .uri = "/map",         .method = HTTP_GET, .handler = map_get_handler },
         { .uri = "/leaflet.js",  .method = HTTP_GET, .handler = leaflet_js_get_handler },
         { .uri = "/leaflet.css", .method = HTTP_GET, .handler = leaflet_css_get_handler },
@@ -3415,6 +3928,7 @@ void webserver_init(void)
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_get_handler, .is_websocket = true },
 #endif
 #if CONFIG_ENABLE_SD
+        { .uri = "/map/playback",    .method = HTTP_GET,  .handler = playback_get_handler },
         { .uri = "/sdcard",          .method = HTTP_GET,  .handler = sdcard_get_handler },
         { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_handler },
         { .uri = "/sdcard/upload",   .method = HTTP_POST, .handler = sdcard_upload_handler },

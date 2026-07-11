@@ -24,6 +24,7 @@
 #include "ota.h"
 #include "sdcard.h"
 #include "sdlog.h"
+#include "sdpcap.h"
 #include "spi.h"
 #include "spi_eppp.h"
 #include "sysmon.h"
@@ -166,6 +167,7 @@ void app_main(void)
     ota_init();
     webserver_init();
     sdlog_init();
+    sdpcap_init();
 
 #ifdef CONFIG_ENABLE_TEMPERATURE
     temperature_init();

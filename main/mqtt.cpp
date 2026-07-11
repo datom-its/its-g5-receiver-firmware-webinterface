@@ -23,7 +23,12 @@
 
 constexpr char TAG[] = "MQTT";
 
+/* `client` is created once and NEVER destroyed -- mqtt_stop() only stops
+ * it, mqtt_start() reuses it. Destroying it would race mqtt_handle_packet()
+ * on the sniffer task (use-after-free); publishing on a stopped-but-live
+ * client is safe, esp-mqtt rejects it internally under its own lock. */
 static esp_mqtt_client_handle_t client;
+static bool client_running;
 static bool connected;
 
 static char topic_prefix[96];
@@ -191,7 +196,7 @@ static int make_topic_prefix()
 
 void mqtt_start(void)
 {
-    if (client)
+    if (client_running)
     {
         ESP_LOGW(TAG, "MQTT already started");
         return;
@@ -221,8 +226,6 @@ void mqtt_start(void)
     strcpy(stats_topic, topic_prefix);
     strcat(stats_topic, "stats");
 
-    esp_mqtt_client_config_t mqtt_cfg{};
-
     char mqtt_uri[CONFIG_MQTT_URI_BUFFER_SIZE];
     size_t size = sizeof(mqtt_uri);
     esp_err_t res = config_get_str(CONFIG_INDEX_MQTT_URI, mqtt_uri, &size);
@@ -232,40 +235,58 @@ void mqtt_start(void)
         return;
     }
 
-    mqtt_cfg.broker.address.uri = mqtt_uri;
-    mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
-    mqtt_cfg.session.last_will = {
-        .topic = status_topic,
-        .msg = "offline",
-        .msg_len = sizeof("offline") - 1,
-        .qos = 0,
-        .retain = 1
-    };
+    if (!client)
+    {
+        /* First start: create the client. It stays alive for the rest of the
+         * device's uptime (see the comment at the `client` definition). */
+        esp_mqtt_client_config_t mqtt_cfg{};
+        mqtt_cfg.broker.address.uri = mqtt_uri;
+        mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+        /* Note: the last-will topic is copied by esp-mqtt at init and NOT
+         * re-applied on a reuse-start below -- fine, since a nodeid change
+         * requires a reboot anyway (like the other network settings). */
+        mqtt_cfg.session.last_will = {
+            .topic = status_topic,
+            .msg = "offline",
+            .msg_len = sizeof("offline") - 1,
+            .qos = 0,
+            .retain = 1
+        };
 
-    esp_mqtt_client_handle_t client_ = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(client_, static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID), mqtt_event_handler, client_);
-    esp_mqtt_client_start(client_);
+        client = esp_mqtt_client_init(&mqtt_cfg);
+        if (!client)
+        {
+            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
+            return;
+        }
+        esp_mqtt_client_register_event(client, static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID), mqtt_event_handler, client);
+    }
+    else
+    {
+        /* Reuse after a stop: only the URI may have changed at runtime. */
+        esp_mqtt_client_set_uri(client, mqtt_uri);
+    }
 
-    client = client_;
+    esp_mqtt_client_start(client);
+    client_running = true;
     ESP_LOGI(TAG, "MQTT started");
 }
 
 void mqtt_stop(void)
 {
-    if (!client)
+    if (!client_running)
     {
         ESP_LOGW(TAG, "Attempted to stop MQTT while not running");
         return;
     }
+    client_running = false;
 
     esp_timer_stop_blocking(stats_timer_handle, 1000);
 
+    /* Stop only -- never esp_mqtt_client_destroy() (see the comment at the
+     * `client` definition for the use-after-free this used to cause). */
     esp_mqtt_client_stop(client);
     mqtt_set_connected(false);
-
-    esp_mqtt_client_handle_t client_ = client;
-    client = NULL;
-    esp_mqtt_client_destroy(client_);
 
     ESP_LOGI(TAG, "MQTT stopped");
 }

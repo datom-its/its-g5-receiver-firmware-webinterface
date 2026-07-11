@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #define ETHERTYPE_GEONET 0x8947u
 #define ETHERTYPE_IPV6   0x86DDu
@@ -17,17 +18,10 @@ static uint32_t rd_u32be(const uint8_t *p)
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
-/* Reads nbits (1..32) starting at absolute bit offset bitoff (0 = MSB of
- * frame[0]) as an MSB-first unsigned integer, per UPER bit-packing (ITU-T
- * X.691) -- everything else in this file is fixed-shape, byte-aligned binary
- * (GeoNetworking/BTP/the Secured-Packet envelope aren't ASN.1 at all), so
- * this is the only bit-level reader needed, kept deliberately simple/
- * auditable (a plain bit-at-a-time loop, no cursor state) rather than fast,
- * since it only ever runs twice per CAM and correctness against the spec
- * matters far more here than cycles -- see the header-length comment above
- * for why this codebase takes an off-by-a-bit/byte mistake seriously.
- * Returns false (leaving *out unset) if the read would run past len*8
- * (truncated/malformed frame) or nbits is out of range. */
+/* Reads nbits (1..32) at absolute bit offset bitoff, MSB-first (UPER
+ * bit-packing) -- the only bit-level reader needed, since everything else in
+ * this file is fixed-shape byte-aligned binary. Returns false if the read
+ * would run past len*8 or nbits is out of range. */
 static bool read_bits_msb(const uint8_t *frame, size_t len, size_t bitoff,
                            unsigned nbits, uint32_t *out)
 {
@@ -45,11 +39,9 @@ static bool read_bits_msb(const uint8_t *frame, size_t len, size_t bitoff,
     return true;
 }
 
-/* Length of the 802.11 MAC header for the common ITS-G5 case: a Data or QoS
- * Data frame sent outside the context of a BSS (OCB mode), i.e. ToDS=0,
- * FromDS=0, no HT Control field -- true for the ad-hoc broadcast frames CAM
- * and DENM are sent as. Returns 0 for anything else, so the caller bails out
- * rather than mis-parse (e.g. a 4-address WDS frame, which isn't used here). */
+/* 802.11 MAC header length for the common ITS-G5 case: Data/QoS Data, OCB
+ * mode (ToDS=0, FromDS=0, no HT Control). Returns 0 for anything else so the
+ * caller bails out rather than mis-parse. */
 static size_t mac80211_header_len(const uint8_t *f, size_t len)
 {
     if (len < 24)
@@ -68,13 +60,9 @@ static size_t mac80211_header_len(const uint8_t *f, size_t len)
 
 typedef struct { uint8_t id; const char *name; } msgid_name_t;
 
-/* ITS PDU header "messageId" -> facility message name. Values/names taken
- * verbatim from Wireshark's authoritative its.messageId value-string (ETSI
- * TS 102 894-2 registry). Read from the actual message rather than inferred
- * from the BTP port, so it's correct for every type, not just a few
- * hand-listed ports -- verified against ~2400 real captured frames (CAM from
- * vehicles, SPATEM/MAPEM from a roadside traffic-light unit). rfu1(7)/rfu2(8)
- * are reserved and intentionally absent. */
+/* ITS PDU header "messageId" -> facility message name (ETSI TS 102 894-2
+ * registry, matches Wireshark's its.messageId). rfu1(7)/rfu2(8) reserved,
+ * intentionally absent. */
 static const msgid_name_t MSGID_NAMES[] = {
     { 1,  "DENM" },   { 2,  "CAM" },    { 3,  "POIM" },  { 4,  "SPATEM" },
     { 5,  "MAPEM" },  { 6,  "IVIM" },   { 9,  "SREM" },  { 10, "SSEM" },
@@ -91,17 +79,10 @@ static const char *lookup_msgid_name(uint8_t id)
     return NULL;
 }
 
-/* GeoNetworking Common Header "header type" field -> length of the following
- * extended header, per ETSI EN 302 636-4-1. Facility messages (CAM/DENM) are
- * always carried by TSB (single- or multi-hop broadcast, type 5) or
- * GeoBroadcast/-Anycast (types 3/4); Beacon (1) and Location Service (6)
- * frames don't carry a facility payload at all. GeoUnicast (2) isn't used by
- * broadcast facility messages but is included for completeness.
- * Verified byte-for-byte against real captured traffic (GeoBroadcast carries
- * a leading sequence-number+reserved field before the position vector, same
- * as TSB, which is easy to miss -- an earlier version of this code had it
- * wrong at 40 instead of 44).
- * -1 means "not handled here" (variable-length / out of scope). */
+/* GeoNetworking Common Header "header type" -> extended header length (ETSI
+ * EN 302 636-4-1). GeoBroadcast/-Anycast carry a leading 4-byte sequence-
+ * number+reserved field before the position vector -- easy to miss, this
+ * was wrong at 40 instead of 44 once already. -1 = not handled here. */
 static int gn_ext_header_len(uint8_t header_type)
 {
     switch (header_type)
@@ -117,11 +98,9 @@ static int gn_ext_header_len(uint8_t header_type)
 
 typedef struct { uint8_t code; const char *name; } station_type_name_t;
 
-/* GeoNetworking GN_ADDR "ITS-S type" field (5 bits, the first byte of the
- * Source Position Vector -- see parse_common_onward). Values and names match
- * Wireshark's GeoNetworking dissector (geonw.src_pos.addr.type); confirmed
- * against real traffic (a passing bus correctly decoded as "Bus"). Values not
- * listed (12-14, 16+) aren't defined/observed and fall back to no label. */
+/* GeoNetworking GN_ADDR "ITS-S type" (5 bits, first byte of the Source
+ * Position Vector). Matches Wireshark's geonw.src_pos.addr.type; unlisted
+ * values fall back to no label. */
 static const station_type_name_t STATION_TYPES[] = {
     { 1,  "Ped" },       { 2,  "Cyclist" },  { 3,  "Moped" },
     { 4,  "Motorcycle" },{ 5,  "Car" },      { 6,  "Bus" },
@@ -137,25 +116,21 @@ static const char *lookup_station_name(uint8_t t)
     return NULL; /* 0 = unknown, or a value we don't have a name for */
 }
 
-/* Parses a GeoNetworking "Common Header onward" structure (Common Header +
- * extended header + BTP-B + facility message). `len` is the size of the
- * whole buffer `frame` points into; `off` is where the Common Header starts.
- * Used both directly on unsecured GN packets and on the structure re-embedded
- * inside a Secured Packet's unsecuredData (see unwrap_secured) -- same shape
- * either way. `*station_out` receives the sender's station-type name (from
- * the extended header's Source Position Vector), or NULL if unavailable.
- * `*pdu_off_out` receives the byte offset where the ITS PDU header (facility
- * message: CAM/DENM/...) starts -- i.e. right after the BTP-B header, where
- * `protocolVersion` begins -- or SIZE_MAX if this frame doesn't reach one
- * (Beacon/Location-Service/BTP-A/truncated). This is the one fact both the
- * message-type label and its_decode_frame's CAM position decode need, kept
- * in this single traversal rather than walked twice. */
+/* Parses a GeoNetworking "Common Header onward" (Common Header + extended
+ * header + BTP-B + facility message), starting at `off` in `frame`. Used
+ * both on unsecured GN packets and on the structure re-embedded inside a
+ * Secured Packet (see unwrap_secured) -- same shape either way. Outputs:
+ * station name (or NULL), the ITS PDU header's byte offset (SIZE_MAX if
+ * unreached), and the Source Position Vector's byte offset (SIZE_MAX if this
+ * header type doesn't carry one) -- both needed again by its_decode_frame,
+ * kept in one traversal rather than walked twice. */
 static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
                                  char *out, size_t out_size, const char **station_out,
-                                 size_t *pdu_off_out)
+                                 size_t *pdu_off_out, size_t *pv_off_out)
 {
     *station_out = NULL;
     *pdu_off_out = SIZE_MAX;
+    *pv_off_out = SIZE_MAX;
     if (len < off + 8) { snprintf(out, out_size, "?"); return; }
     uint8_t common_nh   = (frame[off]     >> 4) & 0x0F;
     uint8_t header_type = (frame[off + 1] >> 4) & 0x0F;
@@ -166,7 +141,10 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
         /* Beacon: still carries a Source Position Vector (station type is
          * readable) but no facility payload follows. */
         if (len >= off + 1)
+        {
             *station_out = lookup_station_name((frame[off] >> 2) & 0x1F);
+            *pv_off_out = off;
+        }
         snprintf(out, out_size, "GeoNet-Beacon");
         return;
     }
@@ -174,30 +152,23 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
     if (ext_len < 0) { snprintf(out, out_size, "GeoNet-LS"); return; }
     if (len < off + (size_t)ext_len) { snprintf(out, out_size, "?"); return; }
 
-    /* The extended header's first field is the Source Position Vector for
-     * GeoUnicast/TSB, but GeoAnycast/GeoBroadcast lead with a 4-byte sequence-
-     * number+reserved field first (verified against real traffic -- this is
-     * the part that's easy to get wrong, see gn_ext_header_len). Either way,
-     * the Position Vector's first byte's low 5 bits (after the 1-bit "manual"
-     * flag) are the sender's station type, independent of the facility
-     * message/BTP port read below. */
+    /* GeoUnicast/TSB start with the Source Position Vector directly;
+     * GeoAnycast/GeoBroadcast lead with a 4-byte sequence-number+reserved
+     * field first (see gn_ext_header_len). */
     size_t pv_off = (header_type == 3 || header_type == 4) ? off + 4 : off;
     *station_out = lookup_station_name((frame[pv_off] >> 2) & 0x1F);
+    *pv_off_out = pv_off;
     off += (size_t)ext_len;
 
     if (common_nh == 2) /* BTP-B: destination port is the first 2 bytes */
     {
         if (len < off + 2) { snprintf(out, out_size, "GeoNet"); return; }
         uint16_t port = rd_u16be(frame + off);
-        /* The ITS PDU header (protocolVersion + messageId + stationId) starts
-         * right after the 4-byte BTP-B header -- report that to the caller
-         * regardless of whether a name is found below, so its_decode_frame
-         * can look further into the body (CAM position) without redoing this
-         * walk. The message type is the messageId, one byte past
-         * protocolVersion; this offset was verified against ~2400 real
-         * frames. Prefer the decoded name; fall back to the raw port for
-         * anything not in the table (e.g. a non-facility BTP-B service, or a
-         * truncated frame). */
+        /* ITS PDU header starts right after the 4-byte BTP-B header;
+         * reported regardless of whether a name is found, so
+         * its_decode_frame can look further into the body without redoing
+         * this walk. Falls back to the raw port if messageId isn't in the
+         * table. */
         if (len >= off + 6) *pdu_off_out = off + 4;
         const char *name = (len >= off + 6) ? lookup_msgid_name(frame[off + 5]) : NULL;
         if (name) snprintf(out, out_size, "%s", name);
@@ -236,21 +207,12 @@ static bool read_oer_length(const uint8_t *frame, size_t len, size_t off,
     return true;
 }
 
-/* Unwraps an ETSI TS 103 097 / IEEE 1609.2 Ieee1609Dot2Data "Secured Packet"
- * envelope (GN Basic Header next-header == 2) far enough to reach the plain
- * GeoNetworking structure (Common Header onward) it carries as payload --
- * WITHOUT touching the certificate/signature that follows, since those come
- * later in the encoding and are simply never read.
- *
- * The fixed-shape prefix below (protocolVersion, a CHOICE tag, hashId,
- * another CHOICE tag, an inner protocolVersion, an inner CHOICE tag, then a
- * COER length determinant) was verified byte-for-byte identical in shape
- * across ~2400 real captured V2X frames (mixed CAM from vehicles and
- * MAP/SPAT-like messages from a roadside unit). Only the two CHOICE tag
- * *values* are checked (0x81 "signedData", 0x80 "unsecuredData"), since
- * those are the only variants seen on real traffic; anything else bails out
- * to plain "Signed" rather than guess at an unverified encoding (e.g. an
- * encrypted or recursively-signed payload). */
+/* Unwraps an ETSI TS 103 097 / IEEE 1609.2 "Secured Packet" envelope (GN
+ * Basic Header next-header == 2) far enough to reach the plain
+ * GeoNetworking structure it carries as payload, without ever touching the
+ * certificate/signature that follows. Only the two CHOICE tag *values* are
+ * checked (0x81 "signedData", 0x80 "unsecuredData"); anything else bails
+ * out to plain "Signed" rather than guess at an unverified encoding. */
 static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
                            size_t *inner_off, size_t *inner_len)
 {
@@ -279,9 +241,10 @@ static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
 
 void its_decode_frame(const uint8_t *frame, size_t len, char *out, size_t out_size,
                       bool *has_position, int32_t *lat_e7, int32_t *lon_e7,
-                      uint32_t *station_id)
+                      uint32_t *station_id, bool *has_speed, int32_t *speed_cmps)
 {
     *has_position = false;
+    *has_speed = false;
 
     if (!out || out_size == 0)
         return;
@@ -315,6 +278,7 @@ void its_decode_frame(const uint8_t *frame, size_t len, char *out, size_t out_si
     char label[32];
     const char *station = NULL;
     size_t pdu_off = SIZE_MAX;
+    size_t pv_off = SIZE_MAX;
     size_t pdu_len = len; /* bounds to use with pdu_off below; differs for the unwrapped-secured case */
 
     if (basic_nh == 2)
@@ -323,14 +287,14 @@ void its_decode_frame(const uint8_t *frame, size_t len, char *out, size_t out_si
         if (unwrap_secured(frame, len, off, &inner_off, &inner_len))
         {
             pdu_len = inner_off + inner_len;
-            parse_common_onward(frame, pdu_len, inner_off, label, sizeof(label), &station, &pdu_off);
+            parse_common_onward(frame, pdu_len, inner_off, label, sizeof(label), &station, &pdu_off, &pv_off);
         }
         else
             snprintf(label, sizeof(label), "Signed");
     }
     else if (basic_nh == 1)
     {
-        parse_common_onward(frame, len, off, label, sizeof(label), &station, &pdu_off);
+        parse_common_onward(frame, len, off, label, sizeof(label), &station, &pdu_off, &pv_off);
     }
     else
     {
@@ -340,32 +304,55 @@ void its_decode_frame(const uint8_t *frame, size_t len, char *out, size_t out_si
     if (station) snprintf(out, out_size, "%s %s", station, label);
     else         snprintf(out, out_size, "%s", label);
 
-    /* CAM position: only for a facility message whose ITS PDU header we
-     * actually reached (pdu_off from parse_common_onward above), reusing
-     * that exact same offset rather than re-walking the frame. See
-     * its_decode.h for the field semantics. */
-    if (pdu_off == SIZE_MAX || pdu_len < pdu_off + 6)
+    /* ItsPduHeader.stationId is present for every facility message (not just
+     * CAM), right after protocolVersion+messageId -- read it once here so
+     * both the GN-layer position fallback below and the CAM-specific
+     * position further down can use it as the map marker's tracking key. */
+    bool have_sid = pdu_off != SIZE_MAX && pdu_len >= pdu_off + 6;
+    uint32_t sid = have_sid ? rd_u32be(frame + pdu_off + 2) : 0;
+
+    /* GN-layer position: the Source Position Vector carries a position for
+     * EVERY message, not just CAM (this is what puts RSUs on the map).
+     * Plain big-endian signed integers, no UPER bit-packing, no bias/offset
+     * (unlike CAM's referencePosition below). Layout relative to pv_off:
+     * GN_ADDR(8)+Timestamp(4)+Latitude(4)+Longitude(4)+PAI&Speed(2)+
+     * Heading(2) = 24 bytes. Only a fallback -- CAM's own body position
+     * overrides it below when available. */
+    if (have_sid && pv_off != SIZE_MAX && pdu_len >= pv_off + 20)
+    {
+        int32_t gn_lat = (int32_t)rd_u32be(frame + pv_off + 12);
+        int32_t gn_lon = (int32_t)rd_u32be(frame + pv_off + 16);
+        if (gn_lat != 0 || gn_lon != 0) /* 0,0 = clearly not a real fix */
+        {
+            *station_id = sid;
+            *lat_e7 = gn_lat;
+            *lon_e7 = gn_lon;
+            *has_position = true;
+        }
+
+        /* Speed sits right after the position: PAI(1 bit)+Speed(15 bits),
+         * 0.01 m/s units (raw value is already cm/s). Skipped for RSUs
+         * (stationary -- a speed reading there is meaningless). */
+        if (pdu_len >= pv_off + 22 && !(station && strcmp(station, "RSU") == 0))
+        {
+            *speed_cmps = rd_u16be(frame + pv_off + 20) & 0x7FFF;
+            *has_speed = true;
+        }
+    }
+
+    /* CAM position overrides the GN-layer fallback above when available --
+     * see its_decode.h for the field semantics. */
+    if (!have_sid)
         return;
     if (frame[pdu_off + 1] != 2 /* CAM */)
         return;
 
-    uint32_t sid = rd_u32be(frame + pdu_off + 2);
-
-    /* referencePosition's bits start at byte pdu_off+9 (protocolVersion(1) +
-     * messageId(1) + stationId(4) + generationDeltaTime(2) +
-     * basicContainer.stationType(1) = 9 bytes past pdu_off), PLUS 4 more
-     * bits: CamParameters is an extensible SEQUENCE with 2 OPTIONAL trailing
-     * containers (lowFrequencyContainer/specialVehicleContainer), so UPER
-     * prepends a 1-bit extension marker + 2 presence bits before
-     * basicContainer even starts; basicContainer's own SEQUENCE contributes
-     * one more (also extensible, no optional fields of its own). A first
-     * pass at this offset (without the +4) produced garbage lat/lon while
-     * stationId (read earlier, byte-aligned) matched tshark exactly -- this
-     * exact +4 was pinned down empirically against real captured CAM traffic
-     * (tshark's its.latitude/its.longitude, byte-for-byte match across all
-     * CAM frames in the validation capture), not just derived from the spec;
-     * see the C-ITS decode reference notes. Don't "simplify" this back to a
-     * bare byte offset without re-validating the same way. */
+    /* referencePosition starts at byte pdu_off+9 (protocolVersion+messageId+
+     * stationId+generationDeltaTime+basicContainer.stationType), PLUS 4
+     * extra UPER bits: CamParameters' extension marker + 2 optional-
+     * container presence bits, plus 1 from basicContainer's own extensible
+     * SEQUENCE. Empirically pinned down (byte offset alone gives garbage
+     * lat/lon) -- don't simplify this without re-validating against tshark. */
     size_t bitoff = (pdu_off + 9) * 8 + 4;
     uint32_t raw_lat, raw_lon;
     if (!read_bits_msb(frame, pdu_len, bitoff, 31, &raw_lat))

@@ -9,7 +9,7 @@ extern "C" {
 #define CONFIG_NODEID_BUFFER_SIZE 64
 #define CONFIG_MQTT_URI_BUFFER_SIZE 256
 #define CONFIG_IPV4_BUFFER_SIZE 16
-#define CONFIG_WEB_PASSWORD_BUFFER_SIZE 64
+#define CONFIG_WEB_PASSWORD_BUFFER_SIZE 65  /* holds a SHA-256 hex digest (64 chars) + NUL, not the raw password */
 #define CONFIG_NTP_SERVER_BUFFER_SIZE 64
 
 void config_init(void);
@@ -33,7 +33,17 @@ typedef enum {
     CONFIG_INDEX_LOG_MAX_MB,   /* u32 total SD budget for logs, in MiB */
     CONFIG_INDEX_REFRESH_SEC,  /* u32 web UI auto-refresh interval (0 = off) */
     CONFIG_INDEX_NTP_SERVER,   /* str NTP server hostname (default pool.ntp.org) */
+    CONFIG_INDEX_PCAP_ENABLE,       /* u8  bool: rolling raw-frame PCAP capture to SD */
+    CONFIG_INDEX_PCAP_RETAIN_HOURS, /* u32 PCAP retention window, hours */
+    CONFIG_INDEX_PCAP_MAX_MB,       /* u32 PCAP total SD safety-net budget, MiB */
+    CONFIG_INDEX_PCAP_BUF_MB,       /* u32 PSRAM buffer size before flushing to SD, MiB */
+    CONFIG_INDEX_PCAP_FLUSH_SEC,    /* u32 flush the PSRAM buffer at least this often, seconds */
 } config_index_t;
+
+/* Hashes a raw web-UI password the same salted way CONFIG_INDEX_WEB_PASSWORD
+ * is stored -- used by webserver.c's auth check to hash an attempted
+ * password identically before comparing against the stored hash. */
+void config_hash_web_password(const char *raw, char out_hex[65]);
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out);
 esp_err_t config_set_u8(config_index_t index, uint8_t value);

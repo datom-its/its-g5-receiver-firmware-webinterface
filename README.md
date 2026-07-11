@@ -2,8 +2,9 @@
 
 Modified firmware for the **opentrafficmap ITS-G5 receiver** (official board,
 HW variant `i5r-r1`) — a passive 802.11p / ITS-G5 (V2X) sniffer on ESP32-C5 that
-forwards raw frames over MQTT. This fork adds a built-in web interface and a few
-bug fixes on top of the upstream firmware.
+forwards raw frames over MQTT. This fork adds a built-in web interface, a live
+map, on-device PCAP recording with playback, and a number of bug fixes on top
+of the upstream firmware.
 
 Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 
@@ -17,12 +18,21 @@ or grab all four `.bin` files for an initial flash over serial (see below).
 No build environment needed. The version history below lists what changed in
 each release.
 
+> ⚠️ **Upgrading from 0.16.0 (or earlier) to 0.20.0 must be done once over
+> USB/serial with all four `.bin` files** (see
+> [Flashing a pre-compiled firmware](#flashing-a-pre-compiled-firmware)).
+> 0.20.0 changes the **partition table** (it adds a coredump partition), and
+> the web `/update` OTA only ever writes the app slot — it cannot apply a new
+> partition table. After this one serial flash, routine updates can go back
+> to the web interface as usual.
+
 ## Version history
 
 Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.20.0-webui** | Large feature release. Adds rolling PCAP capture to SD with map playback (scrub through recorded traffic on `/map`), RSU/traffic-light positions and vehicle speed on the map, and crash-dump-to-flash for offline debugging. Also a new visual theme and a stability round (MQTT fix, hashed web password, tuned SD-card timing). Changes the partition table — see the upgrade note above. |
 | **0.16.0-webui** | New **live map** (`/map`): decodes each CAM's position and shows nearby vehicles/RSUs on an OpenStreetMap map, as clickable emoji markers per station type (details on click: type, time, RSSI, length), with a satellite-view layer toggle. Verified byte-exact against real captured traffic. |
 | **0.15.1-webui** | Three code-audit fixes: an mDNS startup race with static IPs, an unsynchronized activity-stats read, and SD-download filename sanitization. |
 | **0.15.0-webui** | New **system monitor** for unattended field operation: watchdog auto-recovery if the sniffer pipeline wedges, SD auto-remount, a low-heap guard, and **mDNS** (`its-<nodeid>.local`). Clearer reset-reason labels on `/system`. A round of web-UI polish: rounded table corners everywhere, consistent heading styles, a flag-based language switch, mobile layout fixes (settings table no longer overflows, hex/type columns wrap), localized `/update` error messages, and several smaller fixes (temperature log spam, upload button spacing, IP field length limits). |
@@ -50,8 +60,6 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 | **0.6.1-webui** | "Confirm update" button on the status page, so a web/OTA update can be confirmed (rollback cancelled) from the browser. |
 | **0.6.0-webui** | First web-UI firmware: status dashboard, `/messages`, `/settings`, browser `/update` (OTA), optional password protection. Round-1 bug fixes: sniffer format-string bugs, OTA reentrancy guard, swapped config case labels. |
 
-> Keep this table up to date: every new build must add a row here.
-
 ## Web interface
 
 Once the device has an IP address, a built-in web interface is available on
@@ -64,23 +72,37 @@ English.
   Start/Stop sniffer and Reboot buttons. If the running firmware was installed
   via update and not yet confirmed, a banner with a **Confirm update** button
   appears here.
-- `/messages` — the last 20 received frames (time, RSSI, length, hex preview),
-  newest first, auto-refreshing. Times are real local `HH:MM:SS` once NTP has
-  synced (see 0.6.2).
+- `/messages` — the last 20 received frames (time, RSSI, length, type, hex
+  preview), newest first, live over WebSocket. Times are real local `HH:MM:SS`
+  once NTP has synced (see 0.6.2).
+- `/map` — live map of decoded positions: vehicles (from CAM) and stationary
+  senders such as traffic lights / RSUs (from the GeoNetworking layer), one
+  emoji marker per station type, clickable for details (and km/h for
+  vehicles). A **from/to time range + Load** control below the map replays
+  positions recorded in the PCAP files (see `/settings`) with a slider and a
+  play button; a **Live** button returns to the real-time feed. Map tiles
+  need the browser to have internet access (OpenStreetMap) — the device
+  itself does not.
 - `/settings` — view and change node ID, MQTT URI, autostart channel, LED
-  brightness (applied live) and the web password, all from the browser. Saved to
-  NVS.
+  brightness (applied live), the web password, network (DHCP / static IP /
+  DNS), NTP server, SD logging, and **rolling PCAP capture** (off by default:
+  raw frames to `/sdcard/pcap/`, with retention hours + a storage ceiling).
+  Saved to NVS.
 - `/update` — upload a `.bin` from the browser to flash the inactive OTA
   partition; the device reboots into it.
 - `/system` — chip/CPU info, ESP-IDF version, last reset reason, uptime,
-  internal + PSRAM memory, and a per-task CPU-load table.
-- `/sdcard` — browse the SD card, see usage, upload/delete files, format the
-  card (requires the web password).
+  internal + PSRAM memory, and a per-task CPU-load table. Shows a banner with
+  a download/delete link if a crash dump is available.
+- `/sdcard` — browse the SD card, see usage, upload/delete files (single or
+  multi-select), download files/folders as a `.tar`, format the card
+  (requires the web password). Recorded PCAP files live under `/sdcard/pcap/`
+  and can be downloaded here and opened in Wireshark/tshark.
 - `/logs` — view the SD log files (`system.log`, `frames.csv`) inline in the
   browser. Logging is toggled on `/settings`.
 
 A configurable auto-refresh (interval on `/settings`, `0` = off) with a floating
-pause/resume button keeps the status and message pages live.
+pause/resume button keeps the status page live; `/messages` and `/map` update
+over a WebSocket without reloading.
 
 ### Update confirmation (rollback)
 
@@ -100,18 +122,39 @@ network. To require a password (HTTP Basic Auth, username `admin`), either:
   ```
 
 Leave the field empty to keep the current password; tick "remove password
-protection" (or `config_clear webpasswd`) to disable it again. The status and
-message pages remain unauthenticated.
+protection" (or `config_clear webpasswd`) to disable it again. The status, map
+and message pages remain unauthenticated. Forgetting the password: run
+`config_clear webpasswd` on the serial console, then set a new one.
 
 > Note: the web interface is plain HTTP on port 80 and Basic Auth is only
-> base64-encoded, so the password travels in clear text on the LAN.
+> base64-encoded, so the password travels in clear text on the LAN. The
+> password itself is stored as a salted hash, not plaintext.
+
+## PCAP recording & playback
+
+When **rolling PCAP capture** is enabled on `/settings`, received 802.11p
+frames are written to the SD card under `/sdcard/pcap/`, one file per hour
+(`pcap-YYYYMMDD-HHMMSS.pcap`), and old files are pruned by age (retention
+hours) and by a total-size ceiling. The files are standard
+`LINKTYPE_IEEE802_11` pcap — open them directly in **Wireshark** or **tshark**
+to inspect any frame down to the GeoNetworking / C-ITS layer.
+
+The **map playback** control on `/map` reads those same files back on the
+device: pick a from/to time range, click **Load**, and scrub or auto-play the
+recorded positions over the map. Capture is off by default because
+continuous SD writes have a real flash-wear/capacity cost on an unattended
+field device.
 
 ## Hardware
 
 - Chip: **ESP32-C5** (RISC-V)
 - Ethernet: **KSZ8851SNL** (SPI) — not W5500/ENC28J60; the upstream
   `sdkconfig.proto-*` files do **not** match this board.
-- Flash: **8 MB**, partition table `partitions_8M.csv` (A/B OTA slots).
+- The SD card shares the SPI bus with the Ethernet controller. Under
+  concurrent traffic this bus is timing-sensitive; the firmware runs the SD
+  clock at 15 MHz (down from the 20 MHz default) for robustness.
+- Flash: **8 MB**, partition table `partitions_8M.csv` (A/B OTA slots plus a
+  small coredump partition).
 - The correct board config lives in the project's `sdkconfig`
   (`HW_VARIANT=i5r-r1`, 8 MB, `partitions_8M.csv`). Do **not** let
   `idf.py set-target` overwrite it.
@@ -131,11 +174,20 @@ esptool --chip esp32c5 -p /dev/ttyACM0 -b 921600 --before=default-reset --after=
 Replace the serial port with the one where the ESP is connected. This requires
 the ESP-IDF environment for the `esptool` command.
 
+> A firmware that changes the partition table (like 0.20.0, which adds the
+> coredump partition) must be flashed once over serial with all four `.bin`
+> files; the web `/update` only ever writes the app slot. Routine updates
+> afterwards can go back to the web interface.
+
 ## Building
 
-This project needs ESP-IDF at the exact upstream commit `12f36a021f`
-(a v6.1-dev snapshot) and Python 3.10+. Stable releases (v5.5.x) do **not** work
-unmodified, because the project uses v6.1-only APIs.
+This project needs ESP-IDF at the exact commit `0d928780081` (a v6.1-dev
+snapshot; as of 0.20.0 this is a newer commit on the same `release/v6.1` line
+than earlier releases used, now including an upstream fix for a multi-device
+SPI bus-lock bug) and Python 3.10+. Stable releases (v5.5.x) do **not** work
+unmodified, because the project uses v6.1-only APIs, and the 802.11p
+promiscuous-mode hack is sensitive to Wi-Fi-stack changes, so the pin is
+deliberate.
 
 ```
 . ~/esp/esp-idf/export.sh      # once per shell

@@ -12,6 +12,7 @@ idf_component_register(
         "ota.c"
         "sdcard.c"
         "sdlog.c"
+        "sdpcap.c"
         "spi.c"
         "spi_eppp.c"
         "sysmon.c"
@@ -27,6 +28,7 @@ idf_component_register(
         esp_netif
         esp_wifi
         esp_system
+        espcoredump
         fatfs
         mdns
         nvs_flash

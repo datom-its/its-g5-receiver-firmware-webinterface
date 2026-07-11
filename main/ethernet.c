@@ -194,7 +194,10 @@ static void set_hostname_from_config(esp_netif_t *netif)
         ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(res));
 }
 
-static void configure_management_interface(esp_eth_handle_t *eth_handle, int idx)
+/* Takes the handle itself (esp_eth_handle_t is already an opaque pointer) --
+ * an earlier signature declared `esp_eth_handle_t *` while callers passed the
+ * handle; that only compiled because both are void*-compatible. */
+static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
 {
     ESP_ERROR_CHECK(esp_netif_init());
 
