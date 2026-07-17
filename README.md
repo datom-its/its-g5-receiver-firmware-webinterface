@@ -32,6 +32,8 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.20.2-webui** | The SD system log now writes a dated header line (`===== YYYY-MM-DD (Day) =====`) at each session start and midnight rollover, so a multi-day log can be pinned to a calendar day. |
+| **0.20.1-webui** | The status and system pages update live via a small JSON poll instead of reloading the whole page — the animated background no longer restarts each refresh, and `/system`'s uptime, RAM and task table now actually update while open. |
 | **0.20.0-webui** | Large feature release. Adds rolling PCAP capture to SD with map playback (scrub through recorded traffic on `/map`), RSU/traffic-light positions and vehicle speed on the map, and crash-dump-to-flash for offline debugging. Also a new visual theme and a stability round (MQTT fix, hashed web password, tuned SD-card timing, a newer ESP-IDF pin — see Building). Changes the partition table — see the upgrade note above. |
 | **0.16.0-webui** | New **live map** (`/map`): decodes each CAM's position and shows nearby vehicles/RSUs on an OpenStreetMap map, as clickable emoji markers per station type (details on click: type, time, RSSI, length), with a satellite-view layer toggle. Verified byte-exact against real captured traffic. |
 | **0.15.1-webui** | Three code-audit fixes: an mDNS startup race with static IPs, an unsynchronized activity-stats read, and SD-download filename sanitization. |

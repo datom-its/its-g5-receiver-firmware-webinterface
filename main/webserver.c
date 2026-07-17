@@ -898,36 +898,41 @@ static const char PAGE_FOOTER[] =
     "if(h&&h===location.pathname)a.className='active';});</script>"
     "</div></body></html>";
 
-static void send_page_header_refresh(httpd_req_t *req, const char *heading, int refresh_secs)
+/* `json_url` != NULL enables the floating pause/resume button + polling
+ * loop: it fetches that URL every `CONFIG_INDEX_REFRESH_SEC` seconds and
+ * hands the parsed JSON to `window.arApply` (defined by the page's own
+ * inline script, further down in the same HTML stream -- already parsed
+ * by the time this runs, since it only fires on the `load` event). No
+ * full-page reload, so CSS animations (the radar sweep) never restart. */
+static void send_page_header_refresh(httpd_req_t *req, const char *heading, const char *json_url)
 {
-    /* Auto-refresh is JS-based (not a <meta> tag) so a floating button can
-     * pause/resume it (persisted per-browser in localStorage) and the interval
-     * is configurable (0 = off). ⏸ = pause, ▶ = play. */
     /* static EXT_RAM_BSS_ATTR, not a stack buffer -- the httpd task's stack
      * is only 16384 bytes total (see webserver_init), and header[] growing
      * on-stack is exactly what caused a real crash once. */
-    static EXT_RAM_BSS_ATTR char refresh_tag[768];
+    static EXT_RAM_BSS_ATTR char refresh_tag[1024];
     /* Static doesn't auto-reset between calls; clear explicitly so a page
-     * with refresh_secs<=0 can't inherit a previous request's script. */
+     * with json_url==NULL can't inherit a previous request's script. */
     refresh_tag[0] = '\0';
-    if (refresh_secs > 0)
+    if (json_url)
     {
         uint32_t ri = 5;
         config_get_u32(CONFIG_INDEX_REFRESH_SEC, &ri);
         if (ri > 0 && ri < 0xFFFFFFFF)
             snprintf(refresh_tag, sizeof(refresh_tag),
-                "<script>(function(){var ri=%lu;"
+                "<script>(function(){var ri=%lu,url='%s',t=null;"
+                "function tick(){fetch(url).then(function(r){return r.json();})"
+                ".then(function(d){if(window.arApply)window.arApply(d);}).catch(function(){});}"
                 "window.addEventListener('load',function(){"
                 "var b=document.createElement('button');"
                 "b.style.cssText='position:fixed;bottom:12px;right:12px;z-index:99;opacity:.9;border-radius:4px;box-shadow:0 1px 4px #000';"
                 "function u(){b.textContent=(localStorage.getItem('ar')!=='0'?'\\u23f8 ':'\\u25b6 ')+ri+'s';}"
                 "b.onclick=function(){var on=localStorage.getItem('ar')==='0';"
                 "localStorage.setItem('ar',on?'1':'0');"
-                "if(on){location.reload();}else{if(window._t)clearTimeout(window._t);u();}};"
+                "if(on){tick();t=setInterval(tick,ri*1000);}else{if(t)clearInterval(t);}u();};"
                 "u();document.body.appendChild(b);"
-                "if(localStorage.getItem('ar')!=='0'){window._t=setTimeout(function(){location.reload();},ri*1000);}"
+                "if(localStorage.getItem('ar')!=='0'){tick();t=setInterval(tick,ri*1000);}"
                 "});})();</script>",
-                (unsigned long)ri);
+                (unsigned long)ri, json_url);
     }
 
     const char *lc = current_lang == LANG_DE ? "de" : "en";
@@ -955,21 +960,21 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, int 
 
 static void send_page_header(httpd_req_t *req, const char *heading)
 {
-    send_page_header_refresh(req, heading, 0);
+    send_page_header_refresh(req, heading, NULL);
 }
 
 /* Renders the status page's "Activity" sparkline + message-type breakdown,
  * from counters rate_record_packet/msg_type_stats_record already fill in
  * webserver_handle_packet. */
-static void render_activity_stats(httpd_req_t *req)
+/* Builds just the sparkline's <rect> bars (no <svg> wrapper -- that's
+ * emitted once, id='st-spark', and only its innerHTML gets swapped on
+ * later polls since the viewBox/size never change). Shared between the
+ * initial /  render and /status.json. */
+static void build_spark_bars_html(char *out, size_t out_size)
 {
     uint64_t now_sec = esp_timer_get_time() / 1000000ull;
     uint32_t counts[RATE_WINDOW_SECS];
     uint32_t maxcount = 1;
-    /* rate_buckets[]/msg_type_stats[] are written under msg_ring_mutex;
-     * snapshot both under the same lock, then render from the snapshot so
-     * the lock isn't held during the slower chunked HTTP writes below. */
-    static msg_type_stat_t type_snapshot[MSG_TYPE_STATS_SLOTS];
     if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
         for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
@@ -978,32 +983,42 @@ static void render_activity_stats(httpd_req_t *req)
             rate_bucket_t *b = &rate_buckets[sec % RATE_WINDOW_SECS];
             counts[i] = (b->sec == sec) ? b->count : 0;
         }
-        memcpy(type_snapshot, msg_type_stats, sizeof(type_snapshot));
         xSemaphoreGive(msg_ring_mutex);
     }
     else
     {
         memset(counts, 0, sizeof(counts));
-        memset(type_snapshot, 0, sizeof(type_snapshot));
     }
     for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
         if (counts[i] > maxcount) maxcount = counts[i];
 
-    static EXT_RAM_BSS_ATTR char svg[6144];
     size_t o = 0;
-    o += snprintf(svg + o, sizeof(svg) - o,
-        "<svg viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>",
-        RATE_WINDOW_SECS * 4);
-    for (size_t i = 0; i < RATE_WINDOW_SECS && o < sizeof(svg); i++)
+    for (size_t i = 0; i < RATE_WINDOW_SECS && o < out_size; i++)
     {
         int h = counts[i] ? (int)(4 + (counts[i] * 32) / maxcount) : 1;
-        o += snprintf(svg + o, sizeof(svg) - o,
+        o += snprintf(out + o, out_size - o,
             "<rect x='%d' y='%d' width='3' height='%d' rx='1' fill='#f2b134'/>",
             (int)i * 4, 40 - h, h);
     }
-    o += snprintf(svg + o, sizeof(svg) - o, "</svg>");
+}
 
-    char typeline[1024] = {0};
+/* Builds the per-type count breakdown text, e.g. "CAM 812 &middot; RSU
+ * SPATEM 449" (empty if nothing received yet -- caller substitutes the
+ * "no activity" string). Shared between the page and /status.json. */
+static void build_typeline_html(char *out, size_t out_size)
+{
+    static msg_type_stat_t type_snapshot[MSG_TYPE_STATS_SLOTS];
+    if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        memcpy(type_snapshot, msg_type_stats, sizeof(type_snapshot));
+        xSemaphoreGive(msg_ring_mutex);
+    }
+    else
+    {
+        memset(type_snapshot, 0, sizeof(type_snapshot));
+    }
+
+    out[0] = '\0';
     size_t tl = 0;
     for (size_t i = 0; i < MSG_TYPE_STATS_SLOTS; i++)
     {
@@ -1011,26 +1026,40 @@ static void render_activity_stats(httpd_req_t *req)
             continue;
         char typeesc[WEB_MSG_TYPE_LEN * 6];
         html_escape(type_snapshot[i].label, typeesc, sizeof(typeesc));
-        int n = snprintf(typeline + tl, sizeof(typeline) - tl, "%s%s %lu",
+        int n = snprintf(out + tl, out_size - tl, "%s%s %lu",
             tl ? " &middot; " : "", typeesc, (unsigned long)type_snapshot[i].count);
-        if (n > 0 && (size_t)n < sizeof(typeline) - tl)
+        if (n > 0 && (size_t)n < out_size - tl)
             tl += (size_t)n;
     }
+}
 
+static void render_activity_stats(httpd_req_t *req)
+{
     /* Sent as separate chunks (title / svg / breakdown) rather than composed
-     * into one buffer: svg alone can approach its 6 KiB capacity, and gcc's
-     * -Werror=format-truncation assumes that worst case for any %s of a
-     * fixed-size array -- concatenating it into another snprintf would need
-     * a implausibly large destination just to satisfy the compiler. */
+     * into one buffer: the sparkline alone can approach its 6 KiB capacity,
+     * and gcc's -Werror=format-truncation assumes that worst case for any
+     * %s of a fixed-size array -- concatenating it into another snprintf
+     * would need an implausibly large destination just to satisfy the
+     * compiler. */
     char title[128];
     snprintf(title, sizeof(title), "<h3>%s</h3>", T(S_ACTIVITY_TITLE));
     httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, svg, HTTPD_RESP_USE_STRLEN);
 
-    /* typeline (the per-type counts) and the hint are sent as separate chunks
-     * so a long breakdown can't crowd out the hint in one fixed buffer. */
+    char svgopen[160];
+    snprintf(svgopen, sizeof(svgopen),
+        "<svg id='st-spark' viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>",
+        RATE_WINDOW_SECS * 4);
+    httpd_resp_send_chunk(req, svgopen, HTTPD_RESP_USE_STRLEN);
+
+    static EXT_RAM_BSS_ATTR char bars[6144];
+    build_spark_bars_html(bars, sizeof(bars));
+    httpd_resp_send_chunk(req, bars, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</svg>", HTTPD_RESP_USE_STRLEN);
+
+    static EXT_RAM_BSS_ATTR char typeline[1024];
+    build_typeline_html(typeline, sizeof(typeline));
     char typeblock[1152];
-    snprintf(typeblock, sizeof(typeblock), "<p>%s</p>",
+    snprintf(typeblock, sizeof(typeblock), "<p id='st-type'>%s</p>",
         typeline[0] ? typeline : T(S_ACTIVITY_NONE));
     httpd_resp_send_chunk(req, typeblock, HTTPD_RESP_USE_STRLEN);
 
@@ -1083,7 +1112,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     else
         snprintf(chan_str, sizeof(chan_str), "-");
 
-    send_page_header_refresh(req, T(S_TITLE_STATUS), 5);
+    send_page_header_refresh(req, T(S_TITLE_STATUS), "/status.json");
 
     /* Confirm banner if this firmware is pending verification */
     if (ota_is_pending_verify())
@@ -1101,23 +1130,26 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
     }
 
+    /* id='st-*' on every cell that /status.json can update -- see arApply
+     * below. Node ID/MAC/firmware/hardware never change without a reboot
+     * (a full page load already happens then), so those stay static. */
     char body[3584];
     snprintf(body, sizeof(body),
         "<div class='cards'>"
-        "<div class='card'><div class='l'>%s</div><div class='v'>%lu</div></div>"
-        "<div class='card'><div class='l'>%s</div><div class='v'>%lu</div></div>"
-        "<div class='card'><div class='l'>%s</div><div class='v'>%s</div></div>"
+        "<div class='card'><div class='l'>%s</div><div class='v' id='st-msgs'>%lu</div></div>"
+        "<div class='card'><div class='l'>%s</div><div class='v' id='st-rate'>%lu</div></div>"
+        "<div class='card'><div class='l'>%s</div><div class='v' id='st-uptime'>%s</div></div>"
         "</div>"
         "<table class='kv'>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%02x:%02x:%02x:%02x:%02x:%02x</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td><span class='%s'>%s</span></td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td><span class='%s'>%s</span></td></tr>"
+        "<tr><th>%s</th><td><span class='%s' id='st-sniff'>%s</span></td></tr>"
+        "<tr><th>%s</th><td id='st-chan'>%s</td></tr>"
+        "<tr><th>%s</th><td><span class='%s' id='st-mqtt'>%s</span></td></tr>"
 #ifdef CONFIG_ENABLE_TEMPERATURE
-        "<tr><th>%s</th><td>%.1f &deg;C</td></tr>"
+        "<tr><th>%s</th><td id='st-temp'>%.1f &deg;C</td></tr>"
 #endif
         "</table>",
         T(S_MSGS_RECEIVED), (unsigned long)msg_total_count,
@@ -1139,10 +1171,14 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 
     render_activity_stats(req);
 
+    /* No reload on click -- fetch the toggle, then let window.stSetSniff
+     * (defined in applyscript below) update the button + status span from
+     * the action just taken, same as a poll would. */
     char buttons[512];
     snprintf(buttons, sizeof(buttons),
         "<p>"
-        "<button onclick=\"fetch('/sniffer?action=%s',{method:'POST'}).then(()=>location.reload())\">%s</button> "
+        "<button id='st-sniffbtn' data-action='%s' onclick=\"var a=this.getAttribute('data-action');"
+        "fetch('/sniffer?action='+a,{method:'POST'}).then(function(){if(window.stSetSniff)window.stSetSniff(a==='start');})\">%s</button> "
         "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
         "</p>",
         running ? "stop" : "start",
@@ -1150,9 +1186,94 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT));
     httpd_resp_send_chunk(req, buttons, HTTPD_RESP_USE_STRLEN);
 
+    /* Applies a /status.json response to the cells above. Sniffer/MQTT
+     * labels are embedded here (not re-sent every poll) since they're
+     * fixed for the page's lifetime; innerHTML (not textContent) because
+     * they may contain an HTML entity (e.g. "l&auml;uft"). Also swaps the
+     * Start/Stop button's label + action so it stays correct without a
+     * reload after a start/stop triggered from elsewhere. */
+    char applyscript[1536];
+    snprintf(applyscript, sizeof(applyscript),
+        "<script>(function(){"
+        "var RUN='%s',STOP='%s',CONN='%s',DISC='%s',BSTART='%s',BSTOP='%s';"
+        "window.stSetSniff=function(r){"
+        "var sn=document.getElementById('st-sniff');sn.className=r?'ok':'bad';sn.innerHTML=r?RUN:STOP;"
+        "var sb=document.getElementById('st-sniffbtn');"
+        "if(sb){sb.textContent=r?BSTOP:BSTART;sb.setAttribute('data-action',r?'stop':'start');}"
+        "};"
+        "window.arApply=function(d){"
+        "document.getElementById('st-msgs').textContent=d.msgs;"
+        "document.getElementById('st-rate').textContent=d.rate;"
+        "document.getElementById('st-uptime').textContent=d.uptime;"
+        "document.getElementById('st-chan').textContent=d.chan;"
+        "document.getElementById('st-spark').innerHTML=d.spark;"
+        "document.getElementById('st-type').innerHTML=d.types;"
+        "window.stSetSniff(d.sniff);"
+        "var mq=document.getElementById('st-mqtt');"
+        "mq.className=d.mqtt?'ok':'bad';mq.innerHTML=d.mqtt?CONN:DISC;"
+        "var te=document.getElementById('st-temp');if(te&&d.temp!==undefined)te.textContent=d.temp.toFixed(1)+' \\u00b0C';"
+        "};})();</script>",
+        T(S_RUNNING), T(S_STOPPED), T(S_CONNECTED), T(S_DISCONNECTED),
+        T(S_SNIFF_START), T(S_SNIFF_STOP));
+    httpd_resp_send_chunk(req, applyscript, HTTPD_RESP_USE_STRLEN);
+
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
+}
+
+/* GET /status.json -- the dynamic subset of the status page, polled by the
+ * script send_page_header_refresh() injects. Keeps the same field set the
+ * page itself computes, just as compact JSON instead of HTML. */
+static esp_err_t status_json_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    bool running = sniffer_is_running();
+    uint32_t rate = rate_packets_last_minute();
+    uint64_t uptime_s = esp_timer_get_time() / 1000000ull;
+    char uptime_str[48];
+    format_uptime(uptime_s, uptime_str, sizeof(uptime_str));
+
+    uint32_t channel = sniffer_get_channel();
+    const char *chan_name;
+    switch (channel)
+    {
+    case 5900: chan_name = "G5CC";  break;
+    case 5890: chan_name = "G5SC2"; break;
+    case 5880: chan_name = "G5SC1"; break;
+    case 5870: chan_name = "G5SC3"; break;
+    case 5860: chan_name = "G5SC4"; break;
+    default:   chan_name = NULL;    break;
+    }
+    char chan_str[32];
+    if (channel && chan_name)
+        snprintf(chan_str, sizeof(chan_str), "%s (%lu MHz)", chan_name, (unsigned long)channel);
+    else
+        snprintf(chan_str, sizeof(chan_str), "-");
+
+    static EXT_RAM_BSS_ATTR char bars[6144];
+    build_spark_bars_html(bars, sizeof(bars));
+    static EXT_RAM_BSS_ATTR char typeline[1024];
+    build_typeline_html(typeline, sizeof(typeline));
+
+    static EXT_RAM_BSS_ATTR char json[8192];
+    snprintf(json, sizeof(json),
+        "{\"msgs\":%lu,\"rate\":%lu,\"uptime\":\"%s\",\"sniff\":%s,\"chan\":\"%s\",\"mqtt\":%s,"
+        "\"spark\":\"%s\",\"types\":\"%s\""
+#ifdef CONFIG_ENABLE_TEMPERATURE
+        ",\"temp\":%.1f"
+#endif
+        "}",
+        (unsigned long)msg_total_count, (unsigned long)rate, uptime_str,
+        running ? "true" : "false", chan_str,
+        mqtt_connected_state ? "true" : "false",
+        bars, typeline[0] ? typeline : T(S_ACTIVITY_NONE)
+#ifdef CONFIG_ENABLE_TEMPERATURE
+        , (double)temperature_get()
+#endif
+    );
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
 #if CONFIG_HTTPD_WS_SUPPORT
@@ -2438,10 +2559,56 @@ static const char *task_state_str(eTaskState s)
     }
 }
 
+/* Builds the per-task CPU-load rows (no <table>/header wrapper) shared by
+ * the initial /system render and /system.json. Two snapshots ~300 ms apart
+ * give the *current* load (delta), which is wrap-safe unlike a cumulative
+ * since-boot counter. Task names come from our own FreeRTOS task creation
+ * calls, not attacker input, but html_escape() still strips quotes so the
+ * result is also safe to embed as a JSON string value with no extra
+ * escaping (same reasoning as build_msg_json). */
+static void build_task_rows_html(char *out, size_t out_size)
+{
+    out[0] = '\0';
+    size_t o = 0;
+
+    UBaseType_t n1 = uxTaskGetNumberOfTasks();
+    if (n1 > 64) n1 = 64;
+    TaskStatus_t *a1 = malloc(n1 * sizeof(TaskStatus_t));
+    TaskStatus_t *a2 = malloc(n1 * sizeof(TaskStatus_t));
+    if (a1 && a2)
+    {
+        uint32_t rt1 = 0, rt2 = 0;
+        UBaseType_t c1 = uxTaskGetSystemState(a1, n1, &rt1);
+        vTaskDelay(pdMS_TO_TICKS(300));
+        UBaseType_t c2 = uxTaskGetSystemState(a2, n1, &rt2);
+        uint32_t total_delta = rt2 - rt1;
+
+        for (UBaseType_t i = 0; i < c2 && o < out_size; i++)
+        {
+            uint32_t prev = 0;
+            for (UBaseType_t j = 0; j < c1; j++)
+                if (a1[j].xHandle == a2[i].xHandle) { prev = a1[j].ulRunTimeCounter; break; }
+            uint32_t delta = a2[i].ulRunTimeCounter - prev;
+            unsigned cpu_x10 = total_delta ? (unsigned)(((uint64_t)delta * 1000) / total_delta) : 0;
+
+            char nameesc[48];
+            html_escape(a2[i].pcTaskName, nameesc, sizeof(nameesc));
+            o += snprintf(out + o, out_size - o,
+                "<tr><td>%s</td><td>%s</td><td>%u</td><td>%u.%u</td><td>%u</td></tr>",
+                nameesc, task_state_str(a2[i].eCurrentState),
+                (unsigned)a2[i].uxCurrentPriority,
+                cpu_x10 / 10, cpu_x10 % 10,
+                (unsigned)a2[i].usStackHighWaterMark);
+        }
+    }
+    free(a1);
+    free(a2);
+}
+
 static esp_err_t system_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
-    send_page_header(req, T(S_TITLE_SYSTEM));
+    send_page_header_refresh(req, T(S_TITLE_SYSTEM), "/system.json");
 
     /* image_check validates the SHA256, so this can't false-positive on
      * stale flash content. Reuses the generic partition download below
@@ -2518,10 +2685,10 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td>%s (IDF %s, %s %s)</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s</th><td id='sys-uptime'>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s (%s)</th><td>%s / %s / %s</td></tr>"
-        "<tr><th>%s (%s)</th><td>%s / %s / %s</td></tr>"
+        "<tr><th>%s (%s)</th><td id='sys-ram-i'>%s / %s / %s</td></tr>"
+        "<tr><th>%s (%s)</th><td id='sys-ram-p'>%s / %s / %s</td></tr>"
         "</table><h2>%s</h2>",
         T(S_SYS_CHIP), CONFIG_IDF_TARGET, chip.revision, feat,
         T(S_SYS_CORES), chip.cores,
@@ -2536,54 +2703,63 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         T(S_SYS_TASKS));
     httpd_resp_send_chunk(req, info, HTTPD_RESP_USE_STRLEN);
 
-    /* Two snapshots ~300 ms apart give the *current* per-task CPU load (delta),
-     * which is wrap-safe unlike cumulative-since-boot counters. */
-    UBaseType_t n1 = uxTaskGetNumberOfTasks();
-    if (n1 > 64) n1 = 64;
-    TaskStatus_t *a1 = malloc(n1 * sizeof(TaskStatus_t));
-    TaskStatus_t *a2 = malloc(n1 * sizeof(TaskStatus_t));
-    if (a1 && a2)
-    {
-        uint32_t rt1 = 0, rt2 = 0;
-        UBaseType_t c1 = uxTaskGetSystemState(a1, n1, &rt1);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        UBaseType_t c2 = uxTaskGetSystemState(a2, n1, &rt2);
-        uint32_t total_delta = rt2 - rt1;
+    httpd_resp_send_chunk(req,
+        "<div class='scroll'><table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
+    char hdr[128];
+    snprintf(hdr, sizeof(hdr), "%s</th><th>%s</th><th>%s</th><th>%s</th></tr><tbody id='sys-tasks'>",
+             T(S_SYS_COL_STATE), T(S_SYS_COL_PRIO), T(S_SYS_COL_CPU), T(S_SYS_COL_STACK));
+    httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
 
-        httpd_resp_send_chunk(req,
-            "<div class='scroll'><table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
-        char hdr[128];
-        snprintf(hdr, sizeof(hdr), "%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
-                 T(S_SYS_COL_STATE), T(S_SYS_COL_PRIO), T(S_SYS_COL_CPU), T(S_SYS_COL_STACK));
-        httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
+    static EXT_RAM_BSS_ATTR char task_rows[16384];
+    build_task_rows_html(task_rows, sizeof(task_rows));
+    httpd_resp_send_chunk(req, task_rows, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
 
-        for (UBaseType_t i = 0; i < c2; i++)
-        {
-            uint32_t prev = 0;
-            for (UBaseType_t j = 0; j < c1; j++)
-                if (a1[j].xHandle == a2[i].xHandle) { prev = a1[j].ulRunTimeCounter; break; }
-            uint32_t delta = a2[i].ulRunTimeCounter - prev;
-            unsigned cpu_x10 = total_delta ? (unsigned)(((uint64_t)delta * 1000) / total_delta) : 0;
-
-            char nameesc[48];
-            html_escape(a2[i].pcTaskName, nameesc, sizeof(nameesc));
-            char row[256];
-            snprintf(row, sizeof(row),
-                "<tr><td>%s</td><td>%s</td><td>%u</td><td>%u.%u</td><td>%u</td></tr>",
-                nameesc, task_state_str(a2[i].eCurrentState),
-                (unsigned)a2[i].uxCurrentPriority,
-                cpu_x10 / 10, cpu_x10 % 10,
-                (unsigned)a2[i].usStackHighWaterMark);
-            httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
-        }
-        httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
-    }
-    free(a1);
-    free(a2);
+    /* Applies a /system.json response -- uptime/RAM as plain text, the task
+     * table as a pre-rendered HTML fragment (same rows build_task_rows_html
+     * already produces for the initial page, just re-sent via innerHTML so
+     * the row set can grow/shrink too, not just the numbers in place). */
+    httpd_resp_send_chunk(req,
+        "<script>window.arApply=function(d){"
+        "document.getElementById('sys-uptime').textContent=d.uptime;"
+        "document.getElementById('sys-ram-i').textContent=d.ram_i;"
+        "document.getElementById('sys-ram-p').textContent=d.ram_p;"
+        "document.getElementById('sys-tasks').innerHTML=d.tasks_html;"
+        "};</script>", HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
+}
+
+/* GET /system.json -- the dynamic subset of /system, polled by the script
+ * send_page_header_refresh() injects. Chip info, reset reason and the
+ * coredump banner never change without a reboot (which reloads the page
+ * anyway), so only uptime/RAM/tasks are here. */
+static esp_err_t system_json_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+
+    char uptime_str[48];
+    format_uptime(esp_timer_get_time() / 1000000ull, uptime_str, sizeof(uptime_str));
+
+    char ri_f[24], ri_m[24], ri_t[24], rp_f[24], rp_m[24], rp_t[24];
+    format_bytes(heap_caps_get_free_size(MALLOC_CAP_INTERNAL), ri_f, sizeof(ri_f));
+    format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), ri_m, sizeof(ri_m));
+    format_bytes(heap_caps_get_total_size(MALLOC_CAP_INTERNAL), ri_t, sizeof(ri_t));
+    format_bytes(heap_caps_get_free_size(MALLOC_CAP_SPIRAM), rp_f, sizeof(rp_f));
+    format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), rp_m, sizeof(rp_m));
+    format_bytes(heap_caps_get_total_size(MALLOC_CAP_SPIRAM), rp_t, sizeof(rp_t));
+
+    static EXT_RAM_BSS_ATTR char task_rows[16384];
+    build_task_rows_html(task_rows, sizeof(task_rows));
+
+    static EXT_RAM_BSS_ATTR char json[17408];
+    snprintf(json, sizeof(json),
+        "{\"uptime\":\"%s\",\"ram_i\":\"%s / %s / %s\",\"ram_p\":\"%s / %s / %s\",\"tasks_html\":\"%s\"}",
+        uptime_str, ri_f, ri_m, ri_t, rp_f, rp_m, rp_t, task_rows);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
 /* ================================================================== */
@@ -3876,7 +4052,7 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 36; /* 33 routes today, plus a little headroom */
+    config.max_uri_handlers = 40; /* 35 routes today, plus a little headroom */
     /* /messages and /map each hold a /ws socket open for as long as the tab
      * is open -- 8 proved too tight once /map existed (accept() failures as
      * dead WS sessions piled up, see the reaping in ws_broadcast_work). */
@@ -3906,6 +4082,7 @@ void webserver_init(void)
 
     static const httpd_uri_t uris[] = {
         { .uri = "/",         .method = HTTP_GET,  .handler = status_page_handler },
+        { .uri = "/status.json", .method = HTTP_GET, .handler = status_json_get_handler },
         { .uri = "/messages", .method = HTTP_GET,  .handler = messages_get_handler },
         { .uri = "/settings", .method = HTTP_GET,  .handler = settings_get_handler },
         { .uri = "/settings", .method = HTTP_POST, .handler = settings_post_handler },
@@ -3915,6 +4092,7 @@ void webserver_init(void)
         { .uri = "/reboot",   .method = HTTP_POST, .handler = reboot_post_handler },
         { .uri = "/confirm",  .method = HTTP_POST, .handler = confirm_post_handler },
         { .uri = "/system",   .method = HTTP_GET,  .handler = system_get_handler },
+        { .uri = "/system.json", .method = HTTP_GET, .handler = system_json_get_handler },
         { .uri = "/system/coredump/clear", .method = HTTP_POST, .handler = coredump_clear_post_handler },
         { .uri = "/map",         .method = HTTP_GET, .handler = map_get_handler },
         { .uri = "/leaflet.js",  .method = HTTP_GET, .handler = leaflet_js_get_handler },

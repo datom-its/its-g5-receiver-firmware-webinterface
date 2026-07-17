@@ -131,6 +131,42 @@ static volatile bool cfg_log_frames;
 
 static vprintf_like_t s_orig_vprintf;
 
+/* ESP-IDF's log timestamps are time-only (HH:MM:SS.mmm), so a multi-day
+ * system.log can't be pinned to a calendar day. We inject a dated header
+ * line whenever the local date rolls over (and on the first line after NTP
+ * sync). s_next_day_boundary caches the epoch-second of the next local
+ * midnight so the expensive localtime_r/strftime runs once per day, not per
+ * log line. */
+static time_t s_next_day_boundary;
+
+/* Called from the vprintf hook (any task). Appends a date header to the sys
+ * ring iff the local day changed. Suppressed until the clock is plausibly
+ * NTP-set, to avoid a bogus 1970 header at boot. */
+static void sdlog_emit_date_marker_if_needed(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec < 1600000000)   /* ~2020-09, i.e. clock still unset */
+        return;
+    if (tv.tv_sec < s_next_day_boundary)
+        return;
+
+    struct tm lt;
+    localtime_r(&tv.tv_sec, &lt);
+    char marker[48];
+    int mn = (int)strftime(marker, sizeof(marker), "===== %Y-%m-%d (%a) =====\n", &lt);
+    if (mn > 0)
+        ring_append(&sys_stream.ring, marker, (size_t)mn, 0);
+
+    /* Next local midnight; tm_isdst=-1 lets mktime resolve DST correctly. */
+    lt.tm_mday += 1;
+    lt.tm_hour = 0;
+    lt.tm_min = 0;
+    lt.tm_sec = 0;
+    lt.tm_isdst = -1;
+    s_next_day_boundary = mktime(&lt);
+}
+
 static void reload_config(void)
 {
     uint8_t sys = 0, frames = 0;
@@ -237,6 +273,7 @@ static int sdlog_vprintf(const char *fmt, va_list args)
         {
             if (n > (int)sizeof(line) - 1)
                 n = sizeof(line) - 1;
+            sdlog_emit_date_marker_if_needed();
             /* Never block a logging call: give up the line if contended. */
             ring_append(&sys_stream.ring, line, (size_t)n, 0);
         }
