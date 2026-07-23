@@ -150,15 +150,17 @@ static volatile bool cfg_enabled;
 static volatile uint32_t cfg_retain_hours;
 static volatile uint32_t cfg_max_mb;
 static volatile uint32_t cfg_flush_sec;
+static volatile uint8_t  cfg_filter;
 static uint32_t s_dropped;
 
 /* Buffer size itself is read once at boot in sdpcap_init, not here --
  * the PSRAM block backing it is allocated exactly once. */
 static void reload_config(void)
 {
-    uint8_t en = 0;
+    uint8_t en = 0, filt = 0;
     uint32_t hours = 24, mb = 300, flush_sec = 300;
     config_get_u8(CONFIG_INDEX_PCAP_ENABLE, &en);
+    config_get_u8(CONFIG_INDEX_PCAP_FILTER, &filt);
     config_get_u32(CONFIG_INDEX_PCAP_RETAIN_HOURS, &hours);
     config_get_u32(CONFIG_INDEX_PCAP_MAX_MB, &mb);
     config_get_u32(CONFIG_INDEX_PCAP_FLUSH_SEC, &flush_sec);
@@ -168,14 +170,52 @@ static void reload_config(void)
     cfg_retain_hours = hours;
     cfg_max_mb = mb;
     cfg_flush_sec = flush_sec;
+    cfg_filter = filt;
 }
 
 static void config_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base; (void)data;
     if (id == CONFIG_INDEX_PCAP_ENABLE || id == CONFIG_INDEX_PCAP_RETAIN_HOURS ||
-        id == CONFIG_INDEX_PCAP_MAX_MB || id == CONFIG_INDEX_PCAP_FLUSH_SEC)
+        id == CONFIG_INDEX_PCAP_MAX_MB || id == CONFIG_INDEX_PCAP_FLUSH_SEC ||
+        id == CONFIG_INDEX_PCAP_FILTER)
         reload_config();
+}
+
+/* Thinning filter. One traffic light accounts for 85% of everything recorded
+ * here -- 26,679 SPATEM an hour, the same intersection repeating itself ten
+ * times a second, 12.1 of the 14.3 MB. Dropping the security envelope from
+ * each frame would save less (a factor of three) while making the recording
+ * no longer a faithful capture; skipping repeats costs nothing structurally
+ * and saves more. Modes: 0 keep everything, 1 thin the infrastructure
+ * chatter to one message a second per type, 2 keep only vehicles and
+ * warnings. */
+static uint32_t s_filtered;
+static uint32_t s_last_kept[256];   /* last second kept, per messageId */
+
+static bool pcap_keep_frame(const uint8_t *frame, size_t len, uint32_t sec)
+{
+    /* Reads the cached value, never NVS: this runs on the receive path for
+     * every frame, about thirty times a second. */
+    uint8_t mode = cfg_filter;
+    if (mode == 0)
+        return true;
+
+    uint8_t mid = its_peek_message_id(frame, len);
+    /* Only SPATEM (4) and MAPEM (5) are the repetitive infrastructure ones;
+     * anything else -- vehicles, warnings, message types we do not yet know
+     * -- is always kept. Being wrong here means silently losing data, so the
+     * filter names what it drops rather than what it keeps. */
+    bool infra = (mid == 4 || mid == 5);
+    if (!infra)
+        return true;
+    if (mode == 2)
+        return false;
+
+    if (s_last_kept[mid] == sec)
+        return false;
+    s_last_kept[mid] = sec;
+    return true;
 }
 
 /* Called from the sniffer's hot path -- must never block, never malloc.
@@ -197,6 +237,12 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet)
      * epoch time -- gettimeofday() instead (correct once NTP has synced). */
     struct timeval tv;
     gettimeofday(&tv, NULL);
+
+    if (!pcap_keep_frame(packet->payload, packet->length, (uint32_t)tv.tv_sec))
+    {
+        s_filtered++;
+        return;
+    }
 
     static EXT_RAM_BSS_ATTR uint8_t rec[sizeof(pcap_rec_hdr_t) + PCAP_MAX_FRAME];
     pcap_rec_hdr_t hdr = {
@@ -230,6 +276,66 @@ static void sdpcap_current_path(char *out, size_t out_size, time_t now)
     snprintf(out, out_size, "%s/%s", PCAP_DIR, name);
 }
 
+/* Does this look like a real record header for a file covering `hour`?
+ * The timestamp check is what makes resynchronisation reliable: random frame
+ * bytes almost never form a plausible second inside this one hour. */
+static bool pcap_rec_plausible(const pcap_rec_hdr_t *rh, uint32_t hour, size_t maxcap)
+{
+    /* +5 s slack past the hour: the writer stamps records at enqueue time and
+     * flushes in batches, so the last records of an hour can legitimately sit
+     * just past the boundary -- the real 18:00 file ends on a record at
+     * exactly 19:00:00, which a strict bound rejected and dropped. */
+    return rh->caplen >= 24 && rh->caplen <= maxcap &&
+           rh->len >= rh->caplen && rh->len <= maxcap &&
+           rh->usec < 1000000u &&
+           rh->sec >= hour && rh->sec < hour + 3605u;
+}
+
+/* Slides forward from the current position until a plausible record header
+ * is found, leaving the stream positioned just after it. Scans in-memory
+ * chunks: the first version issued an fseek+fread pair PER BYTE, which on a
+ * thoroughly damaged file meant up to 262,144 SD accesses before giving up --
+ * the same scan over 2 KB chunks is 128 reads. Bounded either way so a broken
+ * file cannot stall the request indefinitely. */
+#define PCAP_RESYNC_MAX 262144   /* 256 KB of garbage before giving up */
+
+static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxcap)
+{
+    long pos = ftell(f);
+    if (pos < 0)
+        return false;
+    pos -= (long)sizeof(*rh);   /* back to the header that failed */
+
+    /* Static: this runs on the httpd task; the chunk plus header overlap
+     * would be an unnecessary 2 KB of its stack. Only one playback request
+     * runs at a time in practice, and a second would merely rescan. */
+    static uint8_t chunk[2048 + sizeof(pcap_rec_hdr_t)];
+
+    long scanned = 0;
+    while (scanned < PCAP_RESYNC_MAX)
+    {
+        /* Overlap by header size so a header straddling two chunks is seen. */
+        if (fseek(f, pos + 1 + scanned, SEEK_SET) != 0)
+            return false;
+        size_t got = fread(chunk, 1, sizeof(chunk), f);
+        if (got < sizeof(*rh))
+            return false;       /* end of file: nothing plausible left */
+        for (size_t i = 0; i + sizeof(*rh) <= got; i++)
+        {
+            memcpy(rh, chunk + i, sizeof(*rh));
+            if (pcap_rec_plausible(rh, hour, maxcap))
+            {
+                if (fseek(f, pos + 1 + scanned + (long)i + (long)sizeof(*rh),
+                          SEEK_SET) != 0)
+                    return false;
+                return true;
+            }
+        }
+        scanned += (long)(got - sizeof(*rh) + 1);
+    }
+    return false;
+}
+
 void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
     if (!cb || !sdcard_is_mounted())
@@ -256,21 +362,26 @@ void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_c
         pcap_rec_hdr_t rh;
         while (fread(&rh, sizeof(rh), 1, f) == 1)
         {
-            if (rh.caplen == 0 || rh.caplen > sizeof(buf))
-                break;  /* corrupt/unexpected -- stop reading this file */
+            /* A torn SD write desynchronises the record framing, and giving up
+             * at that point threw away the rest of the hour -- measured on a
+             * real file: readable up to 19:07, 50 minutes of perfectly good
+             * frames beyond it lost. So resynchronise instead: slide forward
+             * a byte at a time until a header looks plausible again (timestamp
+             * inside this file's own hour, sane lengths). */
+            if (!pcap_rec_plausible(&rh, (uint32_t)bucket, sizeof(buf)))
+            {
+                if (!pcap_resync(f, &rh, (uint32_t)bucket, sizeof(buf)))
+                    break;  /* nothing plausible left in this file */
+            }
             if (fread(buf, 1, rh.caplen, f) != rh.caplen)
                 break;
             if (rh.sec < from_sec || rh.sec > to_sec)
                 continue;
 
-            char label[32];
-            bool has_pos, has_speed;
-            int32_t lat_e7, lon_e7, speed_cmps;
-            uint32_t station_id;
-            its_decode_frame(buf, rh.caplen, label, sizeof(label), &has_pos, &lat_e7, &lon_e7,
-                              &station_id, &has_speed, &speed_cmps);
-            if (has_pos)
-                cb(rh.sec, rh.usec, station_id, lat_e7, lon_e7, has_speed, speed_cmps, label, ctx);
+            its_decoded_t d;
+            its_decode_frame(buf, rh.caplen, &d);
+            if (d.has_position)
+                cb(rh.sec, rh.usec, &d, ctx);
         }
         fclose(f);
     }

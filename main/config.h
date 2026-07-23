@@ -7,6 +7,9 @@ extern "C" {
 #endif
 
 #define CONFIG_NODEID_BUFFER_SIZE 64
+/* Comma-separated host names of other receivers whose markers this device's
+ * map page also displays. Room for roughly four entries. */
+#define CONFIG_PEERS_BUFFER_SIZE 160
 #define CONFIG_MQTT_URI_BUFFER_SIZE 256
 #define CONFIG_IPV4_BUFFER_SIZE 16
 #define CONFIG_WEB_PASSWORD_BUFFER_SIZE 65  /* holds a SHA-256 hex digest (64 chars) + NUL, not the raw password */
@@ -38,6 +41,13 @@ typedef enum {
     CONFIG_INDEX_PCAP_MAX_MB,       /* u32 PCAP total SD safety-net budget, MiB */
     CONFIG_INDEX_PCAP_BUF_MB,       /* u32 PSRAM buffer size before flushing to SD, MiB */
     CONFIG_INDEX_PCAP_FLUSH_SEC,    /* u32 flush the PSRAM buffer at least this often, seconds */
+    CONFIG_INDEX_STATS_RETAIN_DAYS, /* u32 traffic-statistics retention window, days (1..30) */
+    CONFIG_INDEX_EVENT_RETAIN_DAYS, /* u32 warning-event log retention, days (1..30) */
+    CONFIG_INDEX_MAP_STALE_SEC,     /* u32 drop a map marker after this long without an update, seconds (10..3600) */
+    CONFIG_INDEX_PEERS,             /* str other receivers to merge into the map, comma-separated */
+    CONFIG_INDEX_PCAP_FILTER,       /* u8  0 = alles, 1 = Ampelmeldungen ausgeduennt, 2 = nur Fahrzeuge/Warnungen */
+    CONFIG_INDEX_TRACKS_ENABLE,     /* u8  record vehicle tracks for the map overlay (0 = off) */
+    CONFIG_INDEX_TRACKS_DAYS,       /* u32 how long to keep them, days (1..7) */
 } config_index_t;
 
 /* Hashes a raw web-UI password the same salted way CONFIG_INDEX_WEB_PASSWORD

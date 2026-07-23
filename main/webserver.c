@@ -50,6 +50,11 @@
 #ifdef CONFIG_ENABLE_TEMPERATURE
 #include "temperature.h"
 #endif
+#include "sysstat.h"
+#include "stats.h"
+#include "events_log.h"
+#include "tracklog.h"
+#include "spatem.h"
 
 #include "webserver.h"
 
@@ -72,6 +77,22 @@ extern const uint8_t leaflet_css_end[]            asm("_binary_leaflet_css_end")
 
 static const char TAG[] = "WEBSERVER";
 
+/* snprintf for page markup that says so when it had to truncate.
+ * -Wformat-truncation cannot catch these: the arguments are runtime strings
+ * (translated UI text), so the compiler has no length to reason about. Cut
+ * markup does not fail quietly -- it drops closing tags, and the browser then
+ * swallows the rest of the page. That has cost three debugging sessions now:
+ * a chip buffer collapsed the traffic page layout, a table row broke the
+ * warning list, and an undersized map header removed the map container
+ * itself. One log line at the moment of truncation replaces all of that. */
+#define HTML_PRINTF(buf, ...)                                                  \
+    do {                                                                       \
+        int _hp_n = snprintf((buf), sizeof(buf), __VA_ARGS__);                 \
+        if (_hp_n < 0 || (size_t)_hp_n >= sizeof(buf))                         \
+            ESP_LOGE(TAG, "%s:%d: markup truncated, need %d of %u bytes",      \
+                     __func__, __LINE__, _hp_n, (unsigned)sizeof(buf));        \
+    } while (0)
+
 /* ================================================================== */
 /*  Internationalization (i18n) - German default, English optional    */
 /* ================================================================== */
@@ -91,7 +112,9 @@ typedef enum {
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
     S_SET_GROUP_GENERAL, S_SET_GROUP_NETWORK, S_SET_GROUP_MQTT,
-    S_SET_GROUP_STORAGE, S_SET_GROUP_SECURITY,
+    S_SET_GROUP_STORAGE, S_SET_GROUP_SECURITY, S_SET_GROUP_TRAFFIC,
+    S_STATS_RETAIN_DAYS, S_EVENT_RETAIN_DAYS,
+    S_MAP_STALE_SEC, S_MAP_STALE_HINT, S_MAP_LINE, S_EVT_TRAFFIC,
     S_BROADCAST_ONLY, S_BROADCAST_ONLY_HINT,
     S_LED_OVERRIDE, S_LED_OVERRIDE_HINT,
     S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
@@ -104,6 +127,10 @@ typedef enum {
     S_PCAP_ENABLE, S_PCAP_RETAIN_HOURS, S_PCAP_MAX_MB, S_PCAP_HINT,
     S_PCAP_BUF_MB, S_PCAP_BUF_HINT, S_PCAP_FLUSH_SEC,
     S_PLAYBACK_FROM, S_PLAYBACK_TO, S_PLAYBACK_LOAD, S_PLAYBACK_LIVE, S_PLAYBACK_NONE, S_PLAYBACK_ERROR,
+    S_PLAYBACK_BUSY, S_PLAYBACK_STEP, S_MAP_LAYER_DARK, S_MAP_LAYER_LIGHT, S_MAP_LAYER_TRACKS, S_MAP_TRACK_PTS, S_UPD_WAIT, S_UPD_FLASHING,
+    S_PEERS, S_PEERS_HINT, S_MAP_SEEN_BY, S_UNSAVED,
+    S_TRACKS_ENABLE, S_TRACKS_DAYS, S_TRACKS_HINT,
+    S_PCAP_FILTER, S_PCAP_FILT_ALL, S_PCAP_FILT_THIN, S_PCAP_FILT_VEH, S_PCAP_FILT_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL, S_UPD_CHOOSE_FILE,
     S_UPD_NOT_CONFIRMED,
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
@@ -116,9 +143,20 @@ typedef enum {
     S_SYS_IDF, S_SYS_RESET, S_SYS_FLASH, S_SYS_RAM_INT, S_SYS_RAM_PSRAM,
     S_SYS_TRIPLE, S_SYS_TASKS, S_SYS_COL_STATE, S_SYS_COL_PRIO, S_SYS_COL_CPU,
     S_SYS_COL_STACK,
+    S_STAT_BOOTS, S_STAT_CRASHES, S_STAT_LASTCRASH, S_STAT_MAXUP, S_STAT_NEVER,
+    S_STAT_RESET, S_STAT_RESET_CONFIRM,
     S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
     S_LOGS_NONE, S_LOGS_TAIL,
+    S_NAV_TRAFFIC, S_TITLE_TRAFFIC, S_TRF_INTRO, S_TRF_WINDOW, S_TRF_W_24H, S_TRF_W_7D,
+    S_TRF_W_30D, S_TRF_TOTAL, S_TRF_HOUR, S_TRF_SPEED, S_TRF_NODATA,
+    S_CAT_CAR, S_CAT_BUS, S_CAT_TRUCK, S_CAT_TWOWHEEL, S_CAT_PED, S_CAT_RSU, S_CAT_OTHER,
+    S_EVT_TITLE, S_EVT_NONE, S_EVT_TIME, S_EVT_SENDER, S_EVT_WARNING, S_EVT_DENM,
+    S_TRF_SPEED_BY_TYPE,
+    S_TRF_LIGHTS, S_TRF_LIGHTS_NONE, S_TRF_INTERSECTION,
+    S_TRF_LIGHTS_INTRO, S_TRF_PH_GREEN, S_TRF_PH_AMBER, S_TRF_PH_RED, S_TRF_PH_OTHER,
+    S_DIR_STRAIGHT, S_DIR_LEFT, S_DIR_RIGHT, S_DIR_UTURN, S_DIR_PED,
     S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT, S_MAP_HELP, S_MAP_LAYER_STREETS, S_MAP_LAYER_SATELLITE,
+    S_MAP_DENM,
     S_SYS_COREDUMP, S_SYS_COREDUMP_DOWNLOAD, S_SYS_COREDUMP_CLEAR, S_SYS_COREDUMP_CLEAR_CONFIRM,
     S_COUNT
 } str_id_t;
@@ -175,13 +213,15 @@ static const char *STR[S_COUNT][2] = {
     /* Shown via alert(t) after fetch('/confirm').then(r=>r.text()) if
      * ota_confirm() itself fails (very rare -- was hardcoded English before). */
     [S_CONFIRM_ERROR]   = { "Fehler beim Bestätigen.", "Error confirming." },
-    [S_MSG_INTRO]       = { "Die letzten %d empfangenen Frames, neueste zuerst (nur Vorschau, erste %d Bytes).",
-                            "Last %d received frames, newest first (preview only, first %d bytes)." },
+    [S_MSG_INTRO]       = { "Die letzten %d empfangenen Frames, neueste zuerst, mit dem was sich "
+                            "aus jedem dekodieren lie&szlig;.",
+                            "Last %d received frames, newest first, with whatever could be decoded "
+                            "from each." },
     [S_COL_NUM]         = { "#",                        "#" },
     [S_COL_TIME]        = { "Zeit",                     "Time" },
     [S_COL_RSSI]        = { "RSSI",                     "RSSI" },
     [S_COL_LENGTH]      = { "L&auml;nge",               "Length" },
-    [S_COL_PREVIEW]     = { "Vorschau (hex)",           "Preview (hex)" },
+    [S_COL_PREVIEW]     = { "Details",                  "Details" },
     [S_SET_INTRO]       = { "&Auml;nderungen werden im NVS gespeichert. Die meisten wirken nach einem Neustart.",
                             "Changes are saved to NVS. Most take effect after a reboot." },
     [S_MQTT_URI]        = { "MQTT-URI",                 "MQTT URI" },
@@ -191,6 +231,12 @@ static const char *STR[S_COUNT][2] = {
     [S_SET_GROUP_NETWORK] = { "Netzwerk",               "Network" },
     [S_SET_GROUP_MQTT]    = { "MQTT",                   "MQTT" },
     [S_SET_GROUP_STORAGE] = { "Speicher (SD)",          "Storage (SD)" },
+    [S_SET_GROUP_TRAFFIC] = { "Verkehr-Seite",          "Traffic page" },
+    [S_STATS_RETAIN_DAYS] = { "Statistik-Aufbewahrung (Tage)",  "Statistics retention (days)" },
+    [S_EVENT_RETAIN_DAYS] = { "Warnungs-Aufbewahrung (Tage)",   "Warning-log retention (days)" },
+    [S_MAP_STALE_SEC]   = { "Karte: Marker-Standzeit (s)", "Map: marker hold time (s)" },
+    [S_MAP_STALE_HINT]  = { "Wie lange ein Sender ohne neue Nachricht auf der Karte bleibt.",
+                            "How long a sender stays on the map without a new message." },
     [S_SET_GROUP_SECURITY]= { "Sicherheit",             "Security" },
     [S_BROADCAST_ONLY]  = { "Nur Broadcast erfassen",   "Capture broadcast only" },
     [S_BROADCAST_ONLY_HINT] = { "Aus: erfasst auch Unicast-Frames (deutlich mehr Datenaufkommen).",
@@ -200,6 +246,8 @@ static const char *STR[S_COUNT][2] = {
                               "Overrides the normal status indication. Black = normal behaviour (off)." },
     [S_LED_BRIGHTNESS]  = { "LED-Helligkeit",           "LED brightness" },
     [S_SAVE]            = { "Speichern",                "Save" },
+    [S_UNSAVED]         = { "Nicht gespeicherte &Auml;nderungen",
+                            "Unsaved changes" },
     [S_SAVED]           = { "%d Einstellung(en) gespeichert.", "Saved %d setting(s)." },
     [S_WEB_PASSWORD]    = { "Web-Passwort (Benutzer &quot;admin&quot;)",
                             "Web password (user &quot;admin&quot;)" },
@@ -259,6 +307,62 @@ static const char *STR[S_COUNT][2] = {
     [S_PLAYBACK_NONE]   = { "Keine Positionsdaten (CAM) in diesem Zeitraum gefunden.",
                             "No position data (CAM) found in this time range." },
     [S_PLAYBACK_ERROR]  = { "Fehler beim Laden.", "Error loading." },
+    /* Rendered via textContent, so no HTML entities here -- they would show
+     * up literally as "&hellip;" instead of an ellipsis. */
+    [S_PLAYBACK_BUSY]   = { "Lese von SD-Karte ...", "Reading from SD card ..." },
+    [S_PLAYBACK_STEP]   = { "Schritt",                   "Step" },
+    [S_MAP_LAYER_DARK]  = { "Dunkel",                    "Dark" },
+    [S_MAP_LAYER_LIGHT] = { "Hell",                      "Light" },
+    [S_MAP_LAYER_TRACKS]= { "Fahrspuren",                "Vehicle tracks" },
+    [S_MAP_TRACK_PTS]   = { "Punkte",                    "points" },
+    [S_MAP_SEEN_BY]     = { "empfangen von",             "received by" },
+    [S_PEERS]           = { "Weitere Empf&auml;nger",    "Other receivers" },
+    [S_PEERS_HINT]      = { "Hostnamen oder IP-Adressen weiterer Empf&auml;nger, mit Komma getrennt "
+                            "&ndash; z.&nbsp;B. <code>its-node344.local, 192.168.178.40</code>. Deren "
+                            "Fahrzeuge erscheinen dann zus&auml;tzlich auf dieser Karte. Es gibt keine "
+                            "Haupt- oder Nebenger&auml;te: jedes Ger&auml;t zeigt genau die an, die hier "
+                            "eingetragen sind. Abgefragt wird vom Browser aus, das Ger&auml;t selbst "
+                            "wird dadurch nicht belastet &ndash; dein Browser muss die anderen "
+                            "Empf&auml;nger also erreichen k&ouml;nnen (gleiches Netz).",
+                            "Host names or IP addresses of other receivers, comma-separated &ndash; e.g. "
+                            "<code>its-node344.local, 192.168.178.40</code>. Their vehicles then also "
+                            "appear on this map. There are no primary or secondary devices: each one "
+                            "shows exactly those listed here. The browser does the fetching, so the "
+                            "device itself carries no extra load &ndash; which means your browser must "
+                            "be able to reach the other receivers (same network)." },
+    /* Set via innerText -- plain text, no HTML entities. */
+    [S_UPD_WAIT]        = { "warte auf Neustart",        "waiting for reboot" },
+    /* innerText/textContent -- plain text, no HTML entities. */
+    [S_UPD_FLASHING]    = { "Geraet schreibt die Firmware ...",
+                            "Device is writing the firmware ..." },
+    /* Each option states what is recorded IN FULL, not just what gets
+     * thinned -- named only after its exception, the middle one read as if
+     * it might drop everything else too. */
+    [S_PCAP_FILTER]     = { "Umfang der Aufzeichnung",   "What gets recorded" },
+    [S_PCAP_FILT_ALL]   = { "alles, ungek&uuml;rzt",     "everything, in full" },
+    [S_PCAP_FILT_THIN]  = { "alles &ndash; nur Ampelmeldungen h&ouml;chstens 1&times;/s",
+                            "everything &ndash; but traffic-light messages at most once a second" },
+    [S_PCAP_FILT_VEH]   = { "nur Fahrzeuge und Warnungen, keine Ampelmeldungen",
+                            "vehicles and warnings only, no traffic-light messages" },
+    [S_PCAP_FILT_HINT]  = { "Eine einzige Ampel macht 85&nbsp;% der Aufzeichnung aus &ndash; sie "
+                            "wiederholt sich zehnmal pro Sekunde. Gemessen: 14,3&nbsp;MB/h ungek&uuml;rzt, "
+                            "3,4&nbsp;MB/h bei 1&times;/s, 0,04&nbsp;MB/h nur mit Fahrzeugen. Die Frames "
+                            "selbst bleiben unver&auml;ndert und vollst&auml;ndig, es werden nur "
+                            "Wiederholungen weggelassen.",
+                            "A single traffic light makes up 85% of the recording &ndash; it repeats "
+                            "itself ten times a second. Measured: 14.3&nbsp;MB/h unfiltered, "
+                            "3.4&nbsp;MB/h at 1/s, 0.04&nbsp;MB/h with vehicles only. The frames "
+                            "themselves stay complete and unaltered; only repeats are skipped." },
+    [S_TRACKS_ENABLE]   = { "Fahrspuren aufzeichnen",    "Record vehicle tracks" },
+    [S_TRACKS_DAYS]     = { "Fahrspuren aufbewahren (Tage)", "Keep tracks for (days)" },
+    [S_TRACKS_HINT]     = { "Zeichnet auf, wo Fahrzeuge tats&auml;chlich gefahren sind, und blendet "
+                            "es auf der Karte als zuschaltbare Ebene ein. Sehr sparsam &ndash; rund "
+                            "150 Punkte pro Stunde, etwa 150 KB f&uuml;r drei Tage. Beginnt bei null: "
+                            "&auml;ltere Fahrten aus der PCAP-Aufzeichnung sind nicht enthalten.",
+                            "Records where vehicles actually drove and shows it on the map as a "
+                            "switchable layer. Very light &ndash; about 150 points an hour, roughly "
+                            "150 KB for three days. Starts empty: earlier journeys from the PCAP "
+                            "recordings are not included." },
     [S_UPD_INTRO]       = { "W&auml;hle eine Firmware-Datei (.bin) und klicke Hochladen. Das Ger&auml;t "
                             "flasht sie auf die inaktive OTA-Partition und startet neu. Danach musst du "
                             "das Update im Status best&auml;tigen, sonst wird es zur&uuml;ckgerollt.",
@@ -352,6 +456,14 @@ static const char *STR[S_COUNT][2] = {
     [S_SYS_COL_PRIO]    = { "Prio",                     "Prio" },
     [S_SYS_COL_CPU]     = { "CPU %",                    "CPU %" },
     [S_SYS_COL_STACK]   = { "Stack frei (min)",         "Stack free (min)" },
+    [S_STAT_BOOTS]      = { "Neustarts gesamt",         "Reboots total" },
+    [S_STAT_CRASHES]    = { "davon Abst&uuml;rze",      "of which crashes" },
+    [S_STAT_LASTCRASH]  = { "Letzter Absturz",          "Last crash" },
+    [S_STAT_MAXUP]      = { "L&auml;ngste Laufzeit",    "Longest uptime" },
+    [S_STAT_NEVER]      = { "noch keiner",              "none yet" },
+    [S_STAT_RESET]      = { "Z&auml;hler zur&uuml;cksetzen", "Reset counters" },
+    [S_STAT_RESET_CONFIRM] = { "Alle Stabilit&auml;ts-Z&auml;hler wirklich auf null setzen?",
+                               "Really reset all stability counters to zero?" },
     [S_NAV_LOGS]        = { "Logs",                     "Logs" },
     [S_TITLE_LOGS]      = { "Logs",                     "Logs" },
     [S_LOGS_SYS]        = { "System-Log",               "System log" },
@@ -361,6 +473,62 @@ static const char *STR[S_COUNT][2] = {
                             "No log file yet (logging enabled? SD mounted?)." },
     [S_LOGS_TAIL]       = { "Letzte %d KB, neueste Zeilen unten.",
                             "Last %d KB, newest lines at the bottom." },
+    [S_NAV_TRAFFIC]     = { "Verkehr",                  "Traffic" },
+    [S_TITLE_TRAFFIC]   = { "Verkehr",                  "Traffic" },
+    [S_TRF_INTRO]       = { "Empfangene Nachrichten pro Stunde, nach Verkehrsteilnehmer. Wird st&uuml;ndlich auf die SD-Karte geschrieben und &uuml;berlebt Neustarts.",
+                            "Received messages per hour, by road user. Written hourly to the SD card, survives reboots." },
+    [S_TRF_WINDOW]      = { "Zeitraum",                 "Window" },
+    [S_TRF_W_24H]       = { "24 Stunden",               "24 hours" },
+    [S_TRF_W_7D]        = { "7 Tage",                   "7 days" },
+    [S_TRF_W_30D]       = { "30 Tage",                  "30 days" },
+    [S_TRF_TOTAL]       = { "Gesamt",                   "Total" },
+    [S_TRF_HOUR]        = { "Stunde",                   "Hour" },
+    [S_TRF_SPEED]       = { "&Oslash;/max km/h",        "avg/max km/h" },
+    [S_TRF_NODATA]      = { "Noch keine Daten (SD-Karte n&ouml;tig, sammelt ab der ersten vollen Stunde).",
+                            "No data yet (needs an SD card; collects from the first full hour)." },
+    [S_CAT_CAR]         = { "Auto",                     "Car" },
+    [S_CAT_BUS]         = { "Bus",                      "Bus" },
+    [S_CAT_TRUCK]       = { "Lkw",                      "Truck" },
+    [S_CAT_TWOWHEEL]    = { "Zweirad",                  "Two-wheeler" },
+    [S_CAT_PED]         = { "Fu&szlig;g&auml;nger",     "Pedestrian" },
+    [S_CAT_RSU]         = { "Ampel/RSU",                "Traffic light/RSU" },
+    [S_CAT_OTHER]       = { "Sonstige",                 "Other" },
+    [S_EVT_TITLE]       = { "Warnmeldungen (DENM)",     "Warnings (DENM)" },
+    [S_EVT_NONE]        = { "Keine Warnmeldungen im gew&auml;hlten Zeitraum.",
+                            "No warnings in the selected window." },
+    [S_EVT_TIME]        = { "Zeit",                     "Time" },
+    [S_EVT_SENDER]      = { "Absender",                 "Sender" },
+    [S_EVT_WARNING]     = { "Warnung",                  "Warning" },
+    [S_EVT_DENM]        = { "Gefahrenmeldung",          "Hazard notification" },
+    [S_EVT_TRAFFIC]     = { "Verkehrslage / Stau",      "Traffic condition / queue" },
+    [S_TRF_SPEED_BY_TYPE] = { "Geschwindigkeit nach Typ (&Oslash;/max km/h)",
+                              "Speed by type (avg/max km/h)" },
+    [S_TRF_LIGHTS]      = { "Ampeln (live)",            "Traffic lights (live)" },
+    [S_TRF_LIGHTS_NONE] = { "Keine Ampeldaten (SPATEM) empfangen.",
+                            "No traffic-light data (SPATEM) received." },
+    [S_TRF_INTERSECTION] = { "Kreuzung",               "Intersection" },
+    [S_TRF_LIGHTS_INTRO] = {
+        "Aktueller Schaltzustand je Signalgruppe der empfangenen Kreuzungen. "
+        "Angezeigt wird, was die Gruppe steuert (aus der Kartennachricht "
+        "MAPEM), mit ihrer Signalgruppen-Nummer in Klammern. "
+        "Die Sekundenzahl daneben ist die Restzeit bis zum "
+        "Umschalten &ndash; sie erscheint nur, wenn die Ampel diese Angabe "
+        "mitsendet (meist kurz vor einem Wechsel). Farbe = aktuelle Phase:",
+        "Current phase per signal group of the received intersections. Shown is "
+        "what each group controls (from the MAPEM map message), with its "
+        "signal-group number in brackets. The seconds "
+        "next to it are the time left until the phase changes &ndash; shown "
+        "only when the light broadcasts it (usually shortly before a change). "
+        "Colour = current phase:" },
+    [S_TRF_PH_GREEN]    = { "Gr&uuml;n (frei)",        "Green (go)" },
+    [S_TRF_PH_AMBER]    = { "Gelb (&Uuml;bergang)",    "Amber (change)" },
+    [S_TRF_PH_RED]      = { "Rot (Halt)",              "Red (stop)" },
+    [S_TRF_PH_OTHER]    = { "Aus/unbekannt",           "Off/unknown" },
+    [S_DIR_STRAIGHT]    = { "geradeaus",               "straight" },
+    [S_DIR_LEFT]        = { "links",                   "left" },
+    [S_DIR_RIGHT]       = { "rechts",                  "right" },
+    [S_DIR_UTURN]       = { "wenden",                  "U-turn" },
+    [S_DIR_PED]         = { "Fu&szlig;g&auml;nger",    "pedestrian" },
     [S_NAV_MAP]         = { "Karte",                    "Map" },
     [S_TITLE_MAP]       = { "Live-Karte",               "Live map" },
     [S_MAP_HINT]        = { "Positionen aus empfangenen V2X-Nachrichten: Fahrzeuge (CAM) und ortsfeste Sender wie Ampeln/RSUs (Position aus der GeoNetworking-Schicht). Symbol je Stationstyp; Anklicken zeigt Details (Typ, Zeit, RSSI, bei Fahrzeugen auch km/h). Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) &ndash; das Ger&auml;t selbst nicht.<br><br>Verlauf/Wiedergabe: W&auml;hle unten einen Zeitbereich (Von/bis) und klicke Laden, dann kannst du mit dem Regler und der Play-Taste die Positionen aus diesem Zeitraum abspielen. Diese Daten stammen aus der rollierenden PCAP-Aufzeichnung auf der SD-Karte (falls aktiviert).",
@@ -368,6 +536,8 @@ static const char *STR[S_COUNT][2] = {
     [S_MAP_HELP]        = { "Info &amp; Hilfe",           "Info &amp; help" },
     [S_MAP_LAYER_STREETS] = { "Karte",                  "Map" },
     [S_MAP_LAYER_SATELLITE] = { "Satellit",             "Satellite" },
+    [S_MAP_DENM]        = { "Gefahrenmeldung aktiv",   "Hazard warning active" },
+    [S_MAP_LINE]        = { "Linie",                   "Line" },
     [S_SYS_COREDUMP]      = { "&#9888; Crash-Dump verf&uuml;gbar", "&#9888; Crash dump available" },
     [S_SYS_COREDUMP_DOWNLOAD] = { "Herunterladen",      "Download" },
     [S_SYS_COREDUMP_CLEAR] = { "L&ouml;schen",          "Delete" },
@@ -465,7 +635,6 @@ static bool time_is_synced(void)
 /* ================================================================== */
 
 #define WEB_MSG_RING_SIZE   20
-#define WEB_MSG_PREVIEW_LEN 32
 
 #define WEB_MSG_TYPE_LEN 32
 
@@ -473,9 +642,8 @@ typedef struct {
     uint32_t seconds;
     uint32_t microseconds;
     uint32_t length;
-    uint32_t preview_len;
+
     int      rssi;
-    uint8_t  preview[WEB_MSG_PREVIEW_LEN];
     char     msgtype[WEB_MSG_TYPE_LEN];
     bool     has_position; /* true if lat_e7/lon_e7/station_id below are valid (CAM's own
                              * referencePosition, or a GN-layer fallback for anything else
@@ -485,6 +653,21 @@ typedef struct {
     uint32_t station_id;   /* ItsPduHeader.stationId; stable per sender, only meaningful if has_position */
     bool     has_speed;    /* true if speed_cmps below is valid (vehicles only, not RSUs) */
     int32_t  speed_cmps;   /* speed in cm/s (0.01 m/s units, matches the wire encoding) */
+    uint16_t length_dm;    /* CAM vehicle size, decimetres; 0 = not sent/unavailable */
+    uint8_t  width_dm;
+    uint8_t  pt_line;      /* public-transport line number, 0 = none */
+    /* CAM detail (see its_cam_detail_t). The path history costs 64 bytes an
+     * entry, i.e. 1.3 KB across this 20-slot ring in PSRAM -- cheap enough
+     * to carry rather than re-derive. */
+    uint8_t  n_path;
+    int32_t  path_lat_e7[ITS_PATH_MAX], path_lon_e7[ITS_PATH_MAX];
+    uint16_t heading_ddeg; /* 0.1 deg, 0xFFFF = not sent */
+    uint8_t  accel_ctrl;   /* ITS_ACC_*, only valid if has_accel_ctrl */
+    bool     has_accel_ctrl;
+    uint8_t  ext_lights;   /* ITS_LIGHT_*, only valid if has_lights */
+    bool     has_lights;
+    uint8_t  role;         /* VehicleRole, 0xFF = not sent */
+    bool     embarking;    /* public transport: doors open */
 } web_msg_entry_t;
 
 static EXT_RAM_BSS_ATTR web_msg_entry_t msg_ring[WEB_MSG_RING_SIZE];
@@ -492,6 +675,65 @@ static size_t msg_ring_head;
 static size_t msg_ring_count;
 static uint32_t msg_total_count;
 static SemaphoreHandle_t msg_ring_mutex;
+
+/* Recent-DENM tracker: remembers the wall-clock second each station last sent
+ * a hazard warning (DENM), so /map can flag that sender's marker with a
+ * warning for ~60 s. Lockless -- all fields are 32-bit words (atomic
+ * read/write on the RISC-V core) and the data is purely cosmetic, so a torn
+ * read between the two words is harmless. Uses time(NULL) at both note and
+ * read time, so it stays self-consistent whether or not NTP has synced. */
+#define DENM_TRACK_N 32
+#define DENM_RECENT_SEC 60
+/* Also remembers WHAT the warning was: the map popup used to show only a
+ * generic "warning" marker, so a driver could see that a car had reported
+ * something but not what. */
+static struct { uint32_t sid; uint32_t sec; uint8_t cause, subcause; } s_denm_recent[DENM_TRACK_N];
+
+static void denm_note(uint32_t station_id, uint8_t cause, uint8_t subcause)
+{
+    uint32_t now = (uint32_t)time(NULL);
+    int freeslot = -1, oldest = 0;
+    for (int i = 0; i < DENM_TRACK_N; i++)
+    {
+        if (s_denm_recent[i].sid == station_id)
+        {
+            s_denm_recent[i].sec = now;
+            /* Keep the last cause that actually decoded; a later message
+             * failing to decode shouldn't blank a known warning. */
+            if (cause) { s_denm_recent[i].cause = cause; s_denm_recent[i].subcause = subcause; }
+            return;
+        }
+        if (s_denm_recent[i].sid == 0 && freeslot < 0) freeslot = i;
+        if (s_denm_recent[i].sec < s_denm_recent[oldest].sec) oldest = i;
+    }
+    int slot = freeslot >= 0 ? freeslot : oldest;
+    s_denm_recent[slot].sid = station_id;
+    s_denm_recent[slot].sec = now;
+    s_denm_recent[slot].cause = cause;
+    s_denm_recent[slot].subcause = subcause;
+}
+
+/* The cause last seen from this station, 0 if none/unknown. */
+static uint8_t denm_cause_of(uint32_t station_id, uint8_t *subcause)
+{
+    for (int i = 0; i < DENM_TRACK_N; i++)
+        if (s_denm_recent[i].sid == station_id)
+        {
+            if (subcause) *subcause = s_denm_recent[i].subcause;
+            return s_denm_recent[i].cause;
+        }
+    return 0;
+}
+
+static bool denm_is_recent(uint32_t station_id, uint32_t now)
+{
+    if (station_id == 0) return false;
+    for (int i = 0; i < DENM_TRACK_N; i++)
+        if (s_denm_recent[i].sid == station_id)
+            return now >= s_denm_recent[i].sec &&
+                   (now - s_denm_recent[i].sec) <= DENM_RECENT_SEC;
+    return false;
+}
 
 /* Message-type breakdown (its_decode labels, e.g. "CAM"/"DENM"/"Signed"/"?")
  * for the small stats block on the status page. Fixed-size, linear-scan
@@ -583,14 +825,56 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     }
     e->length = packet->length;
     e->rssi = packet->rssi;
-    e->preview_len = packet->length < WEB_MSG_PREVIEW_LEN ? packet->length : WEB_MSG_PREVIEW_LEN;
-    memcpy(e->preview, packet->payload, e->preview_len);
-    /* Decoded from the full frame (not just the short preview above) -- CAM/
-     * DENM's BTP header sits well past WEB_MSG_PREVIEW_LEN bytes in. */
-    its_decode_frame(packet->payload, packet->length, e->msgtype, sizeof(e->msgtype),
-                      &e->has_position, &e->lat_e7, &e->lon_e7, &e->station_id,
-                      &e->has_speed, &e->speed_cmps);
+    /* Decoded from the full frame, not from any short prefix -- CAM/DENM's
+     * BTP header sits hundreds of bytes in. */
+    its_decoded_t d;
+    its_decode_frame(packet->payload, packet->length, &d);
+    snprintf(e->msgtype, sizeof(e->msgtype), "%s", d.label);
+    e->has_position = d.has_position;
+    e->lat_e7 = d.lat_e7;
+    e->lon_e7 = d.lon_e7;
+    e->station_id = d.station_id;
+    e->has_speed = d.has_speed;
+    e->speed_cmps = d.speed_cmps;
+    e->length_dm = d.veh.valid ? d.veh.length_dm : 0;
+    e->width_dm = d.veh.valid ? d.veh.width_dm : 0;
+    e->pt_line = d.pt_line;
+    e->heading_ddeg = d.cam.has_heading ? d.cam.heading_ddeg : 0xFFFF;
+    e->has_accel_ctrl = d.cam.has_accel_ctrl;
+    e->accel_ctrl = d.cam.accel_ctrl;
+    e->has_lights = d.cam.has_lights;
+    e->ext_lights = d.cam.ext_lights;
+    e->role = d.cam.role;
+    e->embarking = d.pt_embarking;
+    e->n_path = d.cam.n_path;
+    memcpy(e->path_lat_e7, d.cam.path_lat_e7, sizeof(e->path_lat_e7));
+    memcpy(e->path_lon_e7, d.cam.path_lon_e7, sizeof(e->path_lon_e7));
+    uint8_t st_code = d.station_type, msg_id = d.message_id;
     msg_type_stats_record(e->msgtype);
+    tstat_note(st_code, msg_id, e->has_speed, e->speed_cmps);
+    /* Log the hazard where it IS, not where the sender is -- the DENM's own
+     * eventPosition when it carried one, the sender's position otherwise. */
+    events_note(e->seconds, st_code, msg_id, d.denm_cause, d.denm_subcause,
+                d.denm_station, d.denm_seq,
+                d.has_denm_pos || e->has_position,
+                d.has_denm_pos ? d.denm_lat_e7 : e->lat_e7,
+                d.has_denm_pos ? d.denm_lon_e7 : e->lon_e7);
+    /* Vehicle track for the map overlay. Skipped internally when disabled,
+     * for RSUs, and for a vehicle that hasn't moved far enough yet. */
+    if (e->has_position)
+        tracklog_note(e->seconds, e->station_id, st_code, e->lat_e7, e->lon_e7);
+
+    if (d.spat.valid)
+        spatem_note(&d.spat, e->station_id, e->seconds, e->has_position, e->lat_e7, e->lon_e7);
+    if (d.map.valid)
+    {
+        spatem_note_name(&d.map, e->seconds);
+        /* Returns immediately once this intersection's revision is cached,
+         * so the full geometry walk runs once, not on every MAPEM. */
+        spatem_note_geometry(packet->payload, packet->length, &d.map);
+    }
+    if (msg_id == 1 /* DENM */ && e->has_position)
+        denm_note(e->station_id, d.denm_cause, d.denm_subcause);
 
     msg_ring_head = (msg_ring_head + 1) % WEB_MSG_RING_SIZE;
     if (msg_ring_count < WEB_MSG_RING_SIZE)
@@ -760,7 +1044,7 @@ static const char PAGE_HEADER_FMT[] =
     "mix-blend-mode:screen;animation:sweep 22s linear infinite}"
     "@keyframes sweep{to{transform:rotate(360deg)}}"
     "@media(prefers-reduced-motion:reduce){body::before{animation:none;display:none}}"
-    ".wrap{width:100%%;max-width:1040px;margin:0 auto;padding:18px clamp(14px,4vw,32px) 48px}"
+    ".wrap{width:100%%;max-width:1400px;margin:0 auto;padding:18px clamp(14px,4vw,32px) 48px}"
     "a{color:#4fb8e0;text-decoration:none}a:hover{text-decoration:underline}"
     "h1{font-size:20px;font-weight:600;margin:6px 0 16px}"
     "h2{font-size:16px;font-weight:600;margin:22px 0 10px}"
@@ -778,6 +1062,8 @@ static const char PAGE_HEADER_FMT[] =
      * only on narrow screens via the media query below. Pure CSS -- a hidden
      * checkbox (.nvt) whose :checked state reveals .navlinks, toggled by the
      * <label> button, so no JS is needed and it degrades gracefully. */
+    "nav .logo{display:flex;align-items:center;align-self:center;padding:0 8px 0 4px;flex-shrink:0}"
+    "nav .logo img{display:block;border-radius:5px}"
     "nav .brgr{display:none;color:#94a0a8;padding:6px 12px;border-radius:7px;cursor:pointer;font-size:18px;line-height:1;user-select:none}"
     "nav .brgr:hover{background:#1d2227}"
     "nav .nvt{display:none}"
@@ -803,7 +1089,7 @@ static const char PAGE_HEADER_FMT[] =
     ".scroll{overflow-x:auto;border:1px solid #2a2f34;border-radius:10px;margin:10px 0}"
     ".scroll table{border:none;border-radius:0;margin:0;width:auto;min-width:100%%}"
     ".scroll td,.scroll th{white-space:nowrap}"
-    /* Hex preview/Type cells wrap at ANY width -- the hex preview alone can
+    /* Detail/Type cells wrap at ANY width -- the detail text alone can
      * be ~100 chars, wide enough to force scroll even on desktop. */
     ".scroll td.wrapcell{white-space:normal;word-break:break-word}"
     /* Narrow screens: tighter padding, #mtbl drops its redundant "#" column. */
@@ -869,6 +1155,10 @@ static const char PAGE_HEADER_FMT[] =
      * switch stays anchored top-right instead of dropping onto its own,
      * disconnected-looking full-width row. */
     "<nav>"
+    /* Logo (Tokyo-tower app icon), top-left. Plain image, not a link -- as a
+     * nav <a> to '/' it would get the amber "active" highlight on the status
+     * page, which looked wrong. */
+    "<span class='logo'><img src='/icon-192.png' alt='ITS G5' height='26' width='26'></span>"
     /* Hidden checkbox + label = the CSS-only hamburger toggle (see the .brgr
      * / .nvt rules). Placed before .navlinks so the ".nvt:checked~.navlinks"
      * sibling selector can reveal it. &#9776; = the hamburger glyph. */
@@ -878,6 +1168,7 @@ static const char PAGE_HEADER_FMT[] =
     "<a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
     "<a href='/map?lang=%s'>%s</a>"
+    "<a href='/traffic?lang=%s'>%s</a>"
     "<a href='/system?lang=%s'>%s</a>"
 #if CONFIG_ENABLE_SD
     "<a href='/sdcard?lang=%s'>%s</a><a href='/logs?lang=%s'>%s</a>"
@@ -947,6 +1238,7 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
              lc, T(S_NAV_SETTINGS),
              lc, T(S_NAV_UPDATE),
              lc, T(S_NAV_MAP),
+             lc, T(S_NAV_TRAFFIC),
              lc, T(S_NAV_SYSTEM),
 #if CONFIG_ENABLE_SD
              lc, T(S_NAV_SD),
@@ -1295,6 +1587,152 @@ static uint32_t ws_last_broadcast_count = UINT32_MAX;
 /* Compact JSON for the browser to turn into table rows; single-letter field
  * names (t/r/l/y/h, a/o/i for lat/lon/stationId) to keep the payload small.
  * a/o/i only present when a position was decoded. */
+/* Defined further down, next to their tables; needed here to name the warning
+ * in the map popup rather than just flagging that there was one. */
+static const char *denm_cause_text(uint8_t code);
+static const char *denm_sub_text(uint8_t cause, uint8_t sub);
+
+/* Emits the warning keys for a station: `d` that it warned recently, and `dt`
+ * what about. The text carries HTML entities for umlauts, which is fine --
+ * the popup is built as HTML. */
+static size_t denm_json(uint32_t station_id, uint32_t now, char *out, size_t cap)
+{
+    if (!denm_is_recent(station_id, now))
+        return 0;
+    uint8_t sub = 0;
+    uint8_t cause = denm_cause_of(station_id, &sub);
+    const char *ct = denm_cause_text(cause);
+    const char *st = denm_sub_text(cause, sub);
+    if (ct && st)
+        return (size_t)snprintf(out, cap, ",\"d\":1,\"dt\":\"%s (%s)\"", ct, st);
+    if (ct)
+        return (size_t)snprintf(out, cap, ",\"d\":1,\"dt\":\"%s\"", ct);
+    return (size_t)snprintf(out, cap, ",\"d\":1");
+}
+
+/* Appends the optional CAM-detail keys shared by the live feed and the map
+ * seed. Kept in one place so the two can't drift apart -- they already
+ * carried two separate copies of the speed/size/line block.
+ *
+ * KEYS ALREADY TAKEN in this message object, check before adding one:
+ *   i station id   a lat        o lon         y label      t time
+ *   r rssi         l length     h HEX PREVIEW s speed      d denm flag
+ *   vl length      vw width     pl pt line
+ *   hd heading     ac pedals    el lights     vr role      eb embarking
+ *   ph path
+ * `h` is the frame hex dump and predates all of this -- naming the heading
+ * `h` made every popup read "heading NaN", because m.h was that string.
+ *
+ * Returns the number of bytes written (0 if the entry carries none). */
+static size_t cam_json_extra(const web_msg_entry_t *e, char *out, size_t cap)
+{
+    size_t n = 0;
+    if (e->heading_ddeg != 0xFFFF && n < cap)
+        n += snprintf(out + n, cap - n, ",\"hd\":%u", (unsigned)e->heading_ddeg);
+    /* Sent whenever the field was PRESENT, including all-bits-zero. Omitting
+     * zero made "no pedal pressed" look identical to "this message didn't
+     * carry the field", and the client -- which keeps the last known value --
+     * would then hold a stale "braking" instead of clearing it. */
+    if (e->has_accel_ctrl && n < cap)
+        n += snprintf(out + n, cap - n, ",\"ac\":%u", (unsigned)e->accel_ctrl);
+    if (e->has_lights && n < cap)
+        n += snprintf(out + n, cap - n, ",\"el\":%u", (unsigned)e->ext_lights);
+    /* role 0 is "default" -- nothing worth showing, so only send 1..15. */
+    if (e->role != 0xFF && e->role != 0 && n < cap)
+        n += snprintf(out + n, cap - n, ",\"vr\":%u", (unsigned)e->role);
+    if (e->embarking && n < cap)
+        n += snprintf(out + n, cap - n, ",\"eb\":1");
+    /* Where the vehicle just came from, as [[lat,lon],...] in 1e-7 degrees.
+     * Up to 8 points -- ~200 bytes, by far the largest key here, so it goes
+     * last and is skipped entirely when the sender doesn't provide one. */
+    if (e->n_path && n < cap)
+    {
+        n += snprintf(out + n, cap - n, ",\"ph\":[");
+        for (uint8_t i = 0; i < e->n_path && n < cap; i++)
+            n += snprintf(out + n, cap - n, "%s[%ld,%ld]", i ? "," : "",
+                          (long)e->path_lat_e7[i], (long)e->path_lon_e7[i]);
+        if (n < cap)
+            n += snprintf(out + n, cap - n, "]");
+    }
+    return n;
+}
+
+/* One-line human summary of a message for the /messages table, replacing the
+ * 32-byte hex preview that used to sit there. Measured over 3965 real frames,
+ * 25 of those 32 bytes were identical in every single one: the preview showed
+ * the 802.11 header, the sender MAC (already a column) and a sequence
+ * counter. Everything a reader cares about begins well past byte 32. Raw
+ * bytes remain available in full via the PCAP download. */
+static void msg_detail_text(const web_msg_entry_t *e, uint32_t now,
+                            char *out, size_t cap)
+{
+    static const char *ROLE_DE[16] = { NULL, "&Ouml;PNV", "Schwertransport",
+        "Gefahrgut", "Baustelle", "Bergung", "Einsatzfahrzeug",
+        "Sicherungsfahrzeug", "Landwirtschaft", "Lieferverkehr",
+        "Milit&auml;r", "Stra&szlig;endienst", "Taxi", NULL, NULL, NULL };
+    static const char *ROLE_EN[16] = { NULL, "public transport",
+        "special transport", "dangerous goods", "roadworks", "rescue",
+        "emergency", "safety car", "agriculture", "commercial", "military",
+        "road operator", "taxi", NULL, NULL, NULL };
+    static const char *COMPASS[8] = { "N", "NO", "O", "SO", "S", "SW", "W", "NW" };
+    bool de = current_lang == LANG_DE;
+    size_t n = 0;
+    out[0] = '\0';
+
+    #define DETAIL_SEP (n ? " &middot; " : "")
+    if (e->has_position && (e->lat_e7 || e->lon_e7))
+        n += snprintf(out + n, cap - n, "%s%.5f, %.5f", DETAIL_SEP,
+                      e->lat_e7 / 1e7, e->lon_e7 / 1e7);
+    if (e->has_speed && n < cap)
+        n += snprintf(out + n, cap - n, "%s%.0f km/h", DETAIL_SEP,
+                      e->speed_cmps * 0.036);
+    if (e->heading_ddeg != 0xFFFF && n < cap)
+    {
+        unsigned deg = e->heading_ddeg / 10;
+        n += snprintf(out + n, cap - n, "%s%u&deg; %s", DETAIL_SEP, deg,
+                      COMPASS[((deg + 22) / 45) % 8]);
+    }
+    if (e->length_dm && e->width_dm && n < cap)
+        n += snprintf(out + n, cap - n, "%s%u,%u &times; %u,%u m", DETAIL_SEP,
+                      e->length_dm / 10, e->length_dm % 10,
+                      e->width_dm / 10, e->width_dm % 10);
+    if (e->pt_line && n < cap)
+        n += snprintf(out + n, cap - n, "%s%s %u", DETAIL_SEP,
+                      de ? "Linie" : "line", (unsigned)e->pt_line);
+    if (e->role != 0xFF && e->role < 16 && (de ? ROLE_DE : ROLE_EN)[e->role] && n < cap)
+        n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP,
+                      (de ? ROLE_DE : ROLE_EN)[e->role]);
+    if (e->has_accel_ctrl && n < cap)
+    {
+        if (e->accel_ctrl & ITS_ACC_BRAKE)
+            n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP, de ? "bremst" : "braking");
+        else if (e->accel_ctrl & ITS_ACC_GAS)
+            n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP, de ? "Gas" : "throttle");
+    }
+    if (e->has_lights && n < cap)
+    {
+        if (e->ext_lights & ITS_LIGHT_LEFT)
+            n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP, de ? "Blinker links" : "left indicator");
+        if (e->ext_lights & ITS_LIGHT_RIGHT && n < cap)
+            n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP, de ? "Blinker rechts" : "right indicator");
+    }
+    if (e->embarking && n < cap)
+        n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP,
+                      de ? "Fahrgastwechsel" : "boarding");
+    if (denm_is_recent(e->station_id, now) && n < cap)
+    {
+        uint8_t sub = 0;
+        const char *ct = denm_cause_text(denm_cause_of(e->station_id, &sub));
+        if (ct)
+            n += snprintf(out + n, cap - n,
+                          "%s<span style='color:#e74c3c'>&#9888; %s</span>",
+                          DETAIL_SEP, ct);
+    }
+    #undef DETAIL_SEP
+    if (n == 0)
+        snprintf(out, cap, "&ndash;");
+}
+
 static size_t build_msg_json(char *out, size_t out_size)
 {
     static EXT_RAM_BSS_ATTR web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
@@ -1308,15 +1746,15 @@ static size_t build_msg_json(char *out, size_t out_size)
         xSemaphoreGive(msg_ring_mutex);
     }
 
+    uint32_t jnow = (uint32_t)time(NULL);
     size_t o = 0;
     o += snprintf(out + o, out_size - o, "[");
     for (size_t n = 0; n < count && o < out_size; n++)
     {
         web_msg_entry_t *e = &snapshot[count - 1 - n];
 
-        char hex[WEB_MSG_PREVIEW_LEN * 3 + 1] = {0};
-        for (uint32_t b = 0; b < e->preview_len; b++)
-            snprintf(hex + b * 3, 4, "%02x ", e->preview[b]);
+        char detail[320];
+        msg_detail_text(e, jnow, detail, sizeof(detail));
 
         char clock[24];
         format_clock(e->seconds, e->microseconds, clock, sizeof(clock));
@@ -1327,29 +1765,89 @@ static size_t build_msg_json(char *out, size_t out_size)
         else
             snprintf(rssi_str, sizeof(rssi_str), "-");
 
-        char possuffix[128] = "";
+        /* Base keys ~60 + speed/size/line ~44 + CAM detail up to ~250
+         * (the path history dominates) + the warning flag. */
+        char possuffix[576] = "";
         if (e->has_position)
         {
             size_t po = snprintf(possuffix, sizeof(possuffix), ",\"a\":%ld,\"o\":%ld,\"i\":%lu",
                      (long)e->lat_e7, (long)e->lon_e7, (unsigned long)e->station_id);
             if (e->has_speed && po < sizeof(possuffix))
-                snprintf(possuffix + po, sizeof(possuffix) - po, ",\"s\":%ld", (long)e->speed_cmps);
+                po += snprintf(possuffix + po, sizeof(possuffix) - po, ",\"s\":%ld", (long)e->speed_cmps);
+            if (e->length_dm && e->width_dm && po < sizeof(possuffix))
+                po += snprintf(possuffix + po, sizeof(possuffix) - po,
+                               ",\"vl\":%u,\"vw\":%u",
+                               (unsigned)e->length_dm, (unsigned)e->width_dm);
+            if (e->pt_line && po < sizeof(possuffix))
+                po += snprintf(possuffix + po, sizeof(possuffix) - po,
+                               ",\"pl\":%u", (unsigned)e->pt_line);
+            if (po < sizeof(possuffix))
+                po += cam_json_extra(e, possuffix + po, sizeof(possuffix) - po);
+            if (po < sizeof(possuffix))
+                denm_json(e->station_id, jnow, possuffix + po, sizeof(possuffix) - po);
         }
 
-        /* msgtype/clock/rssi_str/hex only ever contain digits, letters,
-         * spaces, ':', '-', '.' (see its_decode_frame/format_clock) --
-         * never attacker- or frame-controlled bytes, so no JSON escaping is
-         * needed for them. */
-        o += snprintf(out + o, o < out_size ? out_size - o : 0,
-            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"%s}",
-            n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length, e->msgtype, hex, possuffix);
+        /* msgtype/clock/rssi_str hold only digits, letters, spaces, ':',
+         * '-', '.' (see its_decode_frame/format_clock), and `detail` is
+         * assembled from our own tables and formatted numbers -- none of it
+         * is frame-controlled, so no JSON escaping is needed. It does carry
+         * HTML entities and a <span>, which is fine: the row is built with
+         * innerHTML on the client. */
+        /* Measure first and stop while the closing bracket still fits. The
+         * old form let `o` run past the buffer, and then the final `]` was
+         * silently skipped -- the client received malformed JSON, its parse
+         * threw, and the live table and map quietly stopped updating. With
+         * a fully decoded detail line per entry the worst case is around
+         * 20 KB against a 6 KB buffer, so this is reachable, not theoretical.
+         * Entries are walked newest-first, so what gets dropped is the
+         * oldest -- the right end to lose. */
+        static const char ENTRY_FMT[] =
+            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"%s}";
+        int need = snprintf(NULL, 0, ENTRY_FMT,
+            n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length,
+            e->msgtype, detail, possuffix);
+        if (need < 0 || o + (size_t)need + 2 > out_size)
+            break;
+        o += snprintf(out + o, out_size - o, ENTRY_FMT,
+            n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length,
+            e->msgtype, detail, possuffix);
     }
-    if (o + 2 <= out_size)
-    {
-        out[o++] = ']';
-        out[o] = '\0';
-    }
+    /* Always closes: the loop above never consumes the two bytes kept back. */
+    out[o++] = ']';
+    out[o] = '\0';
     return o;
+}
+
+/* Sockets whose last send failed, so the next ticks skip them instead of
+ * retrying once a second. A browser tab closed without a clean WebSocket
+ * close leaves esp_http_server still reporting the socket as a live
+ * websocket for many minutes; every tick then tried again, failed again and
+ * logged again -- 816 warnings in one day of testing, in bursts of twelve a
+ * minute lasting a quarter hour each. The entry expires so a reused file
+ * descriptor is not shut out permanently. */
+#define WS_DEAD_N        8
+#define WS_DEAD_HOLD_SEC 60
+
+static struct { int fd; uint32_t until; } s_ws_dead[WS_DEAD_N];
+
+static bool ws_recently_failed(int fd, uint32_t now)
+{
+    for (int i = 0; i < WS_DEAD_N; i++)
+        if (s_ws_dead[i].fd == fd && now < s_ws_dead[i].until)
+            return true;
+    return false;
+}
+
+static void ws_mark_failed(int fd, uint32_t now)
+{
+    int slot = 0;
+    for (int i = 0; i < WS_DEAD_N; i++)
+    {
+        if (s_ws_dead[i].fd == fd) { slot = i; break; }
+        if (s_ws_dead[i].until < s_ws_dead[slot].until) slot = i;
+    }
+    s_ws_dead[slot].fd = fd;
+    s_ws_dead[slot].until = now + WS_DEAD_HOLD_SEC;
 }
 
 static void ws_broadcast_work(void *arg)
@@ -1366,14 +1864,24 @@ static void ws_broadcast_work(void *arg)
     if (httpd_get_client_list(g_httpd_server, &max_fds, client_fds) != ESP_OK)
         return;
 
+    uint32_t now = (uint32_t)time(NULL);
     httpd_ws_frame_t frame = { .type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)json, .len = len };
     for (size_t i = 0; i < max_fds; i++)
-        if (httpd_ws_get_fd_info(g_httpd_server, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
-            /* A failed send means the client is gone, but esp_http_server
-             * won't notice on its own -- the dead session would occupy a
-             * max_open_sockets slot forever otherwise. */
-            if (httpd_ws_send_frame_async(g_httpd_server, client_fds[i], &frame) != ESP_OK)
-                httpd_sess_trigger_close(g_httpd_server, client_fds[i]);
+    {
+        int fd = client_fds[i];
+        if (httpd_ws_get_fd_info(g_httpd_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET)
+            continue;
+        if (ws_recently_failed(fd, now))
+            continue;
+        /* A failed send means the client is gone, but esp_http_server won't
+         * notice on its own -- the dead session would occupy a
+         * max_open_sockets slot forever otherwise. */
+        if (httpd_ws_send_frame_async(g_httpd_server, fd, &frame) != ESP_OK)
+        {
+            ws_mark_failed(fd, now);
+            httpd_sess_trigger_close(g_httpd_server, fd);
+        }
+    }
 }
 
 /* Fires roughly once a second (see webserver_init); cheap no-op when nothing
@@ -1426,7 +1934,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     char intro[256];
     snprintf(intro, sizeof(intro), "<p>");
     size_t l = strlen(intro);
-    snprintf(intro + l, sizeof(intro) - l, T(S_MSG_INTRO), WEB_MSG_RING_SIZE, WEB_MSG_PREVIEW_LEN);
+    snprintf(intro + l, sizeof(intro) - l, T(S_MSG_INTRO), WEB_MSG_RING_SIZE);
     l = strlen(intro);
     snprintf(intro + l, sizeof(intro) - l, "</p>");
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
@@ -1460,9 +1968,8 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     {
         web_msg_entry_t *e = &snapshot[count - 1 - n];
 
-        char hex[WEB_MSG_PREVIEW_LEN * 3 + 1] = {0};
-        for (uint32_t b = 0; b < e->preview_len; b++)
-            snprintf(hex + b * 3, 4, "%02x ", e->preview[b]);
+        char detail[320];
+        msg_detail_text(e, (uint32_t)time(NULL), detail, sizeof(detail));
 
         char clock[24];
         format_clock(e->seconds, e->microseconds, clock, sizeof(clock));
@@ -1476,10 +1983,11 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         char typeesc[WEB_MSG_TYPE_LEN * 6];
         html_escape(e->msgtype, typeesc, sizeof(typeesc));
 
-        char row[640];
-        snprintf(row, sizeof(row),
-            "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td><td class='wrapcell'>%s</td><td class='wrapcell'><code>%s</code></td></tr>",
-            n + 1, clock, rssi_str, (unsigned long)e->length, typeesc, hex);
+        char row[768];
+        HTML_PRINTF(row,
+            "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td>"
+            "<td class='wrapcell'>%s</td><td class='wrapcell'>%s</td></tr>",
+            n + 1, clock, rssi_str, (unsigned long)e->length, typeesc, detail);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -1498,7 +2006,10 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         "ws.onmessage=function(ev){"
         "var d=JSON.parse(ev.data);var h='';"
         "for(var i=0;i<d.length;i++){var m=d[i];"
-        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+m.y+'</td><td class=\"wrapcell\"><code>'+m.h+'</code></td></tr>';}"
+        /* Vehicle size, when the CAM carried it, rides along in the type
+         * cell rather than costing the table another mostly-empty column. */
+        "var ty=m.y+(m.pl?' <b>'+m.pl+'</b>':'')+((m.vl&&m.vw)?' <small>'+(m.vl/10).toFixed(1)+'\\u00d7'+(m.vw/10).toFixed(1)+'m</small>':'');"
+        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+ty+'</td><td class=\"wrapcell\">'+m.h+'</td></tr>';}"
         "document.getElementById('msgtbody').innerHTML=h;delay=1000;};"
         "ws.onclose=function(){if(closing)return;setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
         "}"
@@ -1528,14 +2039,29 @@ static esp_err_t map_get_handler(httpd_req_t *req)
     /* Collapsible (native <details>, no JS) and collapsed by default -- the
      * full explanation is long and eats a lot of vertical space on a phone,
      * where it pushed the map itself below the fold; the summary is one line. */
-    char hint[1536];
-    snprintf(hint, sizeof(hint),
+    /* Measured: 1606 bytes in German (the hint text alone is 716). Sized
+     * with real headroom -- at 1536 this truncated mid-markup and took the
+     * map container with it, leaving a blank page and CSS shown as text. */
+    char hint[2560];
+    HTML_PRINTF(hint,
         "<details style='margin:6px 0'>"
         "<summary style='cursor:pointer'><small>%s</small></summary>"
         "<p><small>%s</small></p></details>"
         "<link rel='stylesheet' href='/leaflet.css'>"
         "<script src='/leaflet.js'></script>"
-        "<style>.its-emoji-icon{font-size:20px;line-height:26px;text-align:center}</style>"
+        /* The icon box grew to 40px to hold the heading needle; the popup is
+         * restyled dark because the page itself is dark and a white bubble
+         * over a dark basemap is glaring. */
+        "<style>.its-emoji-icon{font-size:20px;line-height:40px;text-align:center}"
+        ".leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#15191d;"
+        "color:#edf0f2;box-shadow:0 3px 16px rgba(0,0,0,.6)}"
+        ".leaflet-popup-content{margin:10px 13px;font-size:13px}"
+        ".leaflet-container a.leaflet-popup-close-button{color:#94a0a8}"
+        ".leaflet-container a.leaflet-popup-close-button:hover{color:#edf0f2}"
+        ".leaflet-control-layers{background:#15191d;color:#edf0f2;"
+        "border:1px solid #2a2f34}"
+        ".leaflet-bar a{background:#15191d;color:#edf0f2;border-bottom:1px solid #2a2f34}"
+        ".leaflet-bar a:hover{background:#1d2227;color:#edf0f2}</style>"
         "<div id='map' style='height:70vh;border-radius:12px;overflow:hidden'></div>",
         T(S_MAP_HELP), T(S_MAP_HINT));
     httpd_resp_send_chunk(req, hint, HTTPD_RESP_USE_STRLEN);
@@ -1544,36 +2070,149 @@ static esp_err_t map_get_handler(httpd_req_t *req)
     /* Playback controls: hidden until pbLoad() (see MAP_SCRIPT) finds at
      * least one entry. Default from/to values are filled in by JS, not
      * here, since datetime-local needs the *browser's* local time. */
-    char pbctl[640];
-    snprintf(pbctl, sizeof(pbctl),
+    /* Reading a multi-hour window off the SD card takes seconds, and with no
+     * feedback at all the page looked dead -- so an indeterminate bar runs
+     * while the request is in flight. Indeterminate rather than percentage:
+     * the response is streamed and its total length isn't known up front. */
+    /* Measured worst case (German) is 1149 bytes; a truncated closing tag
+     * here would collapse the page layout, so keep real headroom. */
+    char pbctl[1536];
+    HTML_PRINTF(pbctl,
+        "<style>@keyframes pbslide{0%%{left:-40%%}100%%{left:100%%}}"
+        "#pbbar{display:none;width:160px;height:6px;border-radius:3px;"
+        "background:#2a3138;overflow:hidden;position:relative;"
+        "vertical-align:middle;margin-left:8px}"
+        "#pbbar i{position:absolute;top:0;height:100%%;width:40%%;border-radius:3px;"
+        "background:#f2b134;animation:pbslide 1.1s infinite linear}</style>"
         "<div style='margin:8px 0'>"
         "<label>%s <input type='datetime-local' id='pbfrom'></label> "
         "<label>%s <input type='datetime-local' id='pbto'></label> "
-        "<button id='pbload'>%s</button> "
+        "<button id='pbload'>%s</button>"
+        "<span id='pbbar'><i></i></span> "
         "<span id='pbmsg'></span>"
         "<span id='pbctl' style='display:none'>"
         "<button id='pbplay'>&#9654;</button> "
-        "<input id='pbslider' type='range' min='0' max='0' value='0' "
+        "<input id='pbslider' type='range' min='0' max='0' value='0' step='10' "
         "style='width:220px;vertical-align:middle'> "
         "<span id='pbtime'></span>"
+        /* Step size drives both the slider granularity and how far each
+         * play tick advances, so it doubles as the replay speed. */
+        " <label style='margin-left:10px'>%s "
+        "<select id='pbstep'>"
+        "<option value='1'>1 s</option>"
+        "<option value='2'>2 s</option>"
+        "<option value='5'>5 s</option>"
+        "<option value='10' selected>10 s</option>"
+        "<option value='30'>30 s</option>"
+        "<option value='60'>60 s</option>"
+        "</select></label>"
         /* Own row with real top margin -- on phone, Live would otherwise
          * wrap directly under Play with no gap, easy to fat-finger. */
         "<div style='margin-top:10px'><button id='pblive'>%s</button></div>"
         "</span></div>",
-        T(S_PLAYBACK_FROM), T(S_PLAYBACK_TO), T(S_PLAYBACK_LOAD), T(S_PLAYBACK_LIVE));
+        T(S_PLAYBACK_FROM), T(S_PLAYBACK_TO), T(S_PLAYBACK_LOAD),
+        T(S_PLAYBACK_STEP), T(S_PLAYBACK_LIVE));
     httpd_resp_send_chunk(req, pbctl, HTTPD_RESP_USE_STRLEN);
 #endif
 
     /* Layer-control labels, the only two localized strings the client script
      * needs -- passed in as JS vars so MAP_SCRIPT below can stay one fixed
      * static string, not a per-request snprintf. */
-    char labels[384];
-    snprintf(labels, sizeof(labels),
+    uint32_t stale = 60;
+    config_get_u32(CONFIG_INDEX_MAP_STALE_SEC, &stale);
+    uint32_t trkdays = 2;
+    config_get_u32(CONFIG_INDEX_TRACKS_DAYS, &trkdays);
+
+    /* Peer list -> a JS array literal. Host names are restricted to the
+     * characters a host name may contain, so nothing from the setting can
+     * break out of the quotes into the surrounding script. */
+    char peers[CONFIG_PEERS_BUFFER_SIZE] = {0};
+    size_t peersz = sizeof(peers);
+    config_get_str(CONFIG_INDEX_PEERS, peers, &peersz);
+    /* This device's own name, so a marker can say which receiver heard it
+     * even when the answer is "this one". */
+    char selfname[CONFIG_NODEID_BUFFER_SIZE] = "";
+    size_t selfsz = sizeof(selfname);
+    config_get_str(CONFIG_INDEX_NODEID, selfname, &selfsz);
+    for (char *c = selfname; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+              (*c >= '0' && *c <= '9') || *c == '.' || *c == '-' || *c == '_'))
+            *c = '-';
+
+    char peerjs[CONFIG_PEERS_BUFFER_SIZE * 2] = {0};
+    {
+        size_t o = 0;
+        bool first = true, open_q = false;
+        for (const char *p = peers; *p && o + 4 < sizeof(peerjs); p++)
+        {
+            bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                      (*p >= '0' && *p <= '9') || *p == '.' || *p == '-' || *p == ':';
+            if (ok)
+            {
+                if (!open_q)
+                {
+                    if (!first) peerjs[o++] = ',';
+                    peerjs[o++] = '"';
+                    open_q = true;
+                    first = false;
+                }
+                peerjs[o++] = *p;
+            }
+            else if (open_q)
+            {
+                peerjs[o++] = '"';
+                open_q = false;
+            }
+        }
+        if (open_q && o + 1 < sizeof(peerjs)) peerjs[o++] = '"';
+        peerjs[o] = '\0';
+    }
+    char labels[1152];
+    HTML_PRINTF(labels,
              "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\","
-             "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\";</script>",
+             "ITS_MAP_L_DARK=\"%s\",ITS_MAP_L_LIGHT=\"%s\","
+             "ITS_MAP_L_TRACKS=\"%s\",ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
+             "ITS_MAP_SEEN_BY=\"%s\",ITS_MAP_PEERS=[%s],ITS_MAP_SELF=\"%s\","
+             "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\",ITS_PB_BUSY=\"%s\","
+             "ITS_MAP_DENM=\"%s\","
+             "ITS_MAP_STALE=%lu,ITS_MAP_LINE=\"%s\";</script>",
              T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE),
-             T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR));
+             T(S_MAP_LAYER_DARK), T(S_MAP_LAYER_LIGHT),
+             T(S_MAP_LAYER_TRACKS), T(S_MAP_TRACK_PTS), (unsigned long)trkdays,
+             T(S_MAP_SEEN_BY), peerjs, selfname,
+             T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR), T(S_PLAYBACK_BUSY),
+             T(S_MAP_DENM),
+             (unsigned long)stale, T(S_MAP_LINE));
     httpd_resp_send_chunk(req, labels, HTTPD_RESP_USE_STRLEN);
+
+    /* Labels for the CAM detail in the popup. Emitted as one JS object rather
+     * than ~25 more string-table entries, the same shortcut spat_status_text()
+     * takes -- these are leaf words that appear in exactly one place.
+     * Order in `l` and `e` is the standard's bit order, MSB first. */
+    char camlbl[1024];
+    if (current_lang == LANG_DE)
+        HTML_PRINTF(camlbl,
+            "<script>var ITS_CAM_A=['bremst','Gas','Notbremse','Kollisionswarnung',"
+            "'ACC','Tempomat','Speedlimiter'],"
+            "ITS_CAM_L=['Abblendlicht','Fernlicht','Blinker links','Blinker rechts',"
+            "'Tagfahrlicht','R&uuml;ckfahrlicht','Nebellicht','Standlicht'],"
+            "ITS_CAM_R=['','&Ouml;PNV','Schwertransport','Gefahrgut','Baustelle',"
+            "'Bergung','Einsatzfahrzeug','Sicherungsfahrzeug','Landwirtschaft',"
+            "'Lieferverkehr','Milit&auml;r','Stra&szlig;endienst','Taxi','','',''],"
+            "ITS_CAM_EMB='Fahrgastwechsel',ITS_CAM_DIR='Richtung',"
+            "ITS_CAM_C=['N','NO','O','SO','S','SW','W','NW'];</script>");
+    else
+        HTML_PRINTF(camlbl,
+            "<script>var ITS_CAM_A=['braking','throttle','emergency brake',"
+            "'collision warning','ACC','cruise control','speed limiter'],"
+            "ITS_CAM_L=['low beam','high beam','left indicator','right indicator',"
+            "'daytime running','reversing light','fog light','parking light'],"
+            "ITS_CAM_R=['','public transport','special transport','dangerous goods',"
+            "'roadworks','rescue','emergency','safety car','agriculture',"
+            "'commercial','military','road operator','taxi','','',''],"
+            "ITS_CAM_EMB='boarding',ITS_CAM_DIR='heading',"
+            "ITS_CAM_C=['N','NE','E','SE','S','SW','W','NW'];</script>");
+    httpd_resp_send_chunk(req, camlbl, HTTPD_RESP_USE_STRLEN);
 
     /* Seed the map from the ring buffer so it isn't empty for up to ~1s
      * waiting for the next /ws tick. msgtype/hex only ever contain
@@ -1605,12 +2244,26 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         char speedsuffix[24] = "";
         if (e->has_speed)
             snprintf(speedsuffix, sizeof(speedsuffix), ",\"s\":%ld", (long)e->speed_cmps);
-        char entry[248];
+        char denmsuffix[160] = "";
+        denm_json(e->station_id, (uint32_t)time(NULL), denmsuffix, sizeof(denmsuffix));
+        char dimsuffix[32] = "";
+        if (e->length_dm && e->width_dm)
+            snprintf(dimsuffix, sizeof(dimsuffix), ",\"vl\":%u,\"vw\":%u",
+                     (unsigned)e->length_dm, (unsigned)e->width_dm);
+        char ptsuffix[24] = "";
+        if (e->pt_line)
+            snprintf(ptsuffix, sizeof(ptsuffix), ",\"pl\":%u", (unsigned)e->pt_line);
+        char camsuffix[256] = "";
+        cam_json_extra(e, camsuffix, sizeof(camsuffix));
+        /* 320 was already close with the msgtype and clock inline; the CAM
+         * detail adds up to ~40 more. */
+        char entry[768];
         snprintf(entry, sizeof(entry),
-                 "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\",\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu%s}",
+                 "%s{\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\",\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu%s%s%s%s%s}",
                  first ? "" : ",", (unsigned long)e->station_id,
                  (long)e->lat_e7, (long)e->lon_e7, e->msgtype, clock, rssi_str,
-                 (unsigned long)e->length, speedsuffix);
+                 (unsigned long)e->length, speedsuffix, dimsuffix, ptsuffix,
+                 camsuffix, denmsuffix);
         httpd_resp_send_chunk(req, entry, HTTPD_RESP_USE_STRLEN);
         first = false;
     }
@@ -1631,33 +2284,178 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "var g=TZVIEW[tz]||TZVIEW[tz.split('/')[0]]||[20,0,2];"
         "var map=L.map('map').setView([g[0],g[1]],g[2]);"
         "var streets=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',"
-        "{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);"
+        "{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});"
         "var sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/"
         "World_Imagery/MapServer/tile/{z}/{y}/{x}',"
         "{maxZoom:19,attribution:'Tiles &copy; Esri'});"
-        "var baseLayers={};baseLayers[ITS_MAP_L_STREETS]=streets;baseLayers[ITS_MAP_L_SAT]=sat;"
+        /* Two CARTO layers alongside OSM and the satellite view. The dark
+         * one is what loads by default: the rest of the interface is dark,
+         * and the coloured lane and track overlays read far better on it
+         * than on the bright street map. Its light, low-contrast sibling is
+         * there for daylight. Same external-tile arrangement as the other
+         * two already use. */
+        "var dark=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',"
+        "{maxZoom:20,subdomains:'abcd',"
+        "attribution:'&copy; OpenStreetMap contributors, &copy; CARTO'}).addTo(map);"
+        "var light=L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',"
+        "{maxZoom:20,subdomains:'abcd',"
+        "attribution:'&copy; OpenStreetMap contributors, &copy; CARTO'});"
+        /* Listed with the default first, so the checked entry is the one at
+         * the top rather than somewhere in the middle. */
+        "var baseLayers={};baseLayers[ITS_MAP_L_DARK]=dark;"
+        "baseLayers[ITS_MAP_L_STREETS]=streets;baseLayers[ITS_MAP_L_LIGHT]=light;"
+        "baseLayers[ITS_MAP_L_SAT]=sat;"
         /* collapsed:false -- the collapsed state's toggle icon references a
          * Leaflet default image (images/layers.png) we didn't vendor (kept
          * to just the emoji markers, no image assets at all), which would
          * otherwise show as a blank white box until clicked/hovered. */
-        "L.control.layers(baseLayers,null,{collapsed:false}).addTo(map);"
-        "var markers={};var haveView=false;var liveMode=true;"
+        /* Vehicle tracks as a switchable overlay, loaded only when actually
+         * switched on -- it is a separate request against the SD card, and
+         * most visits to the map do not want it. */
+        /* One shared canvas renderer for every track polyline. The first
+         * version created a fresh L.canvas() per line, and Leaflet backs each
+         * one with its own <canvas> element sized to the map viewport times
+         * device pixel ratio -- a few MB EACH on a retina phone. With a few
+         * hundred vehicle tracks that piled up past a gigabyte and mobile
+         * Safari killed the tab ("page was reset because it used too much
+         * memory"). One renderer shared across all of them uses one canvas
+         * no matter how many tracks there are. */
+        "var trackRenderer=L.canvas();"
+        "var trackLayer=L.layerGroup(),tracksLoaded=false;"
+        "var overlays={};overlays[ITS_MAP_L_TRACKS]=trackLayer;"
+        "L.control.layers(baseLayers,overlays,{collapsed:false}).addTo(map);"
+        "map.on('overlayadd',function(e){if(e.layer===trackLayer&&!tracksLoaded)loadTracks();});"
+        "function loadTracks(){tracksLoaded=true;"
+        "fetch('/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
+        ".then(function(r){return r.json();}).then(function(a){"
+        "trackLayer.clearLayers();"
+        "for(var i=0;i<a.length;i++){var t=a[i];if(!t.p||t.p.length<2)continue;"
+        "var pts=t.p.map(function(q){return [q[0]/1e7,q[1]/1e7];});"
+        /* Thin and translucent on purpose: where many vehicles took the same
+          * road the lines stack up and that road simply gets brighter, which
+          * is the \"imprint\" effect without needing a heat map. */
+        "var pl=L.polyline(pts,{color:'#4fb8e0',weight:2,opacity:0.35,"
+        "renderer:trackRenderer});"
+        "pl.bindPopup('#'+t.i+' \\u00b7 '+pts.length+' '+ITS_MAP_TRACK_PTS);"
+        "pl.addTo(trackLayer);}"
+        "}).catch(function(){tracksLoaded=false;});}"
+        "var markers={};var VMEM={};var haveView=false;var liveMode=true;"
         "var EMOJI={Ped:'\\ud83d\\udeb6',Cyclist:'\\ud83d\\udeb4',Moped:'\\ud83d\\udef5',"
         "Motorcycle:'\\ud83c\\udfcd',Car:'\\ud83d\\ude97',Bus:'\\ud83d\\ude8c',"
         "LTruck:'\\ud83d\\ude9a',HTruck:'\\ud83d\\ude9b',Trailer:'\\ud83d\\ude9b',"
         "Special:'\\ud83d\\udea7',Tram:'\\ud83d\\ude8a',RSU:'\\ud83d\\udea6'};"
         "function emojiFor(y){for(var k in EMOJI){if(y===k||y.indexOf(k+' ')===0)return EMOJI[k];}return '\\ud83d\\udccd';}"
-        "function iconFor(y){return L.divIcon({html:emojiFor(y),className:'its-emoji-icon',"
-        "iconSize:[26,26],iconAnchor:[13,13]});}"
+        /* Heading is drawn as a needle sweeping around the emoji, not by
+         * rotating the emoji itself -- a tilted car glyph reads as a
+         * rendering fault. A CSS border triangle, deliberately NOT a text
+         * arrow: the first attempt used an arrow character sitting at a
+         * negative offset outside the icon box, and it never became visible
+         * on the device. A triangle inside the box depends on no font and
+         * cannot be clipped. `transform-origin` is the box centre, so the
+         * needle orbits the marker; 0 deg points north, as headings do. */
+        "function iconFor(y,hd){var a='';"
+        "if(hd!==undefined)a='<span style=\"position:absolute;top:0;left:50%;'"
+        "+'width:0;height:0;margin-left:-5px;'"
+        "+'border-left:5px solid transparent;border-right:5px solid transparent;'"
+        "+'border-bottom:9px solid #f2b134;'"
+        "+'transform-origin:50% 20px;transform:rotate('+(hd/10)+'deg);'"
+        "+'filter:drop-shadow(0 0 1px rgba(0,0,0,.9))\"></span>';"
+        "return L.divIcon({html:'<div style=\"position:relative;width:40px;height:40px;'"
+        "+'line-height:40px;text-align:center\">'+a+emojiFor(y)+'</div>',"
+        "className:'its-emoji-icon',iconSize:[40,40],iconAnchor:[20,20]});}"
+        /* Live traffic-light phases, fetched from /spatem.json, keyed by the
+         * RSU stationId -- appended to that marker's popup (see spatChips). */
+        "var SPAT={};"
+        "function spatColor(p){if(p===5||p===6)return '#2ecc40';"
+        "if(p===7||p===8||p===9)return '#f2b134';if(p===2||p===3)return '#e74c3c';"
+        "if(p===4)return '#e67e22';return '#888';}"
+        "function spatChips(i){var d=SPAT[i];if(!d)return '';"
+        "var lbl=d.nm?d.nm:(d.rg+'/'+d.id);"
+        "var h='<br>\\ud83d\\udea6 <b>'+lbl+'</b> <small>('+d.age+'s)</small><br>';"
+        "for(var j=0;j<d.g.length;j++){"
+        "h+='<span style=\"display:inline-block;margin:1px 5px 1px 0;white-space:nowrap\">"
+        "<span style=\"display:inline-block;width:11px;height:11px;border-radius:50%;"
+        "background:'+spatColor(d.g[j][1])+';vertical-align:middle;margin-right:3px\"></span>'"
+        "+(d.g[j][3]?d.g[j][3]+' <small>('+d.g[j][0]+')</small>':d.g[j][0])+(d.g[j][2]>=0?' <small>'+d.g[j][2]+'s</small>':'')+'</span>';}return h;}"
+        /* Renders the set bits of a BIT STRING as a comma-separated line.
+         * Bit 0 is the MSB, hence 1<<(w-1-i). */
+        "function bits(v,names,w){if(!v)return '';var o=[];"
+        "for(var i=0;i<w;i++)if(v&(1<<(w-1-i)))o.push(names[i]);"
+        "return o.length?'<br>'+o.join(', '):'';}"
         "function popupHtml(m){var h='<b>'+(m.y||'?')+'</b><br>'+(m.t||'-')+' &middot; '"
         "+(m.r||'-')+' &middot; '+(m.l||'-')+' B<br>#'+m.i;"
         "if(m.s!==undefined)h+='<br>'+(m.s*0.036).toFixed(1)+' km/h';"
+        "if(m.pl)h+='<br><b>'+ITS_MAP_LINE+' '+m.pl+'</b>';"
+        "if(m.vl&&m.vw)h+='<br>'+(m.vl/10).toFixed(1)+' \\u00d7 '+(m.vw/10).toFixed(1)+' m';"
+        /* Heading: degrees plus the compass point, since "214 deg" alone
+         * means little at a glance. 3600 tenths = full circle. */
+        "if(m.hd!==undefined){var deg=m.hd/10;"
+        "h+='<br>'+ITS_CAM_DIR+' '+deg.toFixed(0)+'\\u00b0 '"
+        "+ITS_CAM_C[Math.round(deg/45)%8];}"
+        "if(m.vr&&ITS_CAM_R[m.vr])h+='<br><b>'+ITS_CAM_R[m.vr]+'</b>';"
+        "if(m.eb)h+='<br>'+ITS_CAM_EMB;"
+        /* Both are bit strings whose bit 0 is the MSB, so bit n of a
+         * width-w field is tested with 1<<(w-1-n). */
+        "h+=bits(m.ac,ITS_CAM_A,7);h+=bits(m.el,ITS_CAM_L,8);"
+        "if(m.d)h+='<br><span style=\"color:#e74c3c\">\\u26a0 '+(m.dt||ITS_MAP_DENM)+'</span>';"
+        /* Which receiver picked this up -- only shown when other receivers
+         * are configured, since with one device it says nothing. */
+        "if(ITS_MAP_PEERS.length&&m.srcs)"
+        "h+='<br><small>'+ITS_MAP_SEEN_BY+' '+m.srcs+'</small>';"
+        "h+=spatChips(m.i);"
         "return h;}"
+        /* Removes a marker and, if it has one, its path trail -- four call
+         * sites used to drop only the marker, which would have left the
+         * trail behind on the map forever. */
+        "function dropMarker(k){if(!markers[k])return;map.removeLayer(markers[k].marker);"
+        "if(markers[k].trail)map.removeLayer(markers[k].trail);delete markers[k];}"
         "function apply(arr){var now=Date.now();"
         "for(var i=0;i<arr.length;i++){var m=arr[i];if(m.a===undefined)continue;"
         "var lat=m.a/1e7,lon=m.o/1e7,key=String(m.i);"
         "if(markers[key]){markers[key].marker.setLatLng([lat,lon]);}"
-        "else{markers[key]={marker:L.marker([lat,lon],{icon:iconFor(m.y||'')}).addTo(map)};}"
+        "else{markers[key]={marker:L.marker([lat,lon],{icon:iconFor(m.y||'',m.hd)}).addTo(map)};"
+        "markers[key].hd=m.hd;}"
+        /* The icon is built once, so a turning vehicle needs it rebuilt --
+         * but only when the heading actually changed, since setIcon replaces
+         * the DOM node and would otherwise churn on every message. */
+        "if(m.hd!==undefined&&m.hd!==markers[key].hd){"
+        "markers[key].marker.setIcon(iconFor(m.y||'',m.hd));markers[key].hd=m.hd;}"
+        /* The line number belongs to the vehicle, not to the single message:
+         * only ~30% of a bus's CAMs carry the public-transport container, so
+         * remember it per station and keep showing it on the later messages
+         * that omit it (otherwise it just flickers past). */
+        /* Sparse per-vehicle attributes: only ~40% of a bus's CAMs carry the
+         * public-transport container, so without a memory the line number
+         * flickers. Held OUTSIDE `markers` on purpose -- seeking backwards in
+         * playback destroys and rebuilds markers, which used to wipe it and
+         * left the replay showing a line only on the odd frame. `vr` (role)
+         * is just as sparse and gets the same treatment. */
+        /* Not every CAM carries every field: a car sends its lights in ~75%
+         * of messages and its line/role only occasionally, so the popup used
+         * to blink them in and out. Remember the last value SEEN per station
+         * and fill it back in when a message omits it -- a field only ever
+         * changes when the vehicle actually sends a new value for it. */
+        "var mem=VMEM[key]||(VMEM[key]={});"
+        "['pl','vr','ac','el','hd','vl','vw','dt'].forEach(function(f){"
+        "if(m[f]!==undefined)mem[f]=m[f]; else if(mem[f]!==undefined)m[f]=mem[f];});"
+        /* Which receivers heard this station, as a set with timestamps. The
+         * local feed and each peer arrive as separate updates, so a single
+         * field would just be overwritten by whichever landed last -- the
+         * local one, once a second. Sources age out on the same staleness
+         * rule as the markers themselves. */
+        "var who=m.src||ITS_MAP_SELF;"
+        "mem.src=mem.src||{};mem.src[who]=now;"
+        "var lst=[];for(var w in mem.src){"
+        "if(now-mem.src[w]<=ITS_MAP_STALE*1000)lst.push(w);else delete mem.src[w];}"
+        "m.srcs=lst.sort().join(', ');"
+        /* Where the vehicle has just been, as a faint trail ending at the
+         * marker. Replaced rather than appended: each CAM carries the whole
+         * (short) history, so accumulating them would draw it many times. */
+        "if(m.ph&&m.ph.length){var pts=m.ph.map(function(q){return [q[0]/1e7,q[1]/1e7];});"
+        "pts.push([lat,lon]);"
+        "if(markers[key].trail)markers[key].trail.setLatLngs(pts);"
+        "else markers[key].trail=L.polyline(pts,{color:'#f2b134',weight:2,"
+        "opacity:0.55,dashArray:'3,4'}).addTo(map);}"
         "markers[key].marker.bindPopup(popupHtml(m));"
         "markers[key].lastSeen=now;"
         "if(!haveView){map.setView([lat,lon],15);haveView=true;}}}"
@@ -1667,8 +2465,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * timestamps, so it must not run while replaying the past. */
         "var sweepTimer;"
         "function startSweep(){sweepTimer=setInterval(function(){var now=Date.now();"
-        "for(var k in markers){if(now-markers[k].lastSeen>60000){"
-        "map.removeLayer(markers[k].marker);delete markers[k];}}},5000);}"
+        "for(var k in markers){if(now-markers[k].lastSeen>ITS_MAP_STALE*1000){"
+        "dropMarker(k);}}},5000);}"
         "startSweep();"
         "var delay=1000,ws,closing=false;"
         "function connect(){"
@@ -1678,6 +2476,58 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "ws.onclose=function(){if(closing)return;setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
         "}"
         "connect();"
+        /* Poll traffic-light phases; refreshed into SPAT so the next popup
+         * render (each /ws tick rebinds popups) shows current phases. Only in
+         * live mode -- historical playback has no phase data. */
+        /* Other receivers, merged in from the browser. Markers are keyed by
+         * station id, so a vehicle two receivers both hear collapses into one
+         * marker on its own -- and where their ranges overlap becomes
+         * visible. Failures are ignored silently: a peer being rebooted or
+         * off must not disturb the local map. */
+        /* One request per peer in flight, never more: against a host that
+         * drops packets instead of refusing them, a browser fetch can hang
+         * for minutes -- fired again every two seconds, those pile up (and
+         * mobile Safari is the first to mind). A peer is simply skipped
+         * until its previous request has finished either way. */
+        "var peerBusy={};"
+        "function fetchPeers(){if(!liveMode||!ITS_MAP_PEERS.length)return;"
+        "ITS_MAP_PEERS.forEach(function(hp){"
+        "if(peerBusy[hp])return;peerBusy[hp]=true;"
+        "fetch('http://'+hp+'/markers.json',{cache:'no-store'})"
+        ".then(function(r){return r.json();}).then(function(a){"
+        "peerBusy[hp]=false;"
+        "if(!liveMode)return;"
+        "for(var i=0;i<a.length;i++)a[i].src=hp;"
+        "apply(a);}).catch(function(){peerBusy[hp]=false;});});}"
+        "if(ITS_MAP_PEERS.length){fetchPeers();setInterval(fetchPeers,2000);}"
+        "function fetchSpat(){if(!liveMode)return;"
+        "fetch('/spatem.json',{cache:'no-store'}).then(function(r){return r.json();})"
+        ".then(function(a){var m={};for(var i=0;i<a.length;i++){m[a[i].i]=a[i];"
+        "var k=a[i].rg+'/'+a[i].id;PHASE[k]={};"
+        "for(var j=0;j<a[i].g.length;j++)PHASE[k][a[i].g[j][0]]=a[i].g[j][1];}"
+        "SPAT=m;paintLanes();}).catch(function(){});}"
+        "fetchSpat();setInterval(fetchSpat,3000);"
+        /* Lane geometry: fetched once (the layout is static), then just
+         * recoloured whenever new phases arrive. Ingress lanes take their
+         * signal group's colour; lanes without a group stay neutral grey. */
+        "var LANES=[],PHASE={};"
+        "function paintLanes(){for(var i=0;i<LANES.length;i++){var o=LANES[i];"
+        "var ph=(PHASE[o.k]||{})[o.sg];"
+        "o.line.setStyle({color:(o.sg<0?'#7a848c':spatColor(ph)),"
+        "weight:(o.t==1?3:4),opacity:(o.sg<0?0.5:0.9),dashArray:(o.t==1?'4,4':null)});}}"
+        "function loadLanes(){fetch('/lanes.json',{cache:'no-store'})"
+        ".then(function(r){return r.json();}).then(function(a){"
+        "for(var i=0;i<LANES.length;i++)map.removeLayer(LANES[i].line);LANES=[];"
+        "for(var i=0;i<a.length;i++){var X=a[i],k=X.rg+'/'+X.id;"
+        /* `ln` deliberately not named L -- that is Leaflet's own global. */
+        "for(var j=0;j<X.lanes.length;j++){var ln=X.lanes[j];"
+        "var pts=ln.p.map(function(p){return [p[0]/1e7,p[1]/1e7];});"
+        "var pl=L.polyline(pts,{color:'#7a848c',weight:4,opacity:0.8}).addTo(map);"
+        "pl.bindPopup('Spur '+ln.l+(ln.sg>=0?' \\u00b7 SG '+ln.sg:'')"
+        "+(ln.t==1?' \\u00b7 \\u00dcbergang':''));"
+        "LANES.push({line:pl,sg:ln.sg,t:ln.t,k:k});}}"
+        "paintLanes();}).catch(function(){});}"
+        "loadLanes();setInterval(loadLanes,120000);"
         "window.addEventListener('pagehide',function(){closing=true;if(ws)ws.close();});"
         /* Playback: /map/playback returns the same {t,i,a,o,y} shape (plus
          * t=unix seconds) as /ws, so scrubbing just re-derives "current state
@@ -1692,27 +2542,35 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * playback time (t - entry.t) rather than real Date.now() -- a
          * station's last-known position shouldn't keep showing forever
          * just because it's the most recent entry found so far. */
-        "for(var k in latest){if(t-latest[k].t>60)delete latest[k];}"
+        "for(var k in latest){if(t-latest[k].t>ITS_MAP_STALE)delete latest[k];}"
         /* Remove markers for stations not yet present at time t -- apply()
          * only ever adds/moves markers for what's in the array it's given,
          * it never removes ones that are absent, so without this, seeking
          * backward left every "future" station's marker stuck in place. */
-        "for(var k in markers){if(!(k in latest)){map.removeLayer(markers[k].marker);delete markers[k];}}"
+        "for(var k in markers){if(!(k in latest))dropMarker(k);}"
         "apply(Object.keys(latest).map(function(k){return latest[k];}));}"
+        /* Busy state: the bar plus a disabled button, so a slow SD read can't
+         * be mistaken for a dead page or fired off twice by an impatient
+         * second click. Cleared on every exit path, including errors. */
+        "function pbBusy(on){document.getElementById('pbbar').style.display=on?'inline-block':'none';"
+        "var b=document.getElementById('pbload');b.disabled=on;b.style.opacity=on?0.6:1;"
+        "document.getElementById('pbmsg').textContent=on?ITS_PB_BUSY:'';}"
         "function pbLoad(){"
         "var from=Math.floor(new Date(document.getElementById('pbfrom').value).getTime()/1000);"
         "var to=Math.floor(new Date(document.getElementById('pbto').value).getTime()/1000);"
         "var msg=document.getElementById('pbmsg');msg.textContent='';"
         "if(!from||!to||to<=from){msg.textContent=ITS_PB_ERROR;return;}"
+        "pbBusy(true);"
         "fetch('/map/playback?from='+from+'&to='+to).then(function(r){"
         "if(!r.ok)throw new Error('http '+r.status);return r.json();"
         "}).then(function(data){"
+        "pbBusy(false);"
         "pbData=data;"
         "if(!pbData.length){msg.textContent=ITS_PB_NONE;return;}"
-        "liveMode=false;clearInterval(sweepTimer);"
-        "for(var k in markers){map.removeLayer(markers[k].marker);}markers={};"
+        "liveMode=false;clearInterval(sweepTimer);VMEM={};"
+        "for(var k in markers)dropMarker(k);markers={};"
         "var sl=document.getElementById('pbslider');"
-        "sl.min=pbData[0].t;sl.max=pbData[pbData.length-1].t;"
+        "sl.min=pbData[0].t;sl.max=pbData[pbData.length-1].t;sl.step=pbStep();"
         "document.getElementById('pbctl').style.display='';"
         /* Always reframe on the loaded window's own coverage -- apply()'s
          * own auto-zoom-on-first-fix (haveView) only fires once, whenever
@@ -1726,19 +2584,22 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * already showing on load, so pressing Play had nothing left to
          * play: the slider was already at its own stop condition. */
         "pbSeek(sl.min);"
-        "}).catch(function(){msg.textContent=ITS_PB_ERROR;});}"
+        "}).catch(function(){pbBusy(false);msg.textContent=ITS_PB_ERROR;});}"
+        /* One setting for both the slider's granularity and how far a play
+         * tick advances -- so it reads as "seconds per step" and doubles as
+         * the replay speed (10 = ten times real time). */
+        "function pbStep(){return +document.getElementById('pbstep').value||10;}"
         "function pbToggle(){pbPlaying=!pbPlaying;"
         "document.getElementById('pbplay').innerHTML=pbPlaying?'&#9208;':'&#9654;';"
         "if(pbPlaying){var sl=document.getElementById('pbslider');"
-        /* x20 replay speed: a 60-minute window replays in ~3 minutes. */
-        "pbTimer=setInterval(function(){var t=+sl.value+20;"
+        "pbTimer=setInterval(function(){var t=+sl.value+pbStep();"
         "if(t>=+sl.max){t=+sl.max;pbPlaying=false;"
         "document.getElementById('pbplay').innerHTML='&#9654;';clearInterval(pbTimer);}"
         "pbSeek(t);},1000);}else{clearInterval(pbTimer);}}"
-        "function pbLive(){liveMode=true;pbPlaying=false;clearInterval(pbTimer);"
+        "function pbLive(){liveMode=true;pbPlaying=false;clearInterval(pbTimer);VMEM={};"
         "document.getElementById('pbplay').innerHTML='&#9654;';"
         "document.getElementById('pbctl').style.display='none';"
-        "for(var k in markers){map.removeLayer(markers[k].marker);}markers={};"
+        "for(var k in markers)dropMarker(k);markers={};"
         "apply(window.ITS_MAP_SEED||[]);startSweep();}"
         /* Wired up here (not inline HTML onclick=/oninput=) because those
          * run in the *global* scope, not inside this IIFE -- an inline
@@ -1748,6 +2609,10 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "document.getElementById('pbload').onclick=pbLoad;"
         "document.getElementById('pbplay').onclick=pbToggle;"
         "document.getElementById('pbslider').oninput=function(){pbSeek(this.value);};"
+        /* Changing the step retunes the slider itself, so dragging snaps to
+         * the same granularity the play button advances by. */
+        "document.getElementById('pbstep').onchange=function(){"
+        "document.getElementById('pbslider').step=pbStep();};"
         "document.getElementById('pblive').onclick=pbLive;"
         /* Default to "the last hour"; built from getFullYear()/etc rather
          * than toISOString() since datetime-local needs local time, not UTC. */
@@ -1766,34 +2631,1002 @@ static esp_err_t map_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /spatem.json -- current traffic-light phases, keyed by the RSU's
+ * stationId so /map can enrich that marker's popup. RAM-only (no SD needed),
+ * so it lives outside the SD guard below. Shape:
+ * [{"i":stationId,"rg":region,"id":id,"rev":n,"age":secs,"g":[[sg,phase],...]}] */
+/* Defined further down with the rest of the traffic-page helpers. */
+static void spat_movement_text(const spatem_intersection_t *e, uint8_t sg,
+                               char *out, size_t out_size);
+
+static esp_err_t spatem_json_handler(httpd_req_t *req)
+{
+    static spatem_intersection_t ints[SPATEM_MAX_INT];
+    int ni = spatem_snapshot(ints, SPATEM_MAX_INT);
+    uint32_t now = (uint32_t)time(NULL);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
+    for (int i = 0; i < ni; i++)
+    {
+        spatem_intersection_t *e = &ints[i];
+        unsigned long age = now > e->last_seen ? (unsigned long)(now - e->last_seen) : 0;
+        /* Name is IA5 from the MAPEM and further filtered to printable ASCII
+         * by the decoder, but '"' and '\' would still break the JSON string. */
+        char nm[ITS_MAP_NAME_LEN];
+        size_t nw = 0;
+        for (size_t k = 0; e->name[k] && nw + 1 < sizeof(nm); k++)
+            if (e->name[k] != '"' && e->name[k] != '\\')
+                nm[nw++] = e->name[k];
+        nm[nw] = '\0';
+
+        char head[ITS_MAP_NAME_LEN + 160];
+        snprintf(head, sizeof(head),
+            "%s{\"i\":%lu,\"rg\":%u,\"id\":%u,\"rev\":%u,\"age\":%lu,\"nm\":\"%s\",\"g\":[",
+            i ? "," : "", (unsigned long)e->station_id, (unsigned)e->region,
+            (unsigned)e->id, (unsigned)e->revision, age, nm);
+        httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+        for (int s = 0; s < e->n; s++)
+        {
+            /* [signalGroup, phase, secondsUntilChange] -- -1 = no timing. */
+            long left = -1;
+            if (e->change_at[s] > now && e->change_at[s] - now <= 600)
+                left = (long)(e->change_at[s] - now);
+            char mv[64];
+            spat_movement_text(e, e->sg[s], mv, sizeof(mv));
+            char pair[128];
+            snprintf(pair, sizeof(pair), "%s[%u,%u,%ld,\"%s\"]", s ? "," : "",
+                     (unsigned)e->sg[s], (unsigned)e->phase[s], left, mv);
+            httpd_resp_send_chunk(req, pair, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* GET /lanes.json -- cached MAPEM lane geometry, for drawing intersections.
+ * Fetched once by /map (the layout doesn't change), then recoloured live
+ * from the phases in /spatem.json. Shape:
+ * [{"rg":43,"id":840,"nm":"...","lanes":[{"l":11,"t":0,"sg":1,"p":[[lat,lon],..]}]}] */
+static esp_err_t lanes_json_handler(httpd_req_t *req)
+{
+    static spatem_intersection_t ints[SPATEM_MAX_INT];
+    int ni = spatem_snapshot(ints, SPATEM_MAX_INT);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
+    bool first = true;
+    for (int i = 0; i < ni; i++)
+    {
+        const its_map_geom_t *g = spatem_geometry(ints[i].region, ints[i].id);
+        if (!g)
+            continue;
+        char head[64];
+        snprintf(head, sizeof(head), "%s{\"rg\":%u,\"id\":%u,\"lanes\":[",
+                 first ? "" : ",", (unsigned)g->region, (unsigned)g->id);
+        httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+        first = false;
+
+        for (uint8_t l = 0; l < g->n_lanes; l++)
+        {
+            const its_lane_geom_t *L = &g->lane[l];
+            if (L->n_nodes < 2)
+                continue;                 /* nothing to draw */
+            char lh[64];
+            snprintf(lh, sizeof(lh), "%s{\"l\":%u,\"t\":%u,\"sg\":%d,\"p\":[",
+                     l ? "," : "", (unsigned)L->lane_id, (unsigned)L->lane_type,
+                     L->signal_group == 0xFF ? -1 : (int)L->signal_group);
+            httpd_resp_send_chunk(req, lh, HTTPD_RESP_USE_STRLEN);
+            for (uint8_t n = 0; n < L->n_nodes; n++)
+            {
+                char pt[48];
+                snprintf(pt, sizeof(pt), "%s[%ld,%ld]", n ? "," : "",
+                         (long)L->lat_e7[n], (long)L->lon_e7[n]);
+                httpd_resp_send_chunk(req, pt, HTTPD_RESP_USE_STRLEN);
+            }
+            httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 /* ================================================================== */
 /*  GET /map/playback -- historical positions from stored PCAP files  */
 /* ================================================================== */
 
 #if CONFIG_ENABLE_SD
+/* A stationary RSU broadcasts SPATEM ~10x a second from an unchanging
+ * position, so replaying every frame verbatim produced ~9000 identical
+ * entries per quarter hour -- megabytes of JSON, each entry its own chunked
+ * write, and the browser gave up long before the end. Playback only needs
+ * "where was this station at time T", so a station is re-emitted when it has
+ * actually moved, and otherwise only occasionally to keep the marker alive. */
+#define PB_MAX_STATIONS  96   /* distinct senders tracked; beyond that, no dedup */
+#define PB_MIN_GAP_SEC    1   /* fastest re-emit for a station that IS moving */
+#define PB_KEEPALIVE_SEC 30   /* re-emit an unmoved station this often */
+
+typedef struct {
+    uint32_t station_id, last_sec;
+    int32_t  lat_e7, lon_e7;
+} pb_seen_t;
+
 typedef struct {
     httpd_req_t *req;
     bool first;
+    /* Entries are accumulated here and flushed in blocks; one chunked write
+     * per entry was itself a large part of the 45+ seconds. */
+    char buf[2048];
+    size_t len;
+    pb_seen_t seen[PB_MAX_STATIONS];
+    int n_seen;
+    uint32_t emitted, skipped;
 } playback_ctx_t;
+
+static void playback_flush(playback_ctx_t *ctx)
+{
+    if (ctx->len)
+        httpd_resp_send_chunk(ctx->req, ctx->buf, ctx->len);
+    ctx->len = 0;
+}
+
+/* True when this frame adds something the replay actually needs. */
+static bool playback_want(playback_ctx_t *ctx, uint32_t sec, const its_decoded_t *d)
+{
+    pb_seen_t *s = NULL;
+    for (int i = 0; i < ctx->n_seen; i++)
+        if (ctx->seen[i].station_id == d->station_id)
+        {
+            s = &ctx->seen[i];
+            break;
+        }
+
+    if (!s)
+    {
+        if (ctx->n_seen >= PB_MAX_STATIONS)
+            return true;   /* table full: stop deduplicating rather than drop */
+        s = &ctx->seen[ctx->n_seen++];
+        s->station_id = d->station_id;
+        s->last_sec = sec;
+        s->lat_e7 = d->lat_e7;
+        s->lon_e7 = d->lon_e7;
+        return true;
+    }
+
+    bool moved = (s->lat_e7 != d->lat_e7 || s->lon_e7 != d->lon_e7);
+    uint32_t age = sec > s->last_sec ? sec - s->last_sec : 0;
+    if (!(moved ? age >= PB_MIN_GAP_SEC : age >= PB_KEEPALIVE_SEC))
+        return false;
+
+    s->last_sec = sec;
+    s->lat_e7 = d->lat_e7;
+    s->lon_e7 = d->lon_e7;
+    return true;
+}
 
 /* msgtype/label only ever contains digits/letters/spaces/':'/'-'/'.' (see
  * its_decode_frame), same as everywhere else it's embedded in JSON in this
  * file -- no attacker-controlled bytes, no escaping needed. */
-static void playback_emit(uint32_t sec, uint32_t usec, uint32_t station_id,
-                          int32_t lat_e7, int32_t lon_e7, bool has_speed, int32_t speed_cmps,
-                          const char *label, void *ctx_)
+static void playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, void *ctx_)
 {
     (void)usec;
     playback_ctx_t *ctx = (playback_ctx_t *)ctx_;
-    char speedsuffix[24] = "";
-    if (has_speed)
-        snprintf(speedsuffix, sizeof(speedsuffix), ",\"s\":%ld", (long)speed_cmps);
-    char entry[216];
-    snprintf(entry, sizeof(entry), "%s{\"t\":%lu,\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\"%s}",
-             ctx->first ? "" : ",", (unsigned long)sec, (unsigned long)station_id,
-             (long)lat_e7, (long)lon_e7, label, speedsuffix);
-    httpd_resp_send_chunk(ctx->req, entry, HTTPD_RESP_USE_STRLEN);
+
+    /* A DENM is an event, not a position sample -- never suppress one. */
+    if (d->message_id != 1 && !playback_want(ctx, sec, d))
+    {
+        ctx->skipped++;
+        return;
+    }
+
+    /* Same optional keys as the live /ws feed, so the map's popupHtml renders
+     * a replayed marker exactly like a live one. */
+    /* MUST be initialised: when a frame carries none of these optional keys
+     * (every RSU message, for one), nothing below writes to it, and the
+     * uninitialised stack bytes were being printed straight into the JSON.
+     * That produced invalid UTF-8 mid-response and made the browser's
+     * JSON.parse throw -- i.e. "error loading" on an otherwise fine reply.
+     * Worst case with every key set is ~92 bytes. */
+    char extra[320] = "";
+    size_t eo = 0;
+    if (d->has_speed)
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"s\":%ld", (long)d->speed_cmps);
+    if (d->veh.valid && d->veh.length_dm && d->veh.width_dm && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"vl\":%u,\"vw\":%u",
+                       (unsigned)d->veh.length_dm, (unsigned)d->veh.width_dm);
+    if (d->pt_line && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"pl\":%u", (unsigned)d->pt_line);
+    /* Same CAM detail the live feed sends -- replayed markers should look
+     * exactly like live ones (this was forgotten once already for the line
+     * number and vehicle size, and the replay silently lost them). */
+    if (d->cam.has_heading && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"hd\":%u",
+                       (unsigned)d->cam.heading_ddeg);
+    if (d->cam.has_accel_ctrl && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"ac\":%u",
+                       (unsigned)d->cam.accel_ctrl);
+    if (d->cam.has_lights && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"el\":%u",
+                       (unsigned)d->cam.ext_lights);
+    if (d->cam.role != 0xFF && d->cam.role != 0 && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"vr\":%u",
+                       (unsigned)d->cam.role);
+    if (d->pt_embarking && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"eb\":1");
+    /* Live mode flags a station that warned recently; in playback the frame
+     * being replayed IS the warning, so flag that one. */
+    if (d->message_id == 1 && eo < sizeof(extra))
+    {
+        const char *ct = denm_cause_text(d->denm_cause);
+        const char *st = denm_sub_text(d->denm_cause, d->denm_subcause);
+        if (ct && st)
+            snprintf(extra + eo, sizeof(extra) - eo, ",\"d\":1,\"dt\":\"%s (%s)\"", ct, st);
+        else if (ct)
+            snprintf(extra + eo, sizeof(extra) - eo, ",\"d\":1,\"dt\":\"%s\"", ct);
+        else
+            snprintf(extra + eo, sizeof(extra) - eo, ",\"d\":1");
+    }
+
+    char entry[576];
+    int n = snprintf(entry, sizeof(entry),
+             "%s{\"t\":%lu,\"i\":%lu,\"a\":%ld,\"o\":%ld,\"y\":\"%s\"%s}",
+             ctx->first ? "" : ",", (unsigned long)sec, (unsigned long)d->station_id,
+             (long)d->lat_e7, (long)d->lon_e7, d->label, extra);
+    if (n < 0)
+        return;
+    if (ctx->len + (size_t)n >= sizeof(ctx->buf))
+        playback_flush(ctx);
+    memcpy(ctx->buf + ctx->len, entry, (size_t)n);
+    ctx->len += (size_t)n;
     ctx->first = false;
+    ctx->emitted++;
+}
+
+/* ================================================================== */
+/*  GET /traffic  -- per-hour traffic statistics + warning list       */
+/* ================================================================== */
+
+
+/* DENM cause code -> plain text. The numbering is the ETSI CauseCodeChoice
+ * index, which the ASN.1 keeps equal to the classic cause code by way of
+ * `reserved` placeholders. Anything not listed falls back to its number, so
+ * an unfamiliar warning is still reported honestly rather than mislabelled. */
+typedef struct { uint8_t code; const char *de; const char *en; } denm_cause_name_t;
+static const denm_cause_name_t DENM_CAUSES[] = {
+    /* ETSI calls cause 1 "trafficCondition", but on its own that says nothing
+     * to a reader -- in practice it is always congestion, so name it that. */
+    {   1, "Stau / stockender Verkehr",   "Congestion / slow traffic" },
+    {   2, "Unfall",                       "Accident" },
+    {   3, "Baustelle",                    "Roadworks" },
+    {   5, "Unpassierbar",                 "Impassability" },
+    {   6, "Schlechte Fahrbahnhaftung",    "Slippery road" },
+    {   7, "Aquaplaning",                  "Aquaplaning" },
+    {   9, "Fahrbahnzustand",              "Surface condition" },
+    {  10, "Hindernis auf der Fahrbahn",   "Obstacle on the road" },
+    {  11, "Tier auf der Fahrbahn",        "Animal on the road" },
+    {  12, "Person auf der Fahrbahn",      "Person on the road" },
+    {  14, "Geisterfahrer",                "Wrong-way driving" },
+    {  15, "Bergungsarbeiten",             "Rescue and recovery work" },
+    {  17, "Extremwetter",                 "Extreme weather" },
+    {  18, "Schlechte Sicht",              "Poor visibility" },
+    {  19, "Niederschlag",                 "Precipitation" },
+    {  20, "Gewalttat",                    "Violence" },
+    {  26, "Langsames Fahrzeug",           "Slow vehicle" },
+    {  27, "Stauende",                     "Dangerous end of queue" },
+    {  91, "Fahrzeugpanne",                "Vehicle breakdown" },
+    {  92, "Nach einem Unfall",            "Post crash" },
+    {  93, "Medizinischer Notfall",        "Human problem" },
+    {  94, "Liegengebliebenes Fahrzeug",   "Stationary vehicle" },
+    {  95, "Einsatzfahrzeug im Anmarsch",  "Emergency vehicle approaching" },
+    {  96, "Gefaehrliche Kurve",           "Dangerous curve" },
+    {  97, "Kollisionsgefahr",             "Collision risk" },
+    {  98, "Rotlichtverstoss",             "Signal violation" },
+    {  99, "Gefaehrliche Situation",       "Dangerous situation" },
+    { 100, "Bahnuebergang",                "Railway level crossing" },
+};
+
+static const char *denm_cause_text(uint8_t code)
+{
+    for (size_t i = 0; i < sizeof(DENM_CAUSES) / sizeof(DENM_CAUSES[0]); i++)
+        if (DENM_CAUSES[i].code == code)
+            return current_lang == LANG_DE ? DENM_CAUSES[i].de : DENM_CAUSES[i].en;
+    return NULL;
+}
+
+
+/* Sub-cause detail, per ETSI CDD. Each cause has its own enumeration, so the
+ * table is keyed by (cause, sub). Only the causes likely to turn up here are
+ * filled in; anything else falls back to showing the bare number, which is
+ * still honest. Sub-cause 0 always means "unavailable" and is not shown. */
+typedef struct { uint8_t cause, sub; const char *de, *en; } denm_sub_name_t;
+static const denm_sub_name_t DENM_SUBCAUSES[] = {
+    /* 1 trafficCondition */
+    { 1, 1, "mehr Verkehr",                  "increased volume of traffic" },
+    { 1, 2, "Stau bildet sich langsam",      "traffic jam slowly increasing" },
+    { 1, 3, "Stau bildet sich",              "traffic jam increasing" },
+    { 1, 4, "Stau bildet sich schnell",      "traffic jam strongly increasing" },
+    { 1, 5, "stehender Verkehr",             "traffic stationary" },
+    { 1, 6, "Stau loest sich leicht auf",    "traffic jam slightly decreasing" },
+    { 1, 7, "Stau loest sich auf",           "traffic jam decreasing" },
+    { 1, 8, "Stau loest sich schnell auf",   "traffic jam strongly decreasing" },
+    /* 2 accident */
+    { 2, 1, "mehrere Fahrzeuge",             "multi-vehicle accident" },
+    { 2, 2, "schwerer Unfall",               "heavy accident" },
+    { 2, 3, "mit LKW",                       "involving lorry" },
+    { 2, 4, "mit Bus",                       "involving bus" },
+    { 2, 5, "mit Gefahrgut",                 "involving hazardous materials" },
+    { 2, 6, "auf der Gegenfahrbahn",         "on opposite lane" },
+    { 2, 7, "ungesicherte Unfallstelle",     "unsecured accident" },
+    { 2, 8, "Hilfe angefordert",             "assistance requested" },
+    /* 3 roadworks */
+    { 3, 1, "Grossbaustelle",                "major roadworks" },
+    { 3, 2, "Markierungsarbeiten",           "road marking work" },
+    { 3, 3, "langsames Arbeitsfahrzeug",     "slow moving road maintenance" },
+    { 3, 4, "kurzzeitige Baustelle",         "short-term stationary roadworks" },
+    { 3, 5, "Strassenreinigung",             "street cleaning" },
+    { 3, 6, "Winterdienst",                  "winter service" },
+    /* 26 slowVehicle */
+    { 26, 1, "Wartungsfahrzeug",             "maintenance vehicle" },
+    { 26, 2, "Gaffer",                       "vehicles slowing to look at accident" },
+    { 26, 3, "Schwertransport",              "abnormal load" },
+    { 26, 4, "Ueberbreite",                  "abnormal wide load" },
+    { 26, 5, "Konvoi",                       "convoy" },
+    { 26, 6, "Schneepflug",                  "snowplough" },
+    { 26, 7, "Enteisung",                    "de-icing" },
+    { 26, 8, "Streufahrzeug",                "salting vehicle" },
+    /* 94 stationaryVehicle */
+    { 94, 1, "medizinischer Notfall",        "human problem" },
+    { 94, 2, "Panne",                        "vehicle breakdown" },
+    { 94, 3, "nach Unfall",                  "post crash" },
+    { 94, 4, "Haltestelle",                  "public transport stop" },
+    { 94, 5, "Gefahrgut an Bord",            "carrying dangerous goods" },
+    { 94, 6, "Fahrzeugbrand",                "vehicle on fire" },
+};
+
+static const char *denm_sub_text(uint8_t cause, uint8_t sub)
+{
+    if (sub == 0)
+        return NULL;                 /* "unavailable" -- nothing to add */
+    for (size_t i = 0; i < sizeof(DENM_SUBCAUSES) / sizeof(DENM_SUBCAUSES[0]); i++)
+        if (DENM_SUBCAUSES[i].cause == cause && DENM_SUBCAUSES[i].sub == sub)
+            return current_lang == LANG_DE ? DENM_SUBCAUSES[i].de : DENM_SUBCAUSES[i].en;
+    return NULL;
+}
+
+/* ETSI station type -> localized road-user category label. */
+static const char *trf_cat_label(uint8_t st)
+{
+    switch (st)
+    {
+    case 5:                 return T(S_CAT_CAR);
+    case 6:                 return T(S_CAT_BUS);
+    case 7: case 8: case 9: return T(S_CAT_TRUCK);
+    case 2: case 3: case 4: return T(S_CAT_TWOWHEEL);
+    case 1:                 return T(S_CAT_PED);
+    case 15:                return T(S_CAT_RSU);
+    default:                return T(S_CAT_OTHER);
+    }
+}
+
+/* SAE J2735 MovementPhaseState -> indicator colour. */
+static const char *spat_phase_color(uint8_t phase)
+{
+    switch (phase)
+    {
+    case 5: case 6:          return "#2ecc40";  /* movement allowed -> green */
+    case 7: case 8: case 9:  return "#f2b134";  /* clearance / caution -> amber */
+    case 2: case 3:          return "#e74c3c";  /* stop / remain -> red */
+    case 4:                  return "#e67e22";  /* pre-movement -> red+amber */
+    default:                 return "#888";     /* unavailable / dark */
+    }
+}
+
+/* What a signal group controls, as short text ("geradeaus", "links, rechts",
+ * "Fussgaenger"), from the MAPEM lane geometry. Empty when no MAPEM for that
+ * intersection has been decoded yet. */
+static void spat_movement_text(const spatem_intersection_t *e, uint8_t sg,
+                               char *out, size_t out_size)
+{
+    out[0] = '\0';
+    uint16_t man = 0;
+    bool ped = false;
+    if (!spatem_movement(e, sg, &man, &ped))
+        return;
+    if (ped)
+    {
+        snprintf(out, out_size, "%s", T(S_DIR_PED));
+        return;
+    }
+    size_t o = 0;
+    const struct { uint16_t bit; str_id_t id; } D[] = {
+        { ITS_MAN_STRAIGHT, S_DIR_STRAIGHT }, { ITS_MAN_LEFT, S_DIR_LEFT },
+        { ITS_MAN_RIGHT, S_DIR_RIGHT },       { ITS_MAN_UTURN, S_DIR_UTURN },
+    };
+    for (size_t i = 0; i < sizeof(D) / sizeof(D[0]); i++)
+        if ((man & D[i].bit) && o < out_size)
+            o += snprintf(out + o, out_size - o, "%s%s", o ? ", " : "", T(D[i].id));
+}
+
+/* MovementPhaseState -> short localized phase name (chip hover title). */
+static const char *spat_phase_name(uint8_t phase)
+{
+    switch (phase)
+    {
+    case 5: case 6:          return T(S_TRF_PH_GREEN);
+    case 4: case 7: case 8: case 9: return T(S_TRF_PH_AMBER);
+    case 2: case 3:          return T(S_TRF_PH_RED);
+    default:                 return T(S_TRF_PH_OTHER);
+    }
+}
+
+/* Live traffic-light snapshot: one block per intersection, a coloured dot per
+ * signal group. Emitted at the top of #trf-body so it refreshes with the page.
+ * No-op (nothing rendered) when no SPATEM has been received. */
+/* Renders IntersectionStatusObject into a short human sentence. Only the
+ * flags a bystander can actually observe are listed, ordered most-notable
+ * first: faults, then who is being given priority, then the base operating
+ * mode. `alert` reports whether anything abnormal is set, so the caller can
+ * colour it. Returns the length written (0 = nothing worth showing). */
+static size_t spat_status_text(uint16_t st, bool *alert, char *out, size_t cap)
+{
+    static const struct { uint16_t bit; bool warn; const char *de, *en; } F[] = {
+        { ITS_ISTAT_OFF,          true,  "abgeschaltet",       "switched off"       },
+        { ITS_ISTAT_FAILURE,      true,  "St&ouml;rung",       "fault"              },
+        { ITS_ISTAT_FAILURE_FLASH,true,  "Gelbblinken",        "flashing amber"     },
+        { ITS_ISTAT_STANDBY,      true,  "Bereitschaft",       "standby"            },
+        { ITS_ISTAT_MANUAL,       true,  "Handsteuerung",      "manual control"     },
+        { ITS_ISTAT_NO_MAP,       true,  "keine MAP",          "no MAP"             },
+        { ITS_ISTAT_NO_SPAT,      true,  "keine SPAT",         "no SPAT"            },
+        { ITS_ISTAT_PREEMPT,      true,  "Einsatzfahrt-Vorrang","emergency preempt" },
+        { ITS_ISTAT_PRIORITY,     false, "&Ouml;V-Bevorrangung","transit priority"  },
+        { ITS_ISTAT_STOPTIME,     false, "Haltezeit",          "stop time"          },
+        { ITS_ISTAT_FIXED_TIME,   false, "Festzeitprogramm",   "fixed-time"         },
+        { ITS_ISTAT_TRAFFIC_DEP,  false, "verkehrsabh&auml;ngig","traffic-actuated" },
+    };
+    size_t n = 0;
+    if (alert) *alert = false;
+    for (size_t i = 0; i < sizeof(F) / sizeof(F[0]); i++)
+    {
+        if (!(st & F[i].bit))
+            continue;
+        const char *w = current_lang == LANG_DE ? F[i].de : F[i].en;
+        int k = snprintf(out + n, cap - n, "%s%s", n ? ", " : "", w);
+        if (k < 0 || (size_t)k >= cap - n)
+            break;
+        n += (size_t)k;
+        if (F[i].warn && alert) *alert = true;
+    }
+    return n;
+}
+
+static void emit_traffic_lights(httpd_req_t *req)
+{
+    static spatem_intersection_t ints[SPATEM_MAX_INT];
+    int ni = spatem_snapshot(ints, SPATEM_MAX_INT);
+
+    char h[96];
+    snprintf(h, sizeof(h), "<h2>&#128678; %s</h2>", T(S_TRF_LIGHTS));
+    httpd_resp_send_chunk(req, h, HTTPD_RESP_USE_STRLEN);
+
+    if (ni == 0)
+    {
+        char none[160];
+        snprintf(none, sizeof(none), "<p><small>%s</small></p>", T(S_TRF_LIGHTS_NONE));
+        httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
+        return;
+    }
+
+    /* Explanation + colour legend, so the bare signal-group numbers below
+     * aren't cryptic. */
+    char legend[1280];
+    #define LG_DOT(col) "<span style='display:inline-block;width:11px;height:11px;" \
+        "border-radius:50%%;background:" col ";vertical-align:middle;margin:0 4px 0 10px'></span>"
+    snprintf(legend, sizeof(legend),
+        "<p><small>%s" LG_DOT("#2ecc40") "%s" LG_DOT("#f2b134") "%s"
+        LG_DOT("#e74c3c") "%s</small></p>",
+        T(S_TRF_LIGHTS_INTRO), T(S_TRF_PH_GREEN), T(S_TRF_PH_AMBER), T(S_TRF_PH_RED));
+    #undef LG_DOT
+    httpd_resp_send_chunk(req, legend, HTTPD_RESP_USE_STRLEN);
+
+    uint32_t now = (uint32_t)time(NULL);
+    for (int i = 0; i < ni; i++)
+    {
+        spatem_intersection_t *e = &ints[i];
+        unsigned long age = now > e->last_seen ? (unsigned long)(now - e->last_seen) : 0;
+        char agebuf[24];
+        if (current_lang == LANG_DE) snprintf(agebuf, sizeof(agebuf), "vor %lus", age);
+        else                         snprintf(agebuf, sizeof(agebuf), "%lus ago", age);
+
+        /* Prefer the MAPEM name ("Kaerntner Strasse - Busgarage"); the numeric
+         * id stays visible next to it, just demoted to the detail line. */
+        char nameesc[ITS_MAP_NAME_LEN * 6];
+        html_escape(e->name, nameesc, sizeof(nameesc));
+        /* Sized for the escaped name (up to ITS_MAP_NAME_LEN*6) plus the
+         * surrounding markup -- a truncated closing tag here would break the
+         * page layout, see the chip-buffer note above. */
+        char head[512];
+        if (e->name[0])
+            snprintf(head, sizeof(head),
+                "<p style='margin-bottom:4px'><b>%s %s</b> "
+                "<small>(%u/%u &middot; Rev %u &middot; %s)</small></p>"
+                "<div style='margin-bottom:10px'>",
+                T(S_TRF_INTERSECTION), nameesc, (unsigned)e->region,
+                (unsigned)e->id, (unsigned)e->revision, agebuf);
+        else
+            snprintf(head, sizeof(head),
+                "<p style='margin-bottom:4px'><b>%s %u/%u</b> "
+                "<small>(Rev %u &middot; %s)</small></p><div style='margin-bottom:10px'>",
+                T(S_TRF_INTERSECTION), (unsigned)e->region, (unsigned)e->id,
+                (unsigned)e->revision, agebuf);
+        httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+        /* Controller mode / fault line. 256 covers every flag name set at
+         * once (the German strings are the longer ones, ~186 bytes). */
+        bool st_alert = false;
+        char stbuf[256];
+        if (spat_status_text(e->status, &st_alert, stbuf, sizeof(stbuf)))
+        {
+            char stline[448];
+            snprintf(stline, sizeof(stline),
+                "<p style='margin:0 0 6px'><small style='color:%s'>%s%s</small></p>",
+                st_alert ? "#e74c3c" : "#94a0a8", st_alert ? "&#9888; " : "", stbuf);
+            httpd_resp_send_chunk(req, stline, HTTPD_RESP_USE_STRLEN);
+        }
+
+        /* Speed limit and reference lane width, when the MAPEM carried them. */
+        if (e->speed_max_kmh || e->lane_width_cm)
+        {
+            char geo[192], *g = geo;
+            size_t left = sizeof(geo);
+            int k = snprintf(g, left, "<p style='margin:0 0 6px'><small style='color:#94a0a8'>");
+            g += k; left -= (size_t)k;
+            if (e->speed_max_kmh)
+            {
+                k = snprintf(g, left, "%s %u km/h",
+                             current_lang == LANG_DE ? "Tempolimit" : "Speed limit",
+                             (unsigned)e->speed_max_kmh);
+                g += k; left -= (size_t)k;
+            }
+            if (e->lane_width_cm)
+                snprintf(g, left, "%s%s %u,%02u m",
+                         e->speed_max_kmh ? " &middot; " : "",
+                         current_lang == LANG_DE ? "Spurbreite" : "Lane width",
+                         (unsigned)(e->lane_width_cm / 100),
+                         (unsigned)(e->lane_width_cm % 100));
+            strlcat(geo, "</small></p>", sizeof(geo));
+            httpd_resp_send_chunk(req, geo, HTTPD_RESP_USE_STRLEN);
+        }
+
+        for (int s = 0; s < e->n; s++)
+        {
+            /* Generous buffer: the styled chip alone is ~224 bytes, plus the
+             * title text -- undersizing this once dropped the closing '>' of
+             * </span>, leaving an unclosed span that collapsed the page width. */
+            /* Countdown only when the RSU actually sent timing for this
+             * group and the deadline hasn't passed. */
+            char cd[64] = "";
+            if (e->change_at[s] > now && e->change_at[s] - now <= 600)
+                snprintf(cd, sizeof(cd), " <small style='color:#94a0a8'>%lus</small>",
+                         (unsigned long)(e->change_at[s] - now));
+
+            /* Prefer what the group actually controls over its bare number;
+             * the number stays as a small suffix so it can still be matched
+             * against the raw SPATEM data. */
+            char mv[64];
+            spat_movement_text(e, e->sg[s], mv, sizeof(mv));
+            char label[160];
+            if (mv[0])
+                snprintf(label, sizeof(label), "%s <small style='color:#94a0a8'>(%u)</small>",
+                         mv, (unsigned)e->sg[s]);
+            else
+                snprintf(label, sizeof(label), "%u", (unsigned)e->sg[s]);
+
+            char chip[512];
+            snprintf(chip, sizeof(chip),
+                "<span title='%s' style='display:inline-block;margin:2px 10px 2px 0;white-space:nowrap'>"
+                "<span style='display:inline-block;width:13px;height:13px;border-radius:50%%;"
+                "background:%s;vertical-align:middle;margin-right:4px'></span>%s%s</span>",
+                spat_phase_name(e->phase[s]), spat_phase_color(e->phase[s]),
+                label, cd);
+            httpd_resp_send_chunk(req, chip, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+    }
+}
+
+/* Closes #trf-body and emits the auto-refresh script + footer. Unlike the
+ * generic JSON-poll refresh, this re-fetches the page and swaps just the
+ * #trf-body fragment in place (no full reload, so the background animation
+ * keeps running), with the same floating pause/resume button. */
+static void traffic_refresh_footer(httpd_req_t *req, uint32_t ri)
+{
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+    if (ri > 0 && ri < 0xFFFFFFFF)
+    {
+        char script[1024];
+        snprintf(script, sizeof(script),
+            "<script>(function(){var ri=%lu,t=null;"
+            "function tick(){fetch(location.href,{cache:'no-store'}).then(function(r){return r.text();})"
+            ".then(function(h){var d=new DOMParser().parseFromString(h,'text/html');"
+            "var nb=d.getElementById('trf-body');"
+            "if(nb)document.getElementById('trf-body').innerHTML=nb.innerHTML;}).catch(function(){});}"
+            "window.addEventListener('load',function(){"
+            "var b=document.createElement('button');"
+            "b.style.cssText='position:fixed;bottom:12px;right:12px;z-index:99;opacity:.9;border-radius:4px;box-shadow:0 1px 4px #000';"
+            "function u(){b.textContent=(localStorage.getItem('ar')!=='0'?'\\u23f8 ':'\\u25b6 ')+ri+'s';}"
+            "b.onclick=function(){var on=localStorage.getItem('ar')==='0';localStorage.setItem('ar',on?'1':'0');"
+            "if(on){tick();t=setInterval(tick,ri*1000);}else{if(t)clearInterval(t);}u();};"
+            "u();document.body.appendChild(b);"
+            "if(localStorage.getItem('ar')!=='0'){t=setInterval(tick,ri*1000);}"
+            "});})();</script>",
+            (unsigned long)ri);
+        httpd_resp_send_chunk(req, script, HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t traffic_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+
+    uint32_t ri = 5;
+    config_get_u32(CONFIG_INDEX_REFRESH_SEC, &ri);
+
+    uint32_t hours = 24;
+    char query[48], val[16];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "hours", val, sizeof(val)) == ESP_OK)
+    {
+        uint32_t h = (uint32_t)strtoul(val, NULL, 10);
+        hours = (h == 168 || h == 720) ? h : 24;
+    }
+
+    static EXT_RAM_BSS_ATTR stat_hour_t rows[720];
+    int n = tstat_read(hours, rows, 720);   /* oldest-first */
+
+    send_page_header(req, T(S_TITLE_TRAFFIC));
+
+    const char *lc = current_lang == LANG_DE ? "de" : "en";
+    char head[768];
+    snprintf(head, sizeof(head),
+        "<p><small>%s</small></p>"
+        "<p>%s: <a href='/traffic?hours=24&lang=%s'>%s</a> &middot; "
+        "<a href='/traffic?hours=168&lang=%s'>%s</a> &middot; "
+        "<a href='/traffic?hours=720&lang=%s'>%s</a></p>",
+        T(S_TRF_INTRO), T(S_TRF_WINDOW),
+        lc, T(S_TRF_W_24H), lc, T(S_TRF_W_7D), lc, T(S_TRF_W_30D));
+    httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+    /* Everything below the intro/selector is the auto-refreshed fragment. */
+    httpd_resp_send_chunk(req, "<div id='trf-body'>", HTTPD_RESP_USE_STRLEN);
+
+    /* Live traffic-light phases first -- independent of the hourly stats, so
+     * it shows even right after boot before any hour has accumulated. */
+    emit_traffic_lights(req);
+
+    if (n == 0)
+    {
+        char nd[256];
+        snprintf(nd, sizeof(nd), "<div class='warn'>%s</div>", T(S_TRF_NODATA));
+        httpd_resp_send_chunk(req, nd, HTTPD_RESP_USE_STRLEN);
+        traffic_refresh_footer(req, ri);
+        return ESP_OK;
+    }
+
+    /* Window totals + per-category speed. */
+    uint64_t tot = 0;
+    uint64_t wsp_sum[STAT_NCAT] = {0}, wsp_cnt[STAT_NCAT] = {0};
+    uint32_t wsp_max[STAT_NCAT] = {0};
+    uint32_t max_total = 1;
+    for (int i = 0; i < n; i++)
+    {
+        tot += rows[i].total;
+        for (int c = 0; c < STAT_NCAT; c++)
+        {
+            wsp_sum[c] += rows[i].sp_sum[c];
+            wsp_cnt[c] += rows[i].sp_cnt[c];
+            if (rows[i].sp_max[c] > wsp_max[c]) wsp_max[c] = rows[i].sp_max[c];
+        }
+        if (rows[i].total > max_total) max_total = rows[i].total;
+    }
+    /* Overall speed across all vehicle categories. */
+    uint64_t osp_sum = 0, osp_cnt = 0; uint32_t osp_max = 0;
+    for (int c = 0; c < STAT_NCAT; c++)
+    {
+        osp_sum += wsp_sum[c]; osp_cnt += wsp_cnt[c];
+        if (wsp_max[c] > osp_max) osp_max = wsp_max[c];
+    }
+
+    char summary[512];
+    snprintf(summary, sizeof(summary),
+        "<div class='cards'>"
+        "<div class='card'><div class='l'>%s</div><div class='v'>%llu</div></div>"
+        "<div class='card'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>"
+        "</div>",
+        T(S_TRF_TOTAL), (unsigned long long)tot,
+        T(S_TRF_SPEED), (unsigned long)(osp_cnt ? osp_sum / osp_cnt : 0), (unsigned long)osp_max);
+    httpd_resp_send_chunk(req, summary, HTTPD_RESP_USE_STRLEN);
+
+    /* Speed by vehicle type (only categories that actually reported speed). */
+    static const int spcats[] = { STAT_CAT_CAR, STAT_CAT_BUS, STAT_CAT_TRUCK, STAT_CAT_TWOWHEEL };
+    bool any_speed = false;
+    for (unsigned k = 0; k < sizeof(spcats)/sizeof(spcats[0]); k++)
+        if (wsp_cnt[spcats[k]] > 0) { any_speed = true; break; }
+    if (any_speed)
+    {
+        char sh[128];
+        snprintf(sh, sizeof(sh), "<h3>%s</h3><div class='cards'>", T(S_TRF_SPEED_BY_TYPE));
+        httpd_resp_send_chunk(req, sh, HTTPD_RESP_USE_STRLEN);
+        for (unsigned k = 0; k < sizeof(spcats)/sizeof(spcats[0]); k++)
+        {
+            int c = spcats[k];
+            if (wsp_cnt[c] == 0) continue;
+            char card[192];
+            snprintf(card, sizeof(card),
+                "<div class='card'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>",
+                trf_cat_label((uint8_t)(c == STAT_CAT_CAR ? 5 : c == STAT_CAT_BUS ? 6 :
+                                        c == STAT_CAT_TRUCK ? 7 : 2)),
+                (unsigned long)(wsp_sum[c] / wsp_cnt[c]), (unsigned long)wsp_max[c]);
+            httpd_resp_send_chunk(req, card, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+    }
+
+    /* Per-hour table, newest first, capped for readability (summary above
+     * still covers the whole window). */
+    httpd_resp_send_chunk(req, "<div class='scroll'><table><tr><th>", HTTPD_RESP_USE_STRLEN);
+    char thead[384];
+    snprintf(thead, sizeof(thead),
+        "%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
+        "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
+        T(S_TRF_HOUR), T(S_TRF_TOTAL), T(S_CAT_CAR), T(S_CAT_BUS), T(S_CAT_TRUCK),
+        T(S_CAT_TWOWHEEL), T(S_CAT_PED), T(S_CAT_RSU), T(S_CAT_OTHER), T(S_TRF_SPEED));
+    httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
+
+    int shown = 0;
+    for (int i = n - 1; i >= 0 && shown < 72; i--, shown++)
+    {
+        stat_hour_t *h = &rows[i];
+        time_t t = (time_t)h->hour * 3600;
+        struct tm lt;
+        localtime_r(&t, &lt);
+        char when[24];
+        strftime(when, sizeof(when), "%m-%d %H:00", &lt);
+        unsigned pct = (unsigned)((uint64_t)h->total * 100 / max_total);
+
+        /* Overall speed for the hour, derived from the per-category fields. */
+        uint64_t hsp_sum = 0, hsp_cnt = 0; uint32_t hsp_max = 0;
+        for (int c = 0; c < STAT_NCAT; c++)
+        {
+            hsp_sum += h->sp_sum[c]; hsp_cnt += h->sp_cnt[c];
+            if (h->sp_max[c] > hsp_max) hsp_max = h->sp_max[c];
+        }
+
+        /* Number first, thin bar on its own line below -- the bar can span the
+         * full cell without ever colliding with the count. */
+        char row[512];
+        snprintf(row, sizeof(row),
+            "<tr><td>%s</td>"
+            "<td>%lu<div style='height:4px;background:#f2b134;border-radius:2px;"
+            "width:%u%%;min-width:2px;margin-top:3px'></div></td>"
+            "<td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td>"
+            "<td>%lu / %lu</td></tr>",
+            when, (unsigned long)h->total, pct,
+            (unsigned long)h->cat[STAT_CAT_CAR], (unsigned long)h->cat[STAT_CAT_BUS],
+            (unsigned long)h->cat[STAT_CAT_TRUCK], (unsigned long)h->cat[STAT_CAT_TWOWHEEL],
+            (unsigned long)h->cat[STAT_CAT_PED], (unsigned long)h->cat[STAT_CAT_RSU],
+            (unsigned long)h->cat[STAT_CAT_OTHER],
+            (unsigned long)(hsp_cnt ? hsp_sum / hsp_cnt : 0), (unsigned long)hsp_max);
+        httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+
+    /* --- Warning events (DENM) for the same window, newest first. --- */
+    char etitle[64];
+    snprintf(etitle, sizeof(etitle), "<h2>%s</h2>", T(S_EVT_TITLE));
+    httpd_resp_send_chunk(req, etitle, HTTPD_RESP_USE_STRLEN);
+
+    static EXT_RAM_BSS_ATTR event_rec_t evs[256];
+    int en = events_read(hours, evs, 256);
+    if (en == 0)
+    {
+        char none[192];
+        snprintf(none, sizeof(none), "<p><small>%s</small></p>", T(S_EVT_NONE));
+        httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
+    }
+    else
+    {
+        httpd_resp_send_chunk(req, "<div class='scroll'><table><tr><th>", HTTPD_RESP_USE_STRLEN);
+        char eh[160];
+        snprintf(eh, sizeof(eh), "%s</th><th>%s</th><th>%s</th></tr>",
+                 T(S_EVT_TIME), T(S_EVT_SENDER), T(S_EVT_WARNING));
+        httpd_resp_send_chunk(req, eh, HTTPD_RESP_USE_STRLEN);
+        for (int i = 0; i < en; i++)
+        {
+            time_t t = (time_t)evs[i].seconds;
+            struct tm lt;
+            localtime_r(&t, &lt);
+            char when[64];
+            strftime(when, sizeof(when), "%m-%d %H:%M:%S", &lt);
+            /* One row is one event; show how long it went on and how many
+             * broadcasts it took, rather than a row per broadcast. */
+            if (evs[i].count > 1 && evs[i].last_seen > evs[i].seconds)
+            {
+                time_t t2 = (time_t)evs[i].last_seen;
+                struct tm lt2;
+                localtime_r(&t2, &lt2);
+                char until[16];
+                strftime(until, sizeof(until), "%H:%M:%S", &lt2);
+                size_t w = strlen(when);
+                snprintf(when + w, sizeof(when) - w,
+                         " &ndash; %s <small>(%u&times;)</small>",
+                         until, (unsigned)evs[i].count);
+            }
+            /* 44 bytes of markup + when[64] + the category label + cause[160];
+             * sub-causes pushed `cause` past what 256 could hold. */
+            char erow[384];
+            /* Only cause 1 has been seen in real traffic and confirmed
+             * against tshark, so anything else shows its raw code rather
+             * than a guessed description. */
+            char cause[160];
+            const char *ct = denm_cause_text(evs[i].cause);
+            const char *st2 = denm_sub_text(evs[i].cause, evs[i].subcause);
+            if (ct && st2)
+                snprintf(cause, sizeof(cause), "%s <small>(%s)</small>", ct, st2);
+            else if (ct && evs[i].subcause)
+                snprintf(cause, sizeof(cause), "%s <small>(Detail %u)</small>",
+                         ct, (unsigned)evs[i].subcause);
+            else if (ct)
+                /* Sub-cause 0 means the sender explicitly said "unavailable".
+                 * Showing nothing made that look like a missing feature, so
+                 * say it plainly instead -- verified on real traffic: all 25
+                 * warnings in one recording carried cause 1, sub-cause 0. */
+                snprintf(cause, sizeof(cause), "%s <small>(%s)</small>", ct,
+                         current_lang == LANG_DE ? "ohne n&auml;here Angabe"
+                                                 : "no detail given");
+            else if (evs[i].cause == 0)
+                snprintf(cause, sizeof(cause), "%s", T(S_EVT_DENM));
+            else if (current_lang == LANG_DE)
+                snprintf(cause, sizeof(cause), "Gefahrenmeldung (Code %u)", (unsigned)evs[i].cause);
+            else
+                snprintf(cause, sizeof(cause), "Hazard notification (code %u)", (unsigned)evs[i].cause);
+            snprintf(erow, sizeof(erow),
+                "<tr><td>%s</td><td>%s</td><td>&#9888; %s</td></tr>",
+                when, trf_cat_label(evs[i].station_type), cause);
+            httpd_resp_send_chunk(req, erow, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    }
+
+    traffic_refresh_footer(req, ri);
+    return ESP_OK;
+}
+
+/* GET /tracks.json?days=N -- vehicle tracks for the map overlay, grouped by
+ * station so each vehicle becomes one polyline. Points come from the small
+ * running log, NOT from the PCAP archive: see tracklog.h for why. */
+/* GET /markers.json -- the same array the live feed pushes, but as a plain
+ * request so ANOTHER receiver's map page can fetch and merge it. Deliberately
+ * read by the browser rather than by the peer device: an ESP32 polling its
+ * neighbours would need an HTTP client on the box that is already decoding
+ * traffic-light messages ten times a second, for no gain when the person
+ * looking at the map can reach all of them anyway. */
+static esp_err_t markers_json_handler(httpd_req_t *req)
+{
+    static EXT_RAM_BSS_ATTR char json[6144];
+    size_t len = build_msg_json(json, sizeof(json));
+    httpd_resp_set_type(req, "application/json");
+    /* The page doing the reading is served by a different receiver, so the
+     * browser needs this to permit the cross-origin read. What it exposes is
+     * the same read-only telemetry the map already shows, and no credential
+     * is involved -- the endpoint neither reads nor sets anything. */
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, len);
+}
+
+static esp_err_t tracks_get_handler(httpd_req_t *req)
+{
+    uint32_t days = 2;
+    char query[48];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char val[8];
+        if (httpd_query_key_value(query, "days", val, sizeof(val)) == ESP_OK)
+        {
+            long d = strtol(val, NULL, 10);
+            if (d >= 1 && d <= 7) days = (uint32_t)d;
+        }
+    }
+
+    /* Sized for the MAXIMUM retention (7 days at the measured ~150 points an
+     * hour is ~25,000), not the typical case -- at 12,000 this had the same
+     * flaw just fixed in the prune: the read stops at the cap, and since the
+     * file is chronological, it is the newest tracks that would silently
+     * vanish from the map. 26,000 x 20 bytes is 520 KB of PSRAM, transient. */
+    const int MAXPT = 26000;
+    track_pt_t *pts = heap_caps_malloc(sizeof(track_pt_t) * MAXPT, MALLOC_CAP_SPIRAM);
+    if (!pts)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+    int n = tracklog_read(days, pts, MAXPT);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
+
+    /* The log is in time order, so a station's points are scattered through
+     * it. Walk it once per distinct station rather than sorting 12,000
+     * records in place -- station counts are small (tens), and this keeps
+     * peak memory to the one array. */
+    bool first_track = true;
+    bool client_gone = false;
+    for (int i = 0; i < n && !client_gone; i++)
+    {
+        if (pts[i].station_id == 0)
+            continue;                      /* already emitted below */
+        uint32_t sid = pts[i].station_id;
+        char head[64];
+        snprintf(head, sizeof(head), "%s{\"i\":%lu,\"t\":%u,\"p\":[",
+                 first_track ? "" : ",", (unsigned long)sid,
+                 (unsigned)pts[i].station_type);
+        /* A failed chunk send means the browser hung up (tab closed, phone
+         * locked). Without this check the handler kept marching through all
+         * 26,000 points, formatting and "sending" into a dead socket. */
+        if (httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN) != ESP_OK)
+        {
+            client_gone = true;
+            break;
+        }
+        first_track = false;
+
+        char buf[1024];
+        size_t bl = 0;
+        bool first_pt = true;
+        for (int j = i; j < n && !client_gone; j++)
+        {
+            if (pts[j].station_id != sid)
+                continue;
+            int k = snprintf(buf + bl, sizeof(buf) - bl, "%s[%ld,%ld]",
+                             first_pt ? "" : ",",
+                             (long)pts[j].lat_e7, (long)pts[j].lon_e7);
+            if (k < 0) break;
+            if (bl + (size_t)k >= sizeof(buf) - 32)
+            {
+                if (httpd_resp_send_chunk(req, buf, bl) != ESP_OK)
+                {
+                    client_gone = true;
+                    break;
+                }
+                bl = 0;
+                k = snprintf(buf, sizeof(buf), "%s[%ld,%ld]",
+                             first_pt ? "" : ",",
+                             (long)pts[j].lat_e7, (long)pts[j].lon_e7);
+            }
+            bl += (size_t)k;
+            first_pt = false;
+            pts[j].station_id = 0;         /* consumed */
+        }
+        if (bl && httpd_resp_send_chunk(req, buf, bl) != ESP_OK)
+            client_gone = true;
+        if (!client_gone &&
+            httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN) != ESP_OK)
+            client_gone = true;
+    }
+
+    if (!client_gone)
+    {
+        httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, NULL, 0);
+    }
+    heap_caps_free(pts);
+    return client_gone ? ESP_FAIL : ESP_OK;
 }
 
 static esp_err_t playback_get_handler(httpd_req_t *req)
@@ -1821,10 +3654,32 @@ static esp_err_t playback_get_handler(httpd_req_t *req)
     uint32_t from_sec = (uint32_t)from;
     uint32_t to_sec = (uint32_t)to;
 
+    /* An unmounted card would otherwise yield an empty array, which the page
+     * shows as "no data in this range" -- indistinguishable from a genuinely
+     * empty window. This actually misled a diagnosis: queried a minute after
+     * a reboot, playback looked broken when the card simply wasn't up yet. */
+    if (!sdcard_is_mounted())
+    {
+        /* This IDF's httpd only defines 500/501/505, so 500 it is -- the
+         * point is that the page sees an error instead of an empty array. */
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "SD card not mounted");
+        return ESP_FAIL;
+    }
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
-    playback_ctx_t ctx = { req, true };
+    /* ~2.5 KB on the httpd task's 16 KB stack; kept off `static` so two
+     * concurrent playback requests can't corrupt each other's state. */
+    playback_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.req = req;
+    ctx.first = true;
     sdpcap_read_positions(from_sec, to_sec, playback_emit, &ctx);
+    playback_flush(&ctx);
+    ESP_LOGI(TAG, "playback %lu..%lu: %lu entries, %lu duplicates dropped",
+             (unsigned long)from_sec, (unsigned long)to_sec,
+             (unsigned long)ctx.emitted, (unsigned long)ctx.skipped);
     httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -1921,6 +3776,10 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u32(CONFIG_INDEX_LED_OVERRIDE_COLOR, &led_override);
     uint32_t refresh_sec = 5;
     config_get_u32(CONFIG_INDEX_REFRESH_SEC, &refresh_sec);
+    uint32_t map_stale_sec = 60;
+    config_get_u32(CONFIG_INDEX_MAP_STALE_SEC, &map_stale_sec);
+    char peers_esc[CONFIG_PEERS_BUFFER_SIZE * 6];
+    settings_get_str(CONFIG_INDEX_PEERS, peers_esc, sizeof(peers_esc));
 
     /* Whether a web password is currently set. We never echo the password
      * itself back into the page, only whether one exists. */
@@ -1943,6 +3802,15 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u32(CONFIG_INDEX_PCAP_MAX_MB, &pcap_mb);
     config_get_u32(CONFIG_INDEX_PCAP_BUF_MB, &pcap_buf_mb);
     config_get_u32(CONFIG_INDEX_PCAP_FLUSH_SEC, &pcap_flush_sec);
+    uint8_t trk_on = 0, pcap_filt = 0;
+    uint32_t trk_days = 2;
+    config_get_u8(CONFIG_INDEX_TRACKS_ENABLE, &trk_on);
+    config_get_u8(CONFIG_INDEX_PCAP_FILTER, &pcap_filt);
+    config_get_u32(CONFIG_INDEX_TRACKS_DAYS, &trk_days);
+
+    uint32_t stats_days = 30, event_days = 30;
+    config_get_u32(CONFIG_INDEX_STATS_RETAIN_DAYS, &stats_days);
+    config_get_u32(CONFIG_INDEX_EVENT_RETAIN_DAYS, &event_days);
 #endif
 
     /* Ethernet: no static IP stored → DHCP. DNS applies in either mode. */
@@ -1994,7 +3862,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 
     /* --- General: identity, sniffer filtering, LED, UI refresh --- */
     static EXT_RAM_BSS_ATTR char general[4096];
-    snprintf(general, sizeof(general),
+    HTML_PRINTF(general,
         "<h2>%s</h2><table class='kv'>"
         /* size='16', not the field's full width: the HTML size attribute
          * skews auto-layout column width even under a CSS width:100% rule
@@ -2017,6 +3885,10 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td><input type='color' id='ledoverride' value='%s'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='refreshsec' type='number' min='0' max='3600' value='%lu' size='6'></td></tr>"
+        "<tr><th>%s</th><td><input id='mapstale' type='number' min='10' max='3600' value='%lu' size='6'>"
+        "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input id='peers' value='%s' maxlength='159' placeholder='its-node344.local, 192.168.178.40'>"
+        "<br><small>%s</small></td></tr>"
         "</table>",
         T(S_SET_GROUP_GENERAL),
         T(S_NODEID), nodeid,
@@ -2030,7 +3902,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_BROADCAST_ONLY), broadcast_only ? " checked" : "", T(S_BROADCAST_ONLY_HINT),
         T(S_LED_BRIGHTNESS), brightness, brightness,
         T(S_LED_OVERRIDE), led_color, T(S_LED_OVERRIDE_HINT),
-        T(S_REFRESH_SEC), (unsigned long)refresh_sec);
+        T(S_REFRESH_SEC), (unsigned long)refresh_sec,
+        T(S_MAP_STALE_SEC), (unsigned long)map_stale_sec, T(S_MAP_STALE_HINT),
+        T(S_PEERS), peers_esc, T(S_PEERS_HINT));
     httpd_resp_send_chunk(req, general, HTTPD_RESP_USE_STRLEN);
 
     /* --- Network --- */
@@ -2071,7 +3945,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 #if CONFIG_ENABLE_SD
     /* --- Storage (SD): logging + PCAP capture --- */
     static EXT_RAM_BSS_ATTR char storage[3072];
-    snprintf(storage, sizeof(storage),
+    HTML_PRINTF(storage,
         "<h2>%s</h2><table class='kv'>"
         "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
         "<tr><th>%s</th><td><input type='checkbox' id='logframes'%s></td></tr>"
@@ -2084,6 +3958,14 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td><input id='pcapbufmb' type='number' min='1' max='4' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='pcapflushsec' type='number' min='8' max='3600' value='%lu' size='6'></td></tr>"
+        "<tr><th>%s</th><td><select id='pcapfilt'>"
+        "<option value='0'%s>%s</option>"
+        "<option value='1'%s>%s</option>"
+        "<option value='2'%s>%s</option></select>"
+        "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='trkon'%s>"
+        "<br><small>%s</small></td></tr>"
+        "<tr><th>%s</th><td><input id='trkdays' type='number' min='1' max='7' value='%lu' size='6'></td></tr>"
         "</table>",
         T(S_SET_GROUP_STORAGE),
         T(S_LOG_SYS), log_sys ? " checked" : "",
@@ -2093,8 +3975,27 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_PCAP_RETAIN_HOURS), (unsigned long)pcap_hours,
         T(S_PCAP_MAX_MB), (unsigned long)pcap_mb, T(S_PCAP_HINT),
         T(S_PCAP_BUF_MB), (unsigned long)pcap_buf_mb, T(S_PCAP_BUF_HINT),
-        T(S_PCAP_FLUSH_SEC), (unsigned long)pcap_flush_sec);
+        T(S_PCAP_FLUSH_SEC), (unsigned long)pcap_flush_sec,
+        T(S_PCAP_FILTER),
+        pcap_filt == 0 ? " selected" : "", T(S_PCAP_FILT_ALL),
+        pcap_filt == 1 ? " selected" : "", T(S_PCAP_FILT_THIN),
+        pcap_filt == 2 ? " selected" : "", T(S_PCAP_FILT_VEH),
+        T(S_PCAP_FILT_HINT),
+        T(S_TRACKS_ENABLE), trk_on ? " checked" : "", T(S_TRACKS_HINT),
+        T(S_TRACKS_DAYS), (unsigned long)trk_days);
     httpd_resp_send_chunk(req, storage, HTTPD_RESP_USE_STRLEN);
+
+    /* --- Traffic page retention --- */
+    char trfset[768];
+    snprintf(trfset, sizeof(trfset),
+        "<h2>%s</h2><table class='kv'>"
+        "<tr><th>%s</th><td><input id='statsdays' type='number' min='1' max='30' value='%lu' size='6'></td></tr>"
+        "<tr><th>%s</th><td><input id='eventdays' type='number' min='1' max='30' value='%lu' size='6'></td></tr>"
+        "</table>",
+        T(S_SET_GROUP_TRAFFIC),
+        T(S_STATS_RETAIN_DAYS), (unsigned long)stats_days,
+        T(S_EVENT_RETAIN_DAYS), (unsigned long)event_days);
+    httpd_resp_send_chunk(req, trfset, HTTPD_RESP_USE_STRLEN);
 #endif
 
     /* --- Security --- */
@@ -2114,8 +4015,24 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, security, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR char save_block[4096];
-    snprintf(save_block, sizeof(save_block),
+    HTML_PRINTF(save_block,
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
+        /* The page is long enough that changing one field near the top meant
+         * scrolling all the way down to save. This bar appears as soon as
+         * anything is edited and stays within reach; it also doubles as the
+         * "you have unsaved changes" indicator, which the page had no way of
+         * showing before. The button at the top of this block stays, so the
+         * familiar way still works. */
+        "<style>#savebar{position:fixed;left:0;right:0;bottom:0;z-index:900;"
+        "display:none;padding:10px clamp(14px,4vw,32px);"
+        "background:rgba(21,25,29,.96);border-top:1px solid #2a2f34;"
+        "box-shadow:0 -4px 20px rgba(0,0,0,.45)}"
+        "#savebar .in{max-width:1400px;margin:0 auto;display:flex;"
+        "align-items:center;gap:12px;flex-wrap:wrap}"
+        "#savebar small{color:#f2b134}"
+        "body.dirty{padding-bottom:64px}</style>"
+        "<div id='savebar'><div class='in'><button onclick=\"save()\">%s</button>"
+        "<small>%s</small> <span id='result2'></span></div></div>"
         "<script>"
         "function save(){"
         "var p=new URLSearchParams();"
@@ -2126,6 +4043,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('led',document.getElementById('led').value);"
         "p.append('ledoverride',parseInt(document.getElementById('ledoverride').value.substring(1),16));"
         "p.append('refreshsec',document.getElementById('refreshsec').value);"
+        "p.append('mapstale',document.getElementById('mapstale').value);"
+        "p.append('peers',document.getElementById('peers').value);"
         "p.append('ntpserver',document.getElementById('ntpserver').value);"
         "p.append('webpasswd',document.getElementById('webpasswd').value);"
         "if(document.getElementById('webpwclear').checked)p.append('webpwclear','1');"
@@ -2138,6 +4057,11 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('pcapmaxmb',document.getElementById('pcapmaxmb').value);"
         "p.append('pcapbufmb',document.getElementById('pcapbufmb').value);"
         "p.append('pcapflushsec',document.getElementById('pcapflushsec').value);"
+        "p.append('pcapfilt',document.getElementById('pcapfilt').value);"
+        "p.append('trkon',document.getElementById('trkon').checked?'1':'0');"
+        "p.append('trkdays',document.getElementById('trkdays').value);"
+        "p.append('statsdays',document.getElementById('statsdays').value);"
+        "p.append('eventdays',document.getElementById('eventdays').value);"
 #endif
         "p.append('dhcp',document.getElementById('dhcp').checked?'1':'0');"
         "p.append('ethip',document.getElementById('ethip').value);"
@@ -2147,13 +4071,30 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('ethdns1',document.getElementById('ethdns1').value);"
         "p.append('ethdns2',document.getElementById('ethdns2').value);"
         "fetch('/settings?lang=%s',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
-        ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;});"
+        ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;"
+        "var r2=document.getElementById('result2');if(r2)r2.innerText=t;"
+        "markClean();});"
         "}"
+        /* Any edit anywhere in the page arms the bar. Bound with capture on
+         * the document so fields added later are covered too, and so this
+         * needs no per-field wiring. */
+        "function markDirty(){document.getElementById('savebar').style.display='block';"
+        "document.body.classList.add('dirty');}"
+        "function markClean(){document.getElementById('savebar').style.display='none';"
+        "document.body.classList.remove('dirty');}"
+        /* The mobile nav's burger toggle is itself a checkbox (.nvt), and a
+         * document-level listener hears it too -- opening the menu on a phone
+         * showed "unsaved changes" with nothing edited. Anything inside <nav>
+         * is chrome, not a setting. */
+        "function editEvt(e){if(e.target&&e.target.closest&&e.target.closest('nav'))return;"
+        "markDirty();}"
+        "document.addEventListener('input',editEvt,true);"
+        "document.addEventListener('change',editEvt,true);"
         "function dhcpToggle(){var d=document.getElementById('dhcp').checked;"
         "['ethip','ethnm','ethgw'].forEach(function(i){document.getElementById(i).disabled=d;});}"
         "dhcpToggle();"
         "</script>",
-        T(S_SAVE), lc);
+        T(S_SAVE), T(S_SAVE), T(S_UNSAVED), lc);
     httpd_resp_send_chunk(req, save_block, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -2256,6 +4197,33 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         unsigned long s = strtoul(value, NULL, 10);
         if (s <= 3600 && config_set_u32(CONFIG_INDEX_REFRESH_SEC, (uint32_t)s) == ESP_OK) saved++;
     }
+    if (httpd_query_key_value(buf, "pcapfilt", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long m = strtoul(value, NULL, 10);
+        if (m <= 2 && config_set_u8(CONFIG_INDEX_PCAP_FILTER, (uint8_t)m) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "trkon", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_TRACKS_ENABLE,
+                          value[0] == '1' ? 1 : 0) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "trkdays", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long d = strtoul(value, NULL, 10);
+        if (d >= 1 && d <= 7 &&
+            config_set_u32(CONFIG_INDEX_TRACKS_DAYS, (uint32_t)d) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "peers", value, sizeof(value)) == ESP_OK)
+    {
+        url_decode(value);
+        if (config_set_str(CONFIG_INDEX_PEERS, value) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "mapstale", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long s = strtoul(value, NULL, 10);
+        if (s >= 10 && s <= 3600 &&
+            config_set_u32(CONFIG_INDEX_MAP_STALE_SEC, (uint32_t)s) == ESP_OK) saved++;
+    }
     if (httpd_query_key_value(buf, "ntpserver", value, sizeof(value)) == ESP_OK)
     {
         url_decode(value);
@@ -2322,6 +4290,18 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         unsigned long mb = strtoul(value, NULL, 10);
         if (mb >= 1 && mb <= 100000 &&
             config_set_u32(CONFIG_INDEX_PCAP_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "statsdays", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long d = strtoul(value, NULL, 10);
+        if (d >= 1 && d <= 30 &&
+            config_set_u32(CONFIG_INDEX_STATS_RETAIN_DAYS, (uint32_t)d) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "eventdays", value, sizeof(value)) == ESP_OK)
+    {
+        unsigned long d = strtoul(value, NULL, 10);
+        if (d >= 1 && d <= 30 &&
+            config_set_u32(CONFIG_INDEX_EVENT_RETAIN_DAYS, (uint32_t)d) == ESP_OK) saved++;
     }
 #endif
     /* Ethernet / network — only touched when the form submitted the block, so a
@@ -2546,6 +4526,16 @@ static esp_err_t coredump_clear_post_handler(httpd_req_t *req)
     return e == ESP_OK ? ESP_OK : ESP_FAIL;
 }
 
+/* Zeroes the /system stability counters. Same open model as the other
+ * /system POST actions -- no user data, just diagnostic counters. */
+static esp_err_t stats_clear_post_handler(httpd_req_t *req)
+{
+    sysstat_reset();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
 static const char *task_state_str(eTaskState s)
 {
     switch (s)
@@ -2689,7 +4679,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s (%s)</th><td id='sys-ram-i'>%s / %s / %s</td></tr>"
         "<tr><th>%s (%s)</th><td id='sys-ram-p'>%s / %s / %s</td></tr>"
-        "</table><h2>%s</h2>",
+        "</table>",
         T(S_SYS_CHIP), CONFIG_IDF_TARGET, chip.revision, feat,
         T(S_SYS_CORES), chip.cores,
         T(S_SYS_CPU_FREQ), CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
@@ -2699,9 +4689,52 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         T(S_UPTIME), uptime_str,
         T(S_ETH_IP), eth_line,
         T(S_SYS_RAM_INT), T(S_SYS_TRIPLE), ri_f, ri_m, ri_t,
-        T(S_SYS_RAM_PSRAM), T(S_SYS_TRIPLE), rp_f, rp_m, rp_t,
-        T(S_SYS_TASKS));
+        T(S_SYS_RAM_PSRAM), T(S_SYS_TRIPLE), rp_f, rp_m, rp_t);
     httpd_resp_send_chunk(req, info, HTTPD_RESP_USE_STRLEN);
+
+    /* Stability counters (NVS-persisted, survive crash + power loss). */
+    char maxup_str[48];
+    format_uptime(sysstat_max_uptime_sec(), maxup_str, sizeof(maxup_str));
+    char lastcrash_str[64];
+    int64_t lc = sysstat_last_crash_time();
+    if (lc > 0)
+    {
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        int64_t ago = now.tv_sec - lc;
+        char ago_str[48];
+        format_uptime(ago > 0 ? (uint64_t)ago : 0, ago_str, sizeof(ago_str));
+        snprintf(lastcrash_str, sizeof(lastcrash_str), "%s %s",
+                 current_lang == LANG_DE ? "vor" : "", ago_str);
+    }
+    else
+    {
+        snprintf(lastcrash_str, sizeof(lastcrash_str), "%s", T(S_STAT_NEVER));
+    }
+
+    char stats[512];
+    snprintf(stats, sizeof(stats),
+        "<table class='kv'>"
+        "<tr><th>%s</th><td>%lu</td></tr>"
+        "<tr><th>%s</th><td>%lu</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
+        "</table>",
+        T(S_STAT_BOOTS),    (unsigned long)sysstat_boot_count(),
+        T(S_STAT_CRASHES),  (unsigned long)sysstat_crash_count(),
+        T(S_STAT_LASTCRASH), lastcrash_str,
+        T(S_STAT_MAXUP),    maxup_str);
+    httpd_resp_send_chunk(req, stats, HTTPD_RESP_USE_STRLEN);
+
+    char statsbtn[384];
+    snprintf(statsbtn, sizeof(statsbtn),
+        "<p><button onclick=\"if(confirm('%s'))fetch('/system/stats/clear',{method:'POST'}).then(()=>location.reload());\">%s</button></p>",
+        T(S_STAT_RESET_CONFIRM), T(S_STAT_RESET));
+    httpd_resp_send_chunk(req, statsbtn, HTTPD_RESP_USE_STRLEN);
+
+    char taskhdr[64];
+    snprintf(taskhdr, sizeof(taskhdr), "<h2>%s</h2>", T(S_SYS_TASKS));
+    httpd_resp_send_chunk(req, taskhdr, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req,
         "<div class='scroll'><table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
@@ -2766,18 +4799,66 @@ static esp_err_t system_json_get_handler(httpd_req_t *req)
 /*  GET/POST /update                                                  */
 /* ================================================================== */
 
+/* Unlike the playback bar, this one shows a real percentage: XMLHttpRequest
+ * reports upload progress, so there is an honest number to display. The
+ * button is disabled while it runs -- a second upload mid-flash would be
+ * genuinely harmful, not merely wasteful. */
 static const char UPDATE_FORM_FMT[] =
     "<p>%s</p>"
-    "<input type='file' id='fw'><button onclick='upload()'>%s</button>"
+    "<input type='file' id='fw'><button id='upbtn' onclick='upload()'>%s</button>"
+    "<style>@keyframes upflash{0%%{background-position:0 0}"
+    "100%%{background-position:40px 0}}"
+    "#upbar.busy{background-image:linear-gradient(115deg,"
+    "rgba(255,255,255,.35) 25%%,transparent 25%%,transparent 50%%,"
+    "rgba(255,255,255,.35) 50%%,rgba(255,255,255,.35) 75%%,transparent 75%%);"
+    "background-size:40px 40px;animation:upflash .9s linear infinite}</style>"
+    "<div id='upwrap' style='display:none;margin:12px 0;max-width:360px'>"
+    "<div style='height:8px;border-radius:4px;background:#2a3138;overflow:hidden'>"
+    "<div id='upbar' style='height:100%%;width:0;border-radius:4px;"
+    "background:linear-gradient(90deg,#f2b134,#ffc861);transition:width .2s'></div></div>"
+    "<p style='margin:6px 0 0'><small id='uppct'></small></p></div>"
     "<p id='result'></p>"
     "<script>"
     "function upload(){"
     "var f=document.getElementById('fw').files[0];"
     "if(!f){alert('%s');return;}"
+    "var b=document.getElementById('upbtn'),w=document.getElementById('upwrap'),"
+    "bar=document.getElementById('upbar'),pct=document.getElementById('uppct');"
+    "b.disabled=true;b.style.opacity=0.6;w.style.display='';bar.style.width='0';"
     "var xhr=new XMLHttpRequest();"
     "xhr.open('POST','/update?lang=%s');"
-    "xhr.onload=function(){document.getElementById('result').innerText=xhr.responseText;};"
-    "xhr.onerror=function(){document.getElementById('result').innerText='%s';};"
+    "xhr.upload.onprogress=function(e){if(!e.lengthComputable)return;"
+    "var p=Math.round(e.loaded*100/e.total);bar.style.width=p+'%%';"
+    "pct.textContent=p+'%% \\u00b7 '+(e.loaded/1048576).toFixed(1)+'/'"
+    "+(e.total/1048576).toFixed(1)+' MB';};"
+    /* Upload done, device now writing flash -- and this is where nearly all
+     * the waiting happens. onprogress measures what the browser handed to
+     * the network stack, not what the device has processed, so over a LAN it
+     * reaches 100%% almost at once and then falls silent. The bar therefore
+     * switches to an indeterminate stripe and says what is going on; an
+     * earlier version left this phase blank, which read as a freeze. */
+    "xhr.upload.onload=function(){bar.style.width='100%%';bar.className='busy';"
+    "pct.textContent='%s';};"
+    "xhr.onload=function(){b.disabled=false;b.style.opacity=1;"
+    "bar.className='';pct.textContent='';"
+    "document.getElementById('result').innerText=xhr.responseText;"
+    "if(xhr.status===200)waitBack();};"
+    /* The device reboots a moment after answering, and the page used to sit
+     * there unchanged forever -- nothing told the reader when it was safe to
+     * carry on. Poll a tiny static asset until it answers again, then go
+     * back to the status page. The first poll is delayed: right after the
+     * reply the device is still up, and an immediate success would "detect"
+     * a reboot that has not happened yet. */
+    "function waitBack(){var t0=Date.now(),r=document.getElementById('result'),"
+    "base=r.innerText;"
+    "setTimeout(function(){var iv=setInterval(function(){"
+    "r.innerText=base+' '+'%s'+' ('+Math.round((Date.now()-t0)/1000)+' s)';"
+    "fetch('/favicon.png?x='+Date.now(),{cache:'no-store'}).then(function(ok){"
+    "if(!ok.ok)return;clearInterval(iv);location.href='/';}).catch(function(){});"
+    "},2000);},6000);}"
+    "xhr.onerror=function(){b.disabled=false;b.style.opacity=1;bar.className='';"
+    "w.style.display='none';"
+    "document.getElementById('result').innerText='%s';};"
     "document.getElementById('result').innerText='%s';"
     "xhr.send(f);"
     "}"
@@ -2795,9 +4876,12 @@ static esp_err_t update_get_handler(httpd_req_t *req)
      * (this was the "OTA error always shows German" bug). */
     const char *lc = current_lang == LANG_DE ? "de" : "en";
 
-    char form[1024];
-    snprintf(form, sizeof(form), UPDATE_FORM_FMT,
-             T(S_UPD_INTRO), T(S_UPLOAD), T(S_UPD_CHOOSE_FILE), lc, T(S_UPLOAD_FAIL), T(S_UPLOADING));
+    /* Measured 2518 in German; 2560 left only 42 bytes of slack, and a
+     * truncated <script> here would silently disable the whole upload. */
+    char form[3072];
+    HTML_PRINTF(form, UPDATE_FORM_FMT,
+             T(S_UPD_INTRO), T(S_UPLOAD), T(S_UPD_CHOOSE_FILE), lc,
+             T(S_UPD_FLASHING), T(S_UPD_WAIT), T(S_UPLOAD_FAIL), T(S_UPLOADING));
 
     send_page_header(req, T(S_TITLE_UPDATE));
     httpd_resp_send_chunk(req, form, HTTPD_RESP_USE_STRLEN);
@@ -3380,6 +5464,55 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Deletes `path`, recursing into directories -- plain remove() only does
+ * rmdir() on a directory, which fails on any non-empty one (that silently
+ * left folders like a reused card's old dashcam directory undeletable).
+ *
+ * Works on ONE caller-owned buffer (append child name, recurse, truncate):
+ * the httpd task's stack is only 16 KB, so a per-level SD_PATH_MAX buffer
+ * would be far too expensive. `depth` bounds recursion on a corrupt card. */
+static bool sd_rm_tree(char *path, size_t size, int depth)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false;
+    if (!S_ISDIR(st.st_mode))
+        return remove(path) == 0;
+    if (depth <= 0)
+        return false;
+
+    size_t len = strlen(path);
+    /* Deleting entries while readdir() walks the same directory can make
+     * FATFS skip some, so repeat passes until one makes no more progress. */
+    for (;;)
+    {
+        DIR *d = opendir(path);
+        if (!d)
+            return false;
+        int removed = 0, left = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL)
+        {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            int n = snprintf(path + len, size - len, "/%s", e->d_name);
+            if (n <= 0 || (size_t)n >= size - len)
+                left++;
+            else if (sd_rm_tree(path, size, depth - 1))
+                removed++;
+            else
+                left++;
+            path[len] = '\0';
+        }
+        closedir(d);
+        if (left == 0)
+            break;
+        if (removed == 0)
+            return false;
+    }
+    return rmdir(path) == 0;
+}
+
 static esp_err_t sdcard_delete_handler(httpd_req_t *req)
 {
     resolve_language(req);
@@ -3392,8 +5525,8 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     }
 
     /* Bulk path: ?sel=a|b|c, same encoding as /sdcard/tar's ?sel= (percent-
-     * encoded '|' folded back first). Non-empty dirs/bad paths are silently
-     * skipped, best-effort. */
+     * encoded '|' folded back first). Directories are removed recursively
+     * (see sd_rm_tree); bad paths are silently skipped, best-effort. */
     char query[1024];
     char sel[1024] = "";
     bool have_sel = false;
@@ -3425,7 +5558,7 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
             if (tok[0] == '\0' || strstr(tok, "..") || has_control_char(tok)) { failed++; continue; }
             char full[SD_PATH_MAX];
             sd_full_path(tok, full, sizeof(full));
-            if (remove(full) != 0) failed++;
+            if (!sd_rm_tree(full, sizeof(full), 8)) failed++;
         }
         httpd_resp_sendstr(req, failed == 0 ? "OK" : "Error");
         return failed == 0 ? ESP_OK : ESP_FAIL;
@@ -3439,7 +5572,7 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     }
     char full[SD_PATH_MAX];
     sd_full_path(rel, full, sizeof(full));
-    if (remove(full) == 0)
+    if (sd_rm_tree(full, sizeof(full), 8))
     {
         httpd_resp_sendstr(req, "OK");
         return ESP_OK;
@@ -4030,6 +6163,14 @@ void webserver_init(void)
      * "httpd_sock_err: error in recv : 104" (ECONNRESET) warning on every
      * occurrence — pure noise, especially in the SD log. Only real errors. */
     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+    /* Same story one layer up: a tab closed without a clean WebSocket close
+     * makes every broadcast to that socket warn ("Failed to send WS header").
+     * Measured on a day of testing: 823 such lines, all of them describing a
+     * browser that had simply gone away -- nothing the device can act on,
+     * while crowding real entries out of the SD log. The skip-list in
+     * ws_broadcast_work already cuts the retries; this silences the rest.
+     * Genuine WebSocket faults still surface, they are logged at E. */
+    esp_log_level_set("httpd_ws", ESP_LOG_ERROR);
 
     msg_ring_mutex = xSemaphoreCreateMutex();
     if (!msg_ring_mutex)
@@ -4052,7 +6193,7 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 40; /* 35 routes today, plus a little headroom */
+    config.max_uri_handlers = 46; /* 41 routes today, plus a little headroom */
     /* /messages and /map each hold a /ws socket open for as long as the tab
      * is open -- 8 proved too tight once /map existed (accept() failures as
      * dead WS sessions piled up, see the reaping in ws_broadcast_work). */
@@ -4094,7 +6235,11 @@ void webserver_init(void)
         { .uri = "/system",   .method = HTTP_GET,  .handler = system_get_handler },
         { .uri = "/system.json", .method = HTTP_GET, .handler = system_json_get_handler },
         { .uri = "/system/coredump/clear", .method = HTTP_POST, .handler = coredump_clear_post_handler },
+        { .uri = "/system/stats/clear", .method = HTTP_POST, .handler = stats_clear_post_handler },
         { .uri = "/map",         .method = HTTP_GET, .handler = map_get_handler },
+        { .uri = "/spatem.json", .method = HTTP_GET, .handler = spatem_json_handler },
+        { .uri = "/lanes.json",  .method = HTTP_GET, .handler = lanes_json_handler },
+        { .uri = "/traffic",     .method = HTTP_GET, .handler = traffic_get_handler },
         { .uri = "/leaflet.js",  .method = HTTP_GET, .handler = leaflet_js_get_handler },
         { .uri = "/leaflet.css", .method = HTTP_GET, .handler = leaflet_css_get_handler },
         { .uri = "/favicon*",          .method = HTTP_GET, .handler = favicon_get_handler },
@@ -4107,6 +6252,8 @@ void webserver_init(void)
 #endif
 #if CONFIG_ENABLE_SD
         { .uri = "/map/playback",    .method = HTTP_GET,  .handler = playback_get_handler },
+        { .uri = "/tracks.json",     .method = HTTP_GET,  .handler = tracks_get_handler },
+        { .uri = "/markers.json",    .method = HTTP_GET,  .handler = markers_json_handler },
         { .uri = "/sdcard",          .method = HTTP_GET,  .handler = sdcard_get_handler },
         { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_handler },
         { .uri = "/sdcard/upload",   .method = HTTP_POST, .handler = sdcard_upload_handler },

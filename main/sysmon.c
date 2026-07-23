@@ -9,12 +9,17 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "mdns.h"
 
 #include "cmd_sniffer.h"
 #include "config.h"
 #include "events.h"
 #include "sysmon.h"
+#include "sysstat.h"
+#include "stats.h"
+#include "events_log.h"
+#include "tracklog.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
 #endif
@@ -60,6 +65,14 @@ static void sysmon_task(void *arg)
     for (;;)
     {
         vTaskDelay(pdMS_TO_TICKS(SYSMON_INTERVAL_MS));
+
+        /* Stability stats: track longest uptime + backfill last-crash time. */
+        sysstat_tick((uint32_t)(esp_timer_get_time() / 1000000ll));
+        /* Traffic statistics: flush a completed hour to SD if one rolled over. */
+        tstat_tick();
+        /* Warning-event log: flush any queued DENM events to SD. */
+        events_tick();
+        tracklog_tick();
 
         /* (4) Sniffer pipeline liveness. */
         if (sniffer_is_running())

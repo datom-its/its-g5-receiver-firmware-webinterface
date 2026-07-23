@@ -69,6 +69,12 @@ static esp_err_t config_get_pcap_retain_hours(uint32_t *out);
 static esp_err_t config_get_pcap_max_mb(uint32_t *out);
 static esp_err_t config_get_pcap_buf_mb(uint32_t *out);
 static esp_err_t config_get_pcap_flush_sec(uint32_t *out);
+static esp_err_t config_get_stats_retain_days(uint32_t *out);
+static esp_err_t config_get_event_retain_days(uint32_t *out);
+static esp_err_t config_get_map_stale_sec(uint32_t *out);
+static esp_err_t config_get_pcap_filter(uint8_t *out);
+static esp_err_t config_get_tracks_enable(uint8_t *out);
+static esp_err_t config_get_tracks_days(uint32_t *out);
 static esp_err_t config_set_web_password(const char *value);
 
 static const config_key_t config_keys[] = {
@@ -98,6 +104,13 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_PCAP_MAX_MB]        = { "pcapmaxmb",     NVS_TYPE_U32, 0,                           config_get_pcap_max_mb,        NULL },
     [CONFIG_INDEX_PCAP_BUF_MB]        = { "pcapbufmb",     NVS_TYPE_U32, 0,                           config_get_pcap_buf_mb,        NULL },
     [CONFIG_INDEX_PCAP_FLUSH_SEC]     = { "pcapflushsec",  NVS_TYPE_U32, 0,                           config_get_pcap_flush_sec,     NULL },
+    [CONFIG_INDEX_STATS_RETAIN_DAYS]  = { "statsdays",     NVS_TYPE_U32, 0,                           config_get_stats_retain_days,  NULL },
+    [CONFIG_INDEX_EVENT_RETAIN_DAYS]  = { "eventdays",     NVS_TYPE_U32, 0,                           config_get_event_retain_days,  NULL },
+    [CONFIG_INDEX_MAP_STALE_SEC]      = { "mapstale",      NVS_TYPE_U32, 0,                           config_get_map_stale_sec,      NULL },
+    [CONFIG_INDEX_PEERS]              = { "peers",         NVS_TYPE_STR, CONFIG_PEERS_BUFFER_SIZE,    NULL,                          NULL },
+    [CONFIG_INDEX_PCAP_FILTER]        = { "pcapfilt",      NVS_TYPE_U8,  0,                           config_get_pcap_filter,        NULL },
+    [CONFIG_INDEX_TRACKS_ENABLE]      = { "trkon",         NVS_TYPE_U8,  0,                           config_get_tracks_enable,      NULL },
+    [CONFIG_INDEX_TRACKS_DAYS]        = { "trkdays",       NVS_TYPE_U32, 0,                           config_get_tracks_days,        NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -339,6 +352,66 @@ static esp_err_t config_get_refresh_sec(uint32_t *out_val)
     return ESP_OK;
 }
 
+/* Thins the PCAP recording. Default 0 (record everything) -- an unfaithful
+ * capture should never be the surprise default. */
+static esp_err_t config_get_pcap_filter(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "pcapfilt", &out);
+    if (res != ESP_OK || out > 2)
+    {
+        if (res != ESP_OK && res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 0;
+    }
+    *out_val = out;
+    return ESP_OK;
+}
+
+/* Off by default: this writes to the SD card continuously, and the user asked
+ * for it as something to switch on deliberately. */
+static esp_err_t config_get_tracks_enable(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "trkon", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 0;
+    }
+    *out_val = out ? 1 : 0;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_tracks_days(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "trkdays", &out);
+    if (res != ESP_OK || out < 1 || out > 7)
+    {
+        if (res != ESP_OK && res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 2;
+    }
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_map_stale_sec(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "mapstale", &out);
+    if (res != ESP_OK || out < 10 || out > 3600)
+    {
+        if (res != ESP_OK && res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 60;  /* default: the previously hardcoded 60 s */
+    }
+    *out_val = out;
+    return ESP_OK;
+}
+
 static esp_err_t config_get_pcap_enable(uint8_t *out_val)
 {
     uint8_t out;
@@ -413,6 +486,38 @@ static esp_err_t config_get_pcap_flush_sec(uint32_t *out_val)
     }
     if (out == 0)
         out = 300;
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_stats_retain_days(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "statsdays", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 30;  /* default: 30 days */
+    }
+    if (out == 0 || out > 30)
+        out = 30;
+    *out_val = out;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_event_retain_days(uint32_t *out_val)
+{
+    uint32_t out;
+    esp_err_t res = nvs_get_u32(handle, "eventdays", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
+        out = 30;  /* default: keep 30 days */
+    }
+    if (out == 0 || out > 30)
+        out = 30;
     *out_val = out;
     return ESP_OK;
 }

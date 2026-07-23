@@ -25,9 +25,14 @@
 #include "sdcard.h"
 #include "sdlog.h"
 #include "sdpcap.h"
+#include "stats.h"
+#include "events_log.h"
+#include "tracklog.h"
+#include "spatem.h"
 #include "spi.h"
 #include "spi_eppp.h"
 #include "sysmon.h"
+#include "sysstat.h"
 #include "temperature.h"
 #include "webserver.h"
 
@@ -126,6 +131,10 @@ void app_main(void)
 
     config_init();
 
+    /* NVS is ready now; record this boot (and, if it was a crash, count it)
+     * before anything else can reboot us. */
+    sysstat_record_boot();
+
     ESP_LOGI(TAG, "Starting ITS-G5 receiver");
 
     led_init();
@@ -168,6 +177,10 @@ void app_main(void)
     webserver_init();
     sdlog_init();
     sdpcap_init();
+    tstat_init();
+    events_init();
+    tracklog_init();
+    spatem_init();
 
 #ifdef CONFIG_ENABLE_TEMPERATURE
     temperature_init();

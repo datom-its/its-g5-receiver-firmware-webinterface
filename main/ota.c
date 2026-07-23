@@ -182,7 +182,9 @@ static int ota_cmd(int argc, char **argv)
             return 1;
         }
 
-        strcpy(https_url, ota_args.url->sval[0]);
+        /* Console-typed URL into a fixed buffer: bound it. (Upstream used
+         * strcpy; a >1 KB paste would have overflowed.) */
+        snprintf(https_url, sizeof(https_url), "%s", ota_args.url->sval[0]);
         reboot_after_update = ota_args.reboot->count;
 
         const esp_partition_t* other_app = esp_ota_get_next_update_partition(NULL);

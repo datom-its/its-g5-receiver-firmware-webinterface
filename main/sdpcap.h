@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cmd_sniffer.h"
+#include "its_decode.h"   /* its_decoded_t, handed to the playback callback */
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,10 +17,11 @@ void sdpcap_init(void);
  * internally if capture is disabled or not yet initialized. */
 void sdpcap_handle_packet(sniffer_packet_info_t *packet);
 
+/* Hands over the whole decode result rather than a hand-picked subset: the
+ * previous per-field signature silently dropped everything added later (line
+ * number, vehicle size), so playback showed less than the live map. */
 typedef void (*sdpcap_position_cb_t)(uint32_t seconds, uint32_t microseconds,
-                                      uint32_t station_id, int32_t lat_e7, int32_t lon_e7,
-                                      bool has_speed, int32_t speed_cmps,
-                                      const char *label, void *ctx);
+                                      const its_decoded_t *decoded, void *ctx);
 
 /* Reads back stored PCAP files covering [from_sec, to_sec] (device
  * wall-clock epoch seconds), decoding each frame's position (and speed, for
