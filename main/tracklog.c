@@ -182,13 +182,20 @@ void tracklog_tick(void)
     if (!s_lock || !sdcard_is_mounted())
         return;
 
+    /* Guards the append and the prune rewrite below against unmount/format. */
+    if (!sdcard_io_begin())
+        return;
+
     /* Static, not a stack local: this runs on the sysmon task, whose whole
      * stack is 4096 bytes -- a 1.9 KB batch there plus stdio internals would
      * flirt with overflow. Only sysmon ever calls this, sequentially. */
     static track_pt_t batch[TR_QUEUE];
     int count = 0;
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE)
+    {
+        sdcard_io_end();
         return;
+    }
     while (s_qcount > 0 && count < TR_QUEUE)
     {
         batch[count++] = s_queue[s_qhead];
@@ -204,6 +211,7 @@ void tracklog_tick(void)
         if (!f)
         {
             ESP_LOGW(TAG, "cannot open %s", TR_CSV);
+            sdcard_io_end();
             return;
         }
         for (int i = 0; i < count; i++)
@@ -217,22 +225,32 @@ void tracklog_tick(void)
     }
 
     /* Pruning rewrites the whole file, so do it rarely -- roughly hourly at
-     * the sysmon tick rate, which is ample for a days-long retention. */
-    if ((s_flushes % 64) == 0)
+     * the sysmon tick rate, which is ample for a days-long retention.
+     * Counts TICKS, not flushes: keying it on the flush counter meant that
+     * with nothing to write (night, no vehicles in range) the counter stayed
+     * put at a multiple of 64 and every single tick rewrote the whole file --
+     * hours of pointless traffic on the very SD bus behind the known crash. */
+    static uint32_t prune_ticks;
+    if (++prune_ticks >= 64)
     {
+        prune_ticks = 0;
         time_t now = time(NULL);
         if (now > 1600000000)
             prune((uint32_t)(now - (time_t)tracks_days() * 86400));
     }
+    sdcard_io_end();
 }
 
 int tracklog_read(uint32_t days, track_pt_t *out, int max)
 {
-    if (!out || max <= 0 || !sdcard_is_mounted())
+    if (!out || max <= 0 || !sdcard_io_begin())
         return 0;
     FILE *f = fopen(TR_CSV, "r");
     if (!f)
+    {
+        sdcard_io_end();
         return 0;
+    }
 
     time_t now = time(NULL);
     uint32_t from = (now > 1600000000 && days)
@@ -257,6 +275,7 @@ int tracklog_read(uint32_t days, track_pt_t *out, int max)
         n++;
     }
     fclose(f);
+    sdcard_io_end();
     return n;
 }
 

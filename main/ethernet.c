@@ -59,6 +59,19 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
             {
                 ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
             }
+            /* A static IP produces no DHCP lease and therefore no
+             * IP_EVENT_ETH_GOT_IP on reconnect, so the "got IP" event has to
+             * be raised here as well -- the link-down handler already stopped
+             * MQTT via LOST_IP, and without this nothing ever restarts it.
+             * DHCP units recover on their own and must not get a duplicate. */
+            if (static_ip)
+            {
+                post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
+                if (post_res != ESP_OK)
+                {
+                    ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
+                }
+            }
         }
         break;
     case ETHERNET_EVENT_DISCONNECTED:

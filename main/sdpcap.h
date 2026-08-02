@@ -19,8 +19,10 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet);
 
 /* Hands over the whole decode result rather than a hand-picked subset: the
  * previous per-field signature silently dropped everything added later (line
- * number, vehicle size), so playback showed less than the live map. */
-typedef void (*sdpcap_position_cb_t)(uint32_t seconds, uint32_t microseconds,
+ * number, vehicle size), so playback showed less than the live map.
+ * Returns false to abort the walk -- the HTTP consumer uses this when its
+ * client has hung up, so a reply nobody is reading stops costing SD reads. */
+typedef bool (*sdpcap_position_cb_t)(uint32_t seconds, uint32_t microseconds,
                                       const its_decoded_t *decoded, void *ctx);
 
 /* Reads back stored PCAP files covering [from_sec, to_sec] (device

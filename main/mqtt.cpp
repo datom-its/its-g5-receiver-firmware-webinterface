@@ -1,7 +1,12 @@
 #include "sdkconfig.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 #include "ArduinoJson.h"
 
@@ -40,6 +45,36 @@ static char stats_topic[128];
 static char info_topic[128];
 
 static esp_timer_handle_t stats_timer_handle;
+
+/* ------------------------------------------------------------------ *
+ * Two worker tasks, both for the same reason: esp-mqtt holds its API
+ * lock across the whole receive/dispatch section, so anything that runs
+ * inside an event callback and then waits on something which itself
+ * needs that lock deadlocks the client permanently.
+ *
+ *  - cmd worker: `sniffer --stop` waits for the sniffer task to finish,
+ *    while the sniffer task is inside esp_mqtt_client_publish() waiting
+ *    for the very lock the event callback still holds. Neither ever
+ *    wakes up, and because is_running is already false by then sysmon's
+ *    heartbeat check skips the sniffer entirely -- no watchdog rescue.
+ *  - tx worker: publishing straight from the sniffer hot path blocks
+ *    that task for as long as the broker's TCP send takes. A stalled
+ *    broker then starves SD capture and the event log too, which is
+ *    backwards: MQTT feeds a live map and is the one sink where
+ *    dropping is correct (see the QoS0/no-store-and-forward decision).
+ * ------------------------------------------------------------------ */
+#define MQTT_CMD_QUEUE_LEN   4
+#define MQTT_CMD_MAX_LEN   160
+#define MQTT_TX_QUEUE_LEN   32
+
+typedef struct {
+    uint8_t *payload;      /* heap copy, freed by the tx worker */
+    int      length;
+} mqtt_tx_item_t;
+
+static QueueHandle_t cmd_queue;
+static QueueHandle_t tx_queue;
+static uint32_t tx_dropped;
 
 static void mqtt_set_connected(bool new_connected)
 {
@@ -137,24 +172,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             ESP_LOGD(TAG, "DATA=%.*s\r\n", event->data_len, event->data);
             if (strlen(command_topic) == event->topic_len && !strncmp(event->topic, command_topic, event->topic_len))
             {
-                std::string cmd{event->data, static_cast<size_t>(event->data_len)};
-                ESP_LOGI(TAG, "Running command '%s'", cmd.c_str());
-
-                int ret;
-                int res = esp_console_run(cmd.c_str(), &ret);
-                char result_buf[128];
-                if (res != ESP_OK)
-                {
-                    snprintf(result_buf, sizeof(result_buf), "esp_console_run failed: %s", esp_err_to_name(res));
-                    ESP_LOGE(TAG, "%s", result_buf);
-                    break;
-                }
-                else
-                {
-                    snprintf(result_buf, sizeof(result_buf), "%d", ret);
-                }
-
-                esp_mqtt_client_publish(client, result_topic, result_buf, strlen(result_buf), 0, 0);
+                /* Handed to the cmd worker instead of run here: this callback
+                 * runs with esp-mqtt's API lock held, and a command that waits
+                 * on a task which itself wants to publish would deadlock the
+                 * client for good (see the note at the top of this file). */
+                char cmd[MQTT_CMD_MAX_LEN];
+                int n = event->data_len;
+                if (n >= (int)sizeof(cmd))
+                    n = (int)sizeof(cmd) - 1;
+                memcpy(cmd, event->data, n);
+                cmd[n] = '\0';
+                if (!cmd_queue || xQueueSend(cmd_queue, cmd, 0) != pdTRUE)
+                    ESP_LOGW(TAG, "command queue full, dropping '%s'", cmd);
             }
             break;
         case MQTT_EVENT_ERROR:
@@ -174,6 +203,51 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         default:
             ESP_LOGI(TAG, "Other event id:%d", event->event_id);
             break;
+    }
+}
+
+/* Runs console commands arriving over MQTT, off the mqtt task -- see the
+ * deadlock note above. Publishing the result from here is safe: by then the
+ * event callback has long returned and released the API lock. */
+static void mqtt_cmd_task(void *)
+{
+    char cmd[MQTT_CMD_MAX_LEN];
+    for (;;)
+    {
+        if (xQueueReceive(cmd_queue, cmd, portMAX_DELAY) != pdTRUE)
+            continue;
+
+        ESP_LOGI(TAG, "Running command '%s'", cmd);
+        int ret = 0;
+        int res = esp_console_run(cmd, &ret);
+
+        char result_buf[128];
+        if (res != ESP_OK)
+        {
+            snprintf(result_buf, sizeof(result_buf), "esp_console_run failed: %s", esp_err_to_name(res));
+            ESP_LOGE(TAG, "%s", result_buf);
+            continue;
+        }
+        snprintf(result_buf, sizeof(result_buf), "%d", ret);
+        if (client && connected)
+            esp_mqtt_client_publish(client, result_topic, result_buf, strlen(result_buf), 0, 0);
+    }
+}
+
+/* Drains captured frames to the broker. Blocking here costs nothing but MQTT
+ * latency; the sniffer task stays free to feed the SD capture and the logs. */
+static void mqtt_tx_task(void *)
+{
+    mqtt_tx_item_t item;
+    for (;;)
+    {
+        if (xQueueReceive(tx_queue, &item, portMAX_DELAY) != pdTRUE)
+            continue;
+        if (client && connected)
+            esp_mqtt_client_publish(client, packet_topic,
+                                    reinterpret_cast<const char *>(item.payload),
+                                    item.length, 0, 0);
+        free(item.payload);
     }
 }
 
@@ -306,15 +380,45 @@ static void app_event_handler(void *handler_args, esp_event_base_t base, int32_t
 
 extern "C" void mqtt_handle_packet(sniffer_packet_info_t *packet)
 {
-    if (!client || !connected)
+    if (!client || !connected || !tx_queue)
         return;
 
-    esp_mqtt_client_publish(client, packet_topic, static_cast<const char *>(packet->payload), packet->length, 0, 0);
+    /* One copy here, handed over to the tx worker which frees it. Dropping
+     * when the queue is full is deliberate: this is a live feed on QoS0, and
+     * a slow broker must not be able to stall the sniffer (and with it the SD
+     * capture and the event log). */
+    mqtt_tx_item_t item;
+    item.length = packet->length;
+    item.payload = static_cast<uint8_t *>(malloc(packet->length));
+    if (!item.payload)
+        return;
+    memcpy(item.payload, packet->payload, packet->length);
+
+    if (xQueueSend(tx_queue, &item, 0) != pdTRUE)
+    {
+        free(item.payload);
+        if ((++tx_dropped % 1000) == 1)
+            ESP_LOGW(TAG, "MQTT publish queue full, %lu frame(s) dropped so far",
+                     (unsigned long)tx_dropped);
+    }
 }
 
 extern "C" void mqtt_init(void)
 {
     esp_event_handler_register(APP_EVENT_BASE, ESP_EVENT_ANY_ID, app_event_handler, NULL);
+
+    cmd_queue = xQueueCreate(MQTT_CMD_QUEUE_LEN, MQTT_CMD_MAX_LEN);
+    tx_queue = xQueueCreate(MQTT_TX_QUEUE_LEN, sizeof(mqtt_tx_item_t));
+    if (!cmd_queue || !tx_queue)
+    {
+        ESP_LOGE(TAG, "could not create MQTT worker queues");
+    }
+    else
+    {
+        /* 4 KB: a console command can reach into sniffer/OTA/config code. */
+        xTaskCreate(mqtt_cmd_task, "mqtt_cmd", 4096, NULL, 4, NULL);
+        xTaskCreate(mqtt_tx_task, "mqtt_tx", 3072, NULL, 4, NULL);
+    }
 
     esp_timer_create_args_t create_args = {
         .callback = publish_stats_timer_cb,

@@ -235,7 +235,9 @@ static void sdlog_task(void *arg)
     {
         vTaskDelay(pdMS_TO_TICKS(FLUSH_INTERVAL_MS));
 
-        if (!sdcard_is_mounted())
+        /* Held across the flush so an unmount/format can't free the
+         * filesystem while this task is inside fwrite. */
+        if (!sdcard_io_begin())
         {
             dir_ok = false;
             continue;
@@ -250,6 +252,7 @@ static void sdlog_task(void *arg)
             flush_stream(&sys_stream);
         if (frame_stream.ring.used)
             flush_stream(&frame_stream);
+        sdcard_io_end();
     }
 }
 

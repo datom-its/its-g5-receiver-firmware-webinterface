@@ -29,10 +29,17 @@ static const char TAG[] = "SDCARD";
 
 static sdmmc_card_t *card = NULL;
 
-/* Serialises mount/unmount, which mutate `card` and touch the shared SPI bus.
- * Needed because both the web UI (httpd task) and the system monitor's
- * auto-remount can call these. First use is from app_main (single-threaded),
- * so the lazy create below is race-free in practice. */
+/* Serialises mount/unmount/format, which mutate `card` and touch the shared
+ * SPI bus, AND the file I/O of every writer task (via sdcard_io_begin/end).
+ * Both are needed: the web UI (httpd task), the system monitor's auto-remount
+ * and the console can unmount or format, while sdlog/sdpcap/tracklog/
+ * events_log are writing -- without a common lock an unmount frees the FATFS
+ * structures an in-flight fwrite is still using (use-after-free, and the
+ * resulting crash looks exactly like the known SD/SPI driver bug).
+ * Serialising the writers against each other too is a bonus rather than a
+ * cost: the card is a single serial device on a bus shared with Ethernet.
+ * First use is from app_main (single-threaded), so the lazy create below is
+ * race-free in practice. */
 static SemaphoreHandle_t sd_lock;
 
 static void sd_lock_take(void)
@@ -63,6 +70,22 @@ bool sdcard_is_mounted(void)
     return card != NULL;
 }
 
+bool sdcard_io_begin(void)
+{
+    sd_lock_take();
+    if (card == NULL)
+    {
+        sd_lock_give();
+        return false;
+    }
+    return true;
+}
+
+void sdcard_io_end(void)
+{
+    sd_lock_give();
+}
+
 esp_err_t sdcard_mount(void)
 {
     sd_lock_take();
@@ -72,8 +95,17 @@ esp_err_t sdcard_mount(void)
     }
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,
-        .max_files = 4,
+        /* NOT true: an unreadable filesystem is far more often a card the
+         * driver stumbled over (or one carrying data from elsewhere) than a
+         * card that wants erasing, and auto-format would silently destroy the
+         * whole PCAP archive and log history on a mount that failed for any
+         * reason. Formatting is available on demand on the /sdcard page. */
+        .format_if_mount_failed = false,
+        /* Concurrent openers: sdlog, sdpcap, tracklog, events_log, plus
+         * whatever the web UI has open for a download -- 4 was below the
+         * real worst case, and the overflow shows up as a sporadic,
+         * unexplained fopen failure in whichever writer asked last. */
+        .max_files = 8,
         .allocation_unit_size = 16 * 1024
     };
 

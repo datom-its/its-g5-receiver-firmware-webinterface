@@ -32,6 +32,8 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.23.0-webui** | The map can show the vehicle tracks of every configured receiver at once, each in its own colour, as a second switchable layer. |
+| **0.22.7-webui** | Fixes 28 defects, among them a script injection from a MAPEM intersection name, a deadlock on an MQTT `sniffer --stop`, an SD unmount racing an in-flight write, and four decoder faults. Each device now advertises a unique mDNS instance name and browser-tab title. |
 | **0.22.4-webui** | All decoders (CAM, DENM, SPATEM, MAPEM) validated against the ETSI standards, fixing the DENM cause code and CAM size limits. Adds vehicle detail in map popups (heading, braking, lights, role), a switchable vehicle-track layer, multi-receiver map sharing, and recording thinning. |
 | **0.20.2-webui** | The SD system log now writes a dated header line (`===== YYYY-MM-DD (Day) =====`) at each session start and midnight rollover, so a multi-day log can be pinned to a calendar day. |
 | **0.20.1-webui** | The status and system pages update live via a small JSON poll instead of reloading the whole page — the animated background no longer restarts each refresh, and `/system`'s uptime, RAM and task table now actually update while open. |

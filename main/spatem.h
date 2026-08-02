@@ -70,5 +70,12 @@ int spatem_snapshot(spatem_intersection_t *out, int max);
  * ~5.5 KB per intersection lives in PSRAM, allocated on first use. */
 void spatem_note_geometry(const uint8_t *frame, size_t len, const its_map_t *m);
 
-/* The cached geometry for an intersection, or NULL if none is held. */
+/* The cached geometry for an intersection, or NULL if none is held.
+ * The returned pointer aims into a buffer the packet path re-decodes IN
+ * PLACE when the intersection publishes a new revision, so a caller that
+ * walks the lanes must hold spatem_geometry_lock() for as long as it uses
+ * the pointer -- otherwise it can observe a half-old, half-new mixture.
+ * Always pair with spatem_geometry_unlock(), including on early returns. */
+void spatem_geometry_lock(void);
+void spatem_geometry_unlock(void);
 const its_map_geom_t *spatem_geometry(uint16_t region, uint16_t id);

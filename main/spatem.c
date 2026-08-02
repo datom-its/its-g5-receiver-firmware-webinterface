@@ -17,9 +17,15 @@ static SemaphoreHandle_t s_lock;
 /* Lane geometry, one slot per cached intersection. Big enough that it only
  * belongs in PSRAM; allocated on first sight of an intersection and then
  * reused. `ready` is set last, so a reader either sees a fully decoded
- * geometry or none -- good enough for what is purely map decoration. */
+ * geometry or none -- but that alone only covers the FIRST decode: a new
+ * revision (or a slot taken over by another intersection) re-decodes in
+ * place, which a reader already walking the lanes would see as a torn mix of
+ * old and new. s_geom_lock closes that window; it is separate from s_lock so
+ * an HTTP reader walking geometry can't block the SPAT hot path's own
+ * bookkeeping. */
 static its_map_geom_t *s_geom[SPATEM_MAX_INT];
 static bool s_geom_ready[SPATEM_MAX_INT];
+static SemaphoreHandle_t s_geom_lock;
 static const char TAG[] = "SPATEM";
 
 void spatem_init(void)
@@ -27,6 +33,19 @@ void spatem_init(void)
     s_count = 0;
     memset(s_int, 0, sizeof(s_int));
     s_lock = xSemaphoreCreateMutex();
+    s_geom_lock = xSemaphoreCreateMutex();
+}
+
+void spatem_geometry_lock(void)
+{
+    if (s_geom_lock)
+        xSemaphoreTake(s_geom_lock, portMAX_DELAY);
+}
+
+void spatem_geometry_unlock(void)
+{
+    if (s_geom_lock)
+        xSemaphoreGive(s_geom_lock);
 }
 
 void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
@@ -65,6 +84,16 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
     }
 
     spatem_intersection_t *e = &s_int[slot];
+    /* A slot taken over by a DIFFERENT intersection must start empty: the
+     * assignments below only cover the SPAT-derived fields, so the previous
+     * occupant's MAPEM data (name, lane width, speed limits, movement and
+     * pedestrian tables) and its RSU position would otherwise stay attached
+     * to the new one -- shown in the UI under the wrong name, with the old
+     * intersection's arrows matched against signal-group numbers that merely
+     * happen to overlap. */
+    if (!same_intersection)
+        memset(e, 0, sizeof(*e));
+
     uint8_t n = s->n <= ITS_SPAT_MAX_SG ? s->n : ITS_SPAT_MAX_SG;
 
     /* Phase-end deadlines: take a fresh one whenever this message carried
@@ -207,9 +236,13 @@ void spatem_note_geometry(const uint8_t *frame, size_t len, const its_map_t *m)
         }
     }
 
+    /* Held across the in-place re-decode so a reader iterating this same
+     * buffer never sees half of the previous revision and half of this one. */
+    spatem_geometry_lock();
     s_geom_ready[slot] = false;
     if (its_decode_map_geometry(frame, len, s_geom[slot]))
         s_geom_ready[slot] = true;
+    spatem_geometry_unlock();
 }
 
 const its_map_geom_t *spatem_geometry(uint16_t region, uint16_t id)

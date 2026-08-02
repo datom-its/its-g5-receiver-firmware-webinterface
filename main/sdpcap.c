@@ -338,11 +338,14 @@ static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxca
 
 void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
-    if (!cb || !sdcard_is_mounted())
+    /* Same lock as the writer: without it the prune sweep can delete (and the
+     * writer can rotate) a file this walk has open. */
+    if (!cb || !sdcard_io_begin())
         return;
 
+    bool aborted = false;
     time_t bucket = (time_t)from_sec - ((time_t)from_sec % 3600);
-    for (; bucket <= (time_t)to_sec; bucket += 3600)
+    for (; bucket <= (time_t)to_sec && !aborted; bucket += 3600)
     {
         char path[96];
         sdpcap_current_path(path, sizeof(path), bucket);
@@ -380,17 +383,26 @@ void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_c
 
             its_decoded_t d;
             its_decode_frame(buf, rh.caplen, &d);
-            if (d.has_position)
-                cb(rh.sec, rh.usec, &d, ctx);
+            if (d.has_position && !cb(rh.sec, rh.usec, &d, ctx))
+            {
+                aborted = true;   /* consumer gave up (e.g. client hung up) */
+                break;
+            }
         }
         fclose(f);
     }
+    sdcard_io_end();
 }
 
 /* Flushes the ring to `path` (the file for the hour its contents belong to
  * -- see sdpcap_task's hour-boundary handling), draining in fixed 4 KB
- * chunks rather than needing a buffer the size of the whole ring. */
-static void sdpcap_flush_to(const char *path)
+ * chunks rather than needing a buffer the size of the whole ring.
+ * `limit` caps how many bytes are taken; 0 means "drain everything". The cap
+ * matters at an hour boundary: the sniffer keeps appending during the flush,
+ * and those records belong to the NEW hour. Writing them into the old hour's
+ * file put them past the reader's +5 s plausibility window, where playback
+ * rejects them and then gives up on the rest of the file. */
+static void sdpcap_flush_to(const char *path, size_t limit)
 {
     FILE *f = fopen(path, "ab");
     if (!f)
@@ -419,10 +431,16 @@ static void sdpcap_flush_to(const char *path)
 
     static EXT_RAM_BSS_ATTR uint8_t chunk[4096];
     size_t n;
-    while ((n = ring_drain(&s_ring, chunk, sizeof(chunk))) > 0)
+    size_t remaining = limit ? limit : (size_t)-1;
+    while (remaining > 0)
     {
+        size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        n = ring_drain(&s_ring, chunk, want);
+        if (n == 0)
+            break;
         if (fwrite(chunk, 1, n, f) != n)
             break;  /* card struggling/removed: stop hammering it, retry next flush */
+        remaining -= n;
     }
     pcap_del_session(h);  /* closes f (implicit fflush via fclose) */
 }
@@ -520,7 +538,9 @@ static void sdpcap_task(void *arg)
     {
         vTaskDelay(pdMS_TO_TICKS(TASK_POLL_MS));
 
-        if (!sdcard_is_mounted())
+        /* Held across the whole flush/prune below: an unmount or format
+         * landing mid-fwrite would free the filesystem this task is using. */
+        if (!sdcard_io_begin())
         {
             dir_ok = false;
             continue;
@@ -538,6 +558,7 @@ static void sdpcap_task(void *arg)
             ring_clear(&s_ring);
             current_bucket = 0;
             since_flush_ms = 0;
+            sdcard_io_end();
             continue;
         }
 
@@ -551,11 +572,15 @@ static void sdpcap_task(void *arg)
          * boundary. */
         if (current_bucket != 0 && bucket_now != current_bucket)
         {
-            if (ring_used(&s_ring) > 0)
+            size_t pending = ring_used(&s_ring);
+            if (pending > 0)
             {
                 char old_path[96];
                 sdpcap_current_path(old_path, sizeof(old_path), current_bucket);
-                sdpcap_flush_to(old_path);
+                /* Capped at what is buffered RIGHT NOW: anything the sniffer
+                 * appends while this write runs already belongs to the new
+                 * hour and is left for the next flush. */
+                sdpcap_flush_to(old_path, pending);
             }
             since_flush_ms = 0;
         }
@@ -571,7 +596,7 @@ static void sdpcap_task(void *arg)
         {
             char path[96];
             sdpcap_current_path(path, sizeof(path), now);
-            sdpcap_flush_to(path);
+            sdpcap_flush_to(path, 0);   /* mid-hour: everything belongs here */
             since_flush_ms = 0;
         }
 
@@ -581,6 +606,7 @@ static void sdpcap_task(void *arg)
             prune_elapsed_ms = 0;
             sdpcap_prune();
         }
+        sdcard_io_end();
     }
 }
 

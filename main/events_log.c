@@ -153,11 +153,19 @@ void events_tick(void)
     if (s_qcount == 0 || !sdcard_is_mounted())
         return;
 
+    /* Guards the append and the prune rewrite against unmount/format, and
+     * against events_read() having the file open at the same time. */
+    if (!sdcard_io_begin())
+        return;
+
     /* Snapshot and clear the queue under the lock, write outside it. */
     static event_rec_t batch[EV_QUEUE];
     int count;
     if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE)
+    {
+        sdcard_io_end();
         return;
+    }
     count = s_qcount;
     for (int i = 0; i < count; i++)
         batch[i] = s_queue[(s_qhead + i) % EV_QUEUE];
@@ -170,6 +178,7 @@ void events_tick(void)
     if (!f)
     {
         ESP_LOGW(TAG, "cannot open %s", EV_CSV);
+        sdcard_io_end();
         return;
     }
     uint32_t newest = 0;
@@ -192,6 +201,7 @@ void events_tick(void)
         if (days == 0 || days > 30) days = 30;
         prune(newest - days * 86400);
     }
+    sdcard_io_end();
 }
 
 int events_read(uint32_t hours, event_rec_t *out, int max)
@@ -205,6 +215,10 @@ int events_read(uint32_t hours, event_rec_t *out, int max)
 
     /* Keep a rolling window of the newest `max` matching rows. */
     int count = 0;
+    /* Same lock as the writer: prune() renames EV_CSV out from under a
+     * concurrent read otherwise. */
+    if (!sdcard_io_begin())
+        return 0;
     FILE *f = fopen(EV_CSV, "r");
     if (f)
     {
@@ -235,6 +249,7 @@ int events_read(uint32_t hours, event_rec_t *out, int max)
         }
         fclose(f);
     }
+    sdcard_io_end();
 
     /* Reverse to newest-first. */
     for (int i = 0; i < count / 2; i++)
@@ -248,8 +263,12 @@ int events_read(uint32_t hours, event_rec_t *out, int max)
 
 #else  /* !CONFIG_ENABLE_SD */
 void events_init(void) {}
-void events_note(uint32_t s, uint8_t st, uint8_t mid, bool hp, int32_t la, int32_t lo)
-{ (void)s;(void)st;(void)mid;(void)hp;(void)la;(void)lo; }
+void events_note(uint32_t seconds, uint8_t station_type, uint8_t message_id,
+                 uint8_t cause, uint8_t subcause,
+                 uint32_t action_station, uint16_t action_seq,
+                 bool has_pos, int32_t lat_e7, int32_t lon_e7)
+{ (void)seconds;(void)station_type;(void)message_id;(void)cause;(void)subcause;
+  (void)action_station;(void)action_seq;(void)has_pos;(void)lat_e7;(void)lon_e7; }
 void events_tick(void) {}
 int  events_read(uint32_t hours, event_rec_t *out, int max) { (void)hours;(void)out;(void)max; return 0; }
 #endif

@@ -14,7 +14,11 @@
 #include "esp_timer.h"
 #include "argtable3/argtable3.h"
 
-#define OTA_TASK_STACK_SIZE 3072
+/* 8 KB, not 3 KB: this task runs esp_https_ota(), whose TLS handshake and
+ * certificate-bundle verification alone need more than 3 KB of stack -- the
+ * old size risked a stack-canary panic mid-update, i.e. the remote update
+ * path failing exactly when it is least convenient (unattended device). */
+#define OTA_TASK_STACK_SIZE 8192
 #define OTA_TASK_PRIORITY 20
 
 static const char TAG[] = "OTA";

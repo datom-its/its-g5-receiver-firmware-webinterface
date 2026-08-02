@@ -127,7 +127,7 @@ typedef enum {
     S_PCAP_ENABLE, S_PCAP_RETAIN_HOURS, S_PCAP_MAX_MB, S_PCAP_HINT,
     S_PCAP_BUF_MB, S_PCAP_BUF_HINT, S_PCAP_FLUSH_SEC,
     S_PLAYBACK_FROM, S_PLAYBACK_TO, S_PLAYBACK_LOAD, S_PLAYBACK_LIVE, S_PLAYBACK_NONE, S_PLAYBACK_ERROR,
-    S_PLAYBACK_BUSY, S_PLAYBACK_STEP, S_MAP_LAYER_DARK, S_MAP_LAYER_LIGHT, S_MAP_LAYER_TRACKS, S_MAP_TRACK_PTS, S_UPD_WAIT, S_UPD_FLASHING,
+    S_PLAYBACK_BUSY, S_PLAYBACK_STEP, S_MAP_LAYER_DARK, S_MAP_LAYER_LIGHT, S_MAP_LAYER_TRACKS, S_MAP_LAYER_TRACKS_P, S_MAP_TRACK_PTS, S_UPD_WAIT, S_UPD_FLASHING,
     S_PEERS, S_PEERS_HINT, S_MAP_SEEN_BY, S_UNSAVED,
     S_TRACKS_ENABLE, S_TRACKS_DAYS, S_TRACKS_HINT,
     S_PCAP_FILTER, S_PCAP_FILT_ALL, S_PCAP_FILT_THIN, S_PCAP_FILT_VEH, S_PCAP_FILT_HINT,
@@ -314,6 +314,9 @@ static const char *STR[S_COUNT][2] = {
     [S_MAP_LAYER_DARK]  = { "Dunkel",                    "Dark" },
     [S_MAP_LAYER_LIGHT] = { "Hell",                      "Light" },
     [S_MAP_LAYER_TRACKS]= { "Fahrspuren",                "Vehicle tracks" },
+    /* Only offered when other receivers are configured -- see MAP_SCRIPT. */
+    [S_MAP_LAYER_TRACKS_P]= { "Fahrspuren anderer Empf&auml;nger",
+                                                         "Other receivers' tracks" },
     [S_MAP_TRACK_PTS]   = { "Punkte",                    "points" },
     [S_MAP_SEEN_BY]     = { "empfangen von",             "received by" },
     [S_PEERS]           = { "Weitere Empf&auml;nger",    "Other receivers" },
@@ -1017,7 +1020,7 @@ static const char PAGE_HEADER_FMT[] =
     "<meta name='theme-color' content='#f2b134'>"
     "<meta name='apple-mobile-web-app-capable' content='yes'>"
     "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
-    "<meta name='apple-mobile-web-app-title' content='ITS G5 Node'>"
+    "<meta name='apple-mobile-web-app-title' content='%s'>"
     "%s"  /* optional auto-refresh script */
     "<style>"
     "*{box-sizing:border-box;accent-color:#f2b134}"
@@ -1149,7 +1152,7 @@ static const char PAGE_HEADER_FMT[] =
     ".card .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#94a0a8;margin-bottom:5px}"
     ".card .v{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}"
     "pre{background:#0a0d0f;border:1px solid #2a2f34;border-radius:9px;color:#cfe8f0}"
-    "</style><title>ITS G5 Node</title></head><body><div class='wrap'>"
+    "</style><title>%s</title></head><body><div class='wrap'>"
     /* .navlinks is a separate flex item from .lang (see CSS) so the page
      * links can wrap onto multiple rows on narrow screens while the flag
      * switch stays anchored top-right instead of dropping onto its own,
@@ -1230,9 +1233,40 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
     const char *lang_de_active = (current_lang == LANG_DE) ? "active" : "";
     const char *lang_en_active = (current_lang == LANG_EN) ? "active" : "";
 
+    /* Browser-tab / home-screen title: append the node id so it's still
+     * distinguishable with several receivers open at once -- "ITS G5 Node"
+     * alone (the old fixed text) looked identical in every tab. Nodeid is
+     * free text from NVS (user-editable on /settings), so it must be
+     * HTML-escaped same as everywhere else it's rendered (see the
+     * /settings page's own nodeid_esc). */
+    char nodeid_raw[CONFIG_NODEID_BUFFER_SIZE] = {0};
+    size_t nodeid_raw_size = sizeof(nodeid_raw);
+    config_get_str(CONFIG_INDEX_NODEID, nodeid_raw, &nodeid_raw_size);
+    /* Capped at 24 chars before escaping (a tab title has no use for the
+     * full 64-byte nodeid budget, and this keeps header[]'s worst case --
+     * an adversarial nodeid of nothing but '&' -- bounded to a few hundred
+     * bytes instead of a few thousand). */
+    char nodeid_disp[25];
+    /* Deliberate truncation to a fixed display width -- done as a plain
+     * bounded copy, not snprintf("%s", ...), because -Werror=format-
+     * truncation can't tell "shortening on purpose" from "buffer too small"
+     * and errors out on the latter shape either way. */
+    size_t nodeid_disp_len = strlen(nodeid_raw);
+    if (nodeid_disp_len > sizeof(nodeid_disp) - 1)
+        nodeid_disp_len = sizeof(nodeid_disp) - 1;
+    memcpy(nodeid_disp, nodeid_raw, nodeid_disp_len);
+    nodeid_disp[nodeid_disp_len] = '\0';
+    static EXT_RAM_BSS_ATTR char nodeid_esc[sizeof(nodeid_disp) * 6];
+    html_escape(nodeid_disp, nodeid_esc, sizeof(nodeid_esc));
+    static EXT_RAM_BSS_ATTR char page_title[sizeof(nodeid_esc) + 16];
+    if (nodeid_esc[0])
+        snprintf(page_title, sizeof(page_title), "ITS G5 - %s", nodeid_esc);
+    else
+        snprintf(page_title, sizeof(page_title), "ITS G5 Node");
+
     static EXT_RAM_BSS_ATTR char header[9216];
     snprintf(header, sizeof(header), PAGE_HEADER_FMT,
-             lc, refresh_tag,
+             lc, page_title, refresh_tag, page_title,
              lc, T(S_NAV_STATUS),
              lc, T(S_NAV_MESSAGES),
              lc, T(S_NAV_SETTINGS),
@@ -2171,14 +2205,16 @@ static esp_err_t map_get_handler(httpd_req_t *req)
     HTML_PRINTF(labels,
              "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\","
              "ITS_MAP_L_DARK=\"%s\",ITS_MAP_L_LIGHT=\"%s\","
-             "ITS_MAP_L_TRACKS=\"%s\",ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
+             "ITS_MAP_L_TRACKS=\"%s\",ITS_MAP_L_TRACKS_P=\"%s\","
+             "ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
              "ITS_MAP_SEEN_BY=\"%s\",ITS_MAP_PEERS=[%s],ITS_MAP_SELF=\"%s\","
              "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\",ITS_PB_BUSY=\"%s\","
              "ITS_MAP_DENM=\"%s\","
              "ITS_MAP_STALE=%lu,ITS_MAP_LINE=\"%s\";</script>",
              T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE),
              T(S_MAP_LAYER_DARK), T(S_MAP_LAYER_LIGHT),
-             T(S_MAP_LAYER_TRACKS), T(S_MAP_TRACK_PTS), (unsigned long)trkdays,
+             T(S_MAP_LAYER_TRACKS), T(S_MAP_LAYER_TRACKS_P),
+             T(S_MAP_TRACK_PTS), (unsigned long)trkdays,
              T(S_MAP_SEEN_BY), peerjs, selfname,
              T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR), T(S_PLAYBACK_BUSY),
              T(S_MAP_DENM),
@@ -2322,23 +2358,54 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * no matter how many tracks there are. */
         "var trackRenderer=L.canvas();"
         "var trackLayer=L.layerGroup(),tracksLoaded=false;"
+        /* Second overlay for the other receivers' tracks, offered only when
+         * any are configured. Deliberately a SEPARATE layer rather than
+         * folding them into the one above: both can then be on at once (which
+         * is the "all three together" view) or either on its own, with no
+         * mutually-exclusive-checkbox trickery. Tracks are drawn per receiver
+         * and never merged into one line per vehicle -- /tracks.json carries
+         * no timestamps, so points from two receivers could not be ordered
+         * against each other, and interleaving them by guess would draw a
+         * zigzag that no vehicle ever drove. Two lines for one vehicle is
+         * also the more informative picture: it shows where the receivers'
+         * ranges overlap. */
+        "var peerTrackLayer=L.layerGroup(),peerTracksLoaded=false;"
         "var overlays={};overlays[ITS_MAP_L_TRACKS]=trackLayer;"
+        "if(ITS_MAP_PEERS.length)overlays[ITS_MAP_L_TRACKS_P]=peerTrackLayer;"
         "L.control.layers(baseLayers,overlays,{collapsed:false}).addTo(map);"
-        "map.on('overlayadd',function(e){if(e.layer===trackLayer&&!tracksLoaded)loadTracks();});"
+        "map.on('overlayadd',function(e){"
+        "if(e.layer===trackLayer&&!tracksLoaded)loadTracks();"
+        "if(e.layer===peerTrackLayer&&!peerTracksLoaded)loadPeerTracks();});"
+        /* Thin and translucent on purpose: where many vehicles took the same
+         * road the lines stack up and that road simply gets brighter, which
+         * is the "imprint" effect without needing a heat map. */
+        "function drawTracks(a,layer,color,who){"
+        "for(var i=0;i<a.length;i++){var t=a[i];if(!t.p||t.p.length<2)continue;"
+        "var pts=t.p.map(function(q){return [q[0]/1e7,q[1]/1e7];});"
+        "var pl=L.polyline(pts,{color:color,weight:2,opacity:0.35,"
+        "renderer:trackRenderer});"
+        "pl.bindPopup('#'+t.i+' \\u00b7 '+pts.length+' '+ITS_MAP_TRACK_PTS"
+        "+(who?'<br><small>'+ITS_MAP_SEEN_BY+' '+htxt(who)+'</small>':''));"
+        "pl.addTo(layer);}}"
         "function loadTracks(){tracksLoaded=true;"
         "fetch('/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
         ".then(function(r){return r.json();}).then(function(a){"
-        "trackLayer.clearLayers();"
-        "for(var i=0;i<a.length;i++){var t=a[i];if(!t.p||t.p.length<2)continue;"
-        "var pts=t.p.map(function(q){return [q[0]/1e7,q[1]/1e7];});"
-        /* Thin and translucent on purpose: where many vehicles took the same
-          * road the lines stack up and that road simply gets brighter, which
-          * is the \"imprint\" effect without needing a heat map. */
-        "var pl=L.polyline(pts,{color:'#4fb8e0',weight:2,opacity:0.35,"
-        "renderer:trackRenderer});"
-        "pl.bindPopup('#'+t.i+' \\u00b7 '+pts.length+' '+ITS_MAP_TRACK_PTS);"
-        "pl.addTo(trackLayer);}"
+        "trackLayer.clearLayers();drawTracks(a,trackLayer,'#4fb8e0',ITS_MAP_SELF);"
         "}).catch(function(){tracksLoaded=false;});}"
+        /* One colour per peer, in the order they are configured, so the same
+         * receiver keeps the same colour across reloads. Chosen to stay apart
+         * from the local blue and from the amber UI accent. */
+        "var PEER_COLORS=['#e07a4f','#7ad07a','#c07ae0','#e0c04f','#4fe0c0'];"
+        "function loadPeerTracks(){peerTracksLoaded=true;"
+        "peerTrackLayer.clearLayers();"
+        "ITS_MAP_PEERS.forEach(function(hp,idx){"
+        "fetch('http://'+hp+'/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
+        ".then(function(r){return r.json();}).then(function(a){"
+        "drawTracks(a,peerTrackLayer,PEER_COLORS[idx%PEER_COLORS.length],hp);"
+        /* A peer that is off or unreachable is skipped silently, exactly like
+         * the live marker poll -- one missing receiver must not cost the
+         * others their tracks. */
+        "}).catch(function(){});});}"
         "var markers={};var VMEM={};var haveView=false;var liveMode=true;"
         "var EMOJI={Ped:'\\ud83d\\udeb6',Cyclist:'\\ud83d\\udeb4',Moped:'\\ud83d\\udef5',"
         "Motorcycle:'\\ud83c\\udfcd',Car:'\\ud83d\\ude97',Bus:'\\ud83d\\ude8c',"
@@ -2369,8 +2436,14 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "function spatColor(p){if(p===5||p===6)return '#2ecc40';"
         "if(p===7||p===8||p===9)return '#f2b134';if(p===2||p===3)return '#e74c3c';"
         "if(p===4)return '#e67e22';return '#888';}"
+        /* Escapes text before it goes into a popup's HTML. Popup strings are
+         * rendered via innerHTML, and some values interpolated below arrive
+         * over the air (MAPEM intersection name) or from configuration
+         * (receiver names) -- neither is trustworthy markup. */
+        "function htxt(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')"
+        ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
         "function spatChips(i){var d=SPAT[i];if(!d)return '';"
-        "var lbl=d.nm?d.nm:(d.rg+'/'+d.id);"
+        "var lbl=d.nm?htxt(d.nm):(d.rg+'/'+d.id);"
         "var h='<br>\\ud83d\\udea6 <b>'+lbl+'</b> <small>('+d.age+'s)</small><br>';"
         "for(var j=0;j<d.g.length;j++){"
         "h+='<span style=\"display:inline-block;margin:1px 5px 1px 0;white-space:nowrap\">"
@@ -2401,7 +2474,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         /* Which receiver picked this up -- only shown when other receivers
          * are configured, since with one device it says nothing. */
         "if(ITS_MAP_PEERS.length&&m.srcs)"
-        "h+='<br><small>'+ITS_MAP_SEEN_BY+' '+m.srcs+'</small>';"
+        "h+='<br><small>'+ITS_MAP_SEEN_BY+' '+htxt(m.srcs)+'</small>';"
         "h+=spatChips(m.i);"
         "return h;}"
         /* Removes a marker and, if it has one, its path trail -- four call
@@ -2652,12 +2725,20 @@ static esp_err_t spatem_json_handler(httpd_req_t *req)
         spatem_intersection_t *e = &ints[i];
         unsigned long age = now > e->last_seen ? (unsigned long)(now - e->last_seen) : 0;
         /* Name is IA5 from the MAPEM and further filtered to printable ASCII
-         * by the decoder, but '"' and '\' would still break the JSON string. */
+         * by the decoder, but '"' and '\' would still break the JSON string.
+         * '<' '>' '&' are dropped too: this string comes off the air from an
+         * unauthenticated sender and the map popup renders it as markup
+         * (Leaflet bindPopup -> innerHTML). The client escapes it as well
+         * (htxt() in MAP_SCRIPT) -- both, because either alone would leave a
+         * script-injection path open for any future consumer of this field. */
         char nm[ITS_MAP_NAME_LEN];
         size_t nw = 0;
         for (size_t k = 0; e->name[k] && nw + 1 < sizeof(nm); k++)
-            if (e->name[k] != '"' && e->name[k] != '\\')
-                nm[nw++] = e->name[k];
+        {
+            char c = e->name[k];
+            if (c != '"' && c != '\\' && c != '<' && c != '>' && c != '&')
+                nm[nw++] = c;
+        }
         nm[nw] = '\0';
 
         char head[ITS_MAP_NAME_LEN + 160];
@@ -2698,6 +2779,9 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
     bool first = true;
+    /* Held for the whole walk: the pointers below aim into buffers the packet
+     * path re-decodes in place on a new MAPEM revision. */
+    spatem_geometry_lock();
     for (int i = 0; i < ni; i++)
     {
         const its_map_geom_t *g = spatem_geometry(ints[i].region, ints[i].id);
@@ -2709,6 +2793,12 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
         first = false;
 
+        /* Separator keys off what was actually emitted, not off the loop
+         * index: lanes with fewer than two nodes are skipped, and a skipped
+         * lane 0 would otherwise put a leading comma into the array --
+         * malformed JSON that kills the lane overlay for ALL intersections,
+         * silently (the client's fetch has a bare .catch). */
+        bool first_lane = true;
         for (uint8_t l = 0; l < g->n_lanes; l++)
         {
             const its_lane_geom_t *L = &g->lane[l];
@@ -2716,8 +2806,9 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
                 continue;                 /* nothing to draw */
             char lh[64];
             snprintf(lh, sizeof(lh), "%s{\"l\":%u,\"t\":%u,\"sg\":%d,\"p\":[",
-                     l ? "," : "", (unsigned)L->lane_id, (unsigned)L->lane_type,
+                     first_lane ? "" : ",", (unsigned)L->lane_id, (unsigned)L->lane_type,
                      L->signal_group == 0xFF ? -1 : (int)L->signal_group);
+            first_lane = false;
             httpd_resp_send_chunk(req, lh, HTTPD_RESP_USE_STRLEN);
             for (uint8_t n = 0; n < L->n_nodes; n++)
             {
@@ -2730,6 +2821,7 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
         }
         httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
     }
+    spatem_geometry_unlock();
     httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -2758,6 +2850,11 @@ typedef struct {
 typedef struct {
     httpd_req_t *req;
     bool first;
+    /* Set once a chunk write fails, i.e. the browser is gone. Without it the
+     * walk kept fopen'ing and decoding whole hours of PCAP into a dead socket
+     * -- the same trap tracks_get_handler was already fixed for, and worse
+     * here because every frame goes through its_decode_frame(). */
+    bool client_gone;
     /* Entries are accumulated here and flushed in blocks; one chunked write
      * per entry was itself a large part of the 45+ seconds. */
     char buf[2048];
@@ -2769,8 +2866,11 @@ typedef struct {
 
 static void playback_flush(playback_ctx_t *ctx)
 {
-    if (ctx->len)
-        httpd_resp_send_chunk(ctx->req, ctx->buf, ctx->len);
+    if (ctx->len && !ctx->client_gone)
+    {
+        if (httpd_resp_send_chunk(ctx->req, ctx->buf, ctx->len) != ESP_OK)
+            ctx->client_gone = true;
+    }
     ctx->len = 0;
 }
 
@@ -2811,16 +2911,19 @@ static bool playback_want(playback_ctx_t *ctx, uint32_t sec, const its_decoded_t
 /* msgtype/label only ever contains digits/letters/spaces/':'/'-'/'.' (see
  * its_decode_frame), same as everywhere else it's embedded in JSON in this
  * file -- no attacker-controlled bytes, no escaping needed. */
-static void playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, void *ctx_)
+static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, void *ctx_)
 {
     (void)usec;
     playback_ctx_t *ctx = (playback_ctx_t *)ctx_;
+
+    if (ctx->client_gone)
+        return false;
 
     /* A DENM is an event, not a position sample -- never suppress one. */
     if (d->message_id != 1 && !playback_want(ctx, sec, d))
     {
         ctx->skipped++;
-        return;
+        return true;
     }
 
     /* Same optional keys as the live /ws feed, so the map's popupHtml renders
@@ -2877,13 +2980,18 @@ static void playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
              ctx->first ? "" : ",", (unsigned long)sec, (unsigned long)d->station_id,
              (long)d->lat_e7, (long)d->lon_e7, d->label, extra);
     if (n < 0)
-        return;
+        return true;
     if (ctx->len + (size_t)n >= sizeof(ctx->buf))
+    {
         playback_flush(ctx);
+        if (ctx->client_gone)
+            return false;
+    }
     memcpy(ctx->buf + ctx->len, entry, (size_t)n);
     ctx->len += (size_t)n;
     ctx->first = false;
     ctx->emitted++;
+    return true;
 }
 
 /* ================================================================== */
@@ -3559,6 +3667,10 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
     int n = tracklog_read(days, pts, MAXPT);
 
     httpd_resp_set_type(req, "application/json");
+    /* Same reasoning as /markers.json: another receiver's map page reads this
+     * cross-origin to draw all receivers' tracks on one map. Read-only, no
+     * credential involved. */
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
 
     /* The log is in time order, so a station's points are scattered through
@@ -3677,9 +3789,12 @@ static esp_err_t playback_get_handler(httpd_req_t *req)
     ctx.first = true;
     sdpcap_read_positions(from_sec, to_sec, playback_emit, &ctx);
     playback_flush(&ctx);
-    ESP_LOGI(TAG, "playback %lu..%lu: %lu entries, %lu duplicates dropped",
+    ESP_LOGI(TAG, "playback %lu..%lu: %lu entries, %lu duplicates dropped%s",
              (unsigned long)from_sec, (unsigned long)to_sec,
-             (unsigned long)ctx.emitted, (unsigned long)ctx.skipped);
+             (unsigned long)ctx.emitted, (unsigned long)ctx.skipped,
+             ctx.client_gone ? " (client gone, aborted)" : "");
+    if (ctx.client_gone)
+        return ESP_FAIL;   /* socket is dead; closing the chunked reply would only error again */
     httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -3753,6 +3868,12 @@ static void settings_get_str(config_index_t index, char *out, size_t out_size)
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
+    /* Reading the page is gated too, not just saving: it renders the MQTT URI
+     * (which carries broker credentials when one is configured), the network
+     * setup and the peer list -- and the settings page itself advertises the
+     * password as protecting /settings. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
     /* The save() POST carries no query string of its own; without ?lang=
      * here, resolve_language() on that request defaults to German
      * regardless of the page's actual language (same bug class as /update
@@ -5207,9 +5328,15 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "<p><small>%s</small></p>"
         "<script>"
         "var P='%s';"
+        /* P and the paths handed to del() are ALREADY url-encoded server-side
+         * (url_encode); running encodeURIComponent over them again turned a
+         * space into %2520, and the server -- which decodes exactly once --
+         * then looked for a file literally named "my%20file.txt". Only values
+         * read raw out of the DOM (the checkbox values in seltar/seldel) still
+         * need encoding here. */
         "function up(){var f=document.getElementById('fw').files[0];if(!f){return;}"
         "var x=new XMLHttpRequest();"
-        "x.open('POST','/sdcard/upload?p='+encodeURIComponent(P)+'&name='+encodeURIComponent(f.name));"
+        "x.open('POST','/sdcard/upload?p='+P+'&name='+encodeURIComponent(f.name));"
         "x.onload=function(){location.reload();};"
         "document.getElementById('ur').innerText='%s';x.send(f);}"
         "function fmt(){if(!confirm('%s'))return;"
@@ -5217,7 +5344,7 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "x.onload=function(){location.reload();};"
         "document.getElementById('fr').innerText='%s';x.send();}"
         "function del(p){if(!confirm('%s'))return;"
-        "var x=new XMLHttpRequest();x.open('POST','/sdcard/delete?p='+encodeURIComponent(p));"
+        "var x=new XMLHttpRequest();x.open('POST','/sdcard/delete?p='+p);"
         "x.onload=function(){location.reload();};x.send();}"
         "function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
         "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
