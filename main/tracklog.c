@@ -182,8 +182,12 @@ void tracklog_tick(void)
     if (!s_lock || !sdcard_is_mounted())
         return;
 
-    /* Guards the append and the prune rewrite below against unmount/format. */
-    if (!sdcard_io_begin())
+    /* Guards the append and the prune rewrite below against unmount/format.
+     * Bounded, NOT an unlimited wait: this runs on the sysmon task, which is
+     * the watchdog. Blocking here on a stuck SD writer would wedge the very
+     * task whose job it is to notice a wedge -- and one skipped cycle costs
+     * nothing, the points stay queued for the next one. */
+    if (!sdcard_io_begin_timeout(2000))
         return;
 
     /* Static, not a stack local: this runs on the sysmon task, whose whole
@@ -243,7 +247,8 @@ void tracklog_tick(void)
 
 int tracklog_read(uint32_t days, track_pt_t *out, int max)
 {
-    if (!out || max <= 0 || !sdcard_io_begin())
+    /* Bounded: runs on the httpd task (see events_read for the reasoning). */
+    if (!out || max <= 0 || !sdcard_io_begin_timeout(2000))
         return 0;
     FILE *f = fopen(TR_CSV, "r");
     if (!f)

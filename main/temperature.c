@@ -34,8 +34,12 @@ static void temperature_read(void *)
             /* Only log when the reading actually changed (the LM75 has a
              * fixed step size, so an unchanged reading compares equal) --
              * otherwise this fires every 10s forever for no new information. */
+            /* %.3f, not %f: the driver reads in 0.125-degree steps, so three
+             * decimals represent the sensor exactly -- %f's default six only
+             * padded zeros onto it. And no "temperature:" in the text: the
+             * log tag in front already says which module this line is from. */
             if (isnan(temperature) || value != temperature)
-                ESP_LOGI(TAG, "temperature: %f", value);
+                ESP_LOGI(TAG, "%.3f °C", value);
             temperature = value;
             return;
         }

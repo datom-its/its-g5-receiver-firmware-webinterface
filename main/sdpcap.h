@@ -17,6 +17,12 @@ void sdpcap_init(void);
  * internally if capture is disabled or not yet initialized. */
 void sdpcap_handle_packet(sniffer_packet_info_t *packet);
 
+/* Writes whatever is currently buffered in the ring to the card immediately,
+ * instead of waiting for the next scheduled flush (which can be minutes
+ * away). Used by the prepare-for-power-off path; safe to call any time.
+ * Returns the number of bytes written. */
+size_t sdpcap_flush_now(void);
+
 /* Hands over the whole decode result rather than a hand-picked subset: the
  * previous per-field signature silently dropped everything added later (line
  * number, vehicle size), so playback showed less than the live map.

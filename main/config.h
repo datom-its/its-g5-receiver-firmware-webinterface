@@ -48,6 +48,7 @@ typedef enum {
     CONFIG_INDEX_PCAP_FILTER,       /* u8  0 = alles, 1 = Ampelmeldungen ausgeduennt, 2 = nur Fahrzeuge/Warnungen */
     CONFIG_INDEX_TRACKS_ENABLE,     /* u8  record vehicle tracks for the map overlay (0 = off) */
     CONFIG_INDEX_TRACKS_DAYS,       /* u32 how long to keep them, days (1..7) */
+    CONFIG_INDEX_ETH_LEDS,          /* u8  bool: Ethernet port's link/activity LEDs (1 = on, default) */
 } config_index_t;
 
 /* Hashes a raw web-UI password the same salted way CONFIG_INDEX_WEB_PASSWORD

@@ -23,6 +23,15 @@
 
 static const char TAG[] = "ETHERNET";
 
+/* KSZ8851SNL port 1 control register and its "all port LEDs off" bit. The
+ * driver's PHY-register accessor passes the address straight through to the
+ * chip's own register space, so these are the datasheet numbers verbatim.
+ * Defined here rather than pulled from the managed component's private
+ * ksz8851.h, which is not on the include path. A board with a different
+ * Ethernet chip simply fails the ioctl and keeps its LEDs. */
+#define KSZ8851_REG_P1CR    0xF6
+#define KSZ8851_P1CR_LED_OFF 0x8000U
+
 static esp_netif_t *mgmt_netif;
 static esp_eth_handle_t mgmt_eth;
 static bool static_ip;
@@ -54,6 +63,10 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
                  mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
         if (eth_handle == mgmt_eth)
         {
+            /* Re-apply on every link-up: the driver rewrites P1CR when it
+             * negotiates, and a PHY reset clears the bit outright. */
+            ethernet_apply_led_setting();
+
             esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_CONNECTED, NULL, 0, 0);
             if (post_res != ESP_OK)
             {
@@ -264,6 +277,10 @@ static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 
+    /* Also applied on every link-up; this covers the case where no cable is
+     * plugged in yet, so the setting takes hold without waiting for one. */
+    ethernet_apply_led_setting();
+
     if (static_ip)
     {
         esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
@@ -301,6 +318,45 @@ void initialize_ethernet(void)
             configure_management_interface(eth_handles[i], i);
         }
     }
+}
+
+esp_err_t ethernet_apply_led_setting(void)
+{
+    if (!mgmt_eth)
+        return ESP_ERR_INVALID_STATE;
+
+    uint8_t on = 1;
+    config_get_u8(CONFIG_INDEX_ETH_LEDS, &on);
+
+    /* Read-modify-write: P1CR also carries the auto-negotiation and
+     * advertised-capability bits, so a blind write would renegotiate the
+     * link (or drop it to 10M half duplex). */
+    uint32_t p1cr = 0;
+    esp_eth_phy_reg_rw_data_t rw = { .reg_addr = KSZ8851_REG_P1CR, .reg_value_p = &p1cr };
+
+    esp_err_t res = esp_eth_ioctl(mgmt_eth, ETH_CMD_READ_PHY_REG, &rw);
+    if (res != ESP_OK)
+    {
+        ESP_LOGW(TAG, "reading P1CR failed (%s) -- LED setting not applied",
+                 esp_err_to_name(res));
+        return res;
+    }
+
+    uint32_t want = on ? (p1cr & ~KSZ8851_P1CR_LED_OFF) : (p1cr | KSZ8851_P1CR_LED_OFF);
+    if (want == p1cr)
+        return ESP_OK;
+
+    p1cr = want;
+    res = esp_eth_ioctl(mgmt_eth, ETH_CMD_WRITE_PHY_REG, &rw);
+    if (res != ESP_OK)
+    {
+        ESP_LOGW(TAG, "writing P1CR failed (%s) -- LED setting not applied",
+                 esp_err_to_name(res));
+        return res;
+    }
+
+    ESP_LOGI(TAG, "Ethernet port LEDs %s", on ? "on" : "off");
+    return ESP_OK;
 }
 
 eth_speed_t ethernet_get_mgmt_if_link_speed(void)

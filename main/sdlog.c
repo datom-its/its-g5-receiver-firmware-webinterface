@@ -256,6 +256,20 @@ static void sdlog_task(void *arg)
     }
 }
 
+void sdlog_flush_now(void)
+{
+    /* Bounded for the same reason as sdpcap_flush_now(): restart paths must
+     * not hang on a stuck writer. */
+    if (!s_ready || !sdcard_io_begin_timeout(2000))
+        return;
+    mkdir(LOG_DIR, 0777);   /* the writer task may not have run yet */
+    if (sys_stream.ring.used)
+        flush_stream(&sys_stream);
+    if (frame_stream.ring.used)
+        flush_stream(&frame_stream);
+    sdcard_io_end();
+}
+
 /* ================================================================== */
 /*  System-log hook                                                   */
 /* ================================================================== */
@@ -353,5 +367,6 @@ void sdlog_init(void)
 
 void sdlog_init(void) {}
 void sdlog_handle_packet(sniffer_packet_info_t *packet) { (void)packet; }
+void sdlog_flush_now(void) {}
 
 #endif

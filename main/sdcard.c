@@ -81,6 +81,22 @@ bool sdcard_io_begin(void)
     return true;
 }
 
+bool sdcard_io_begin_timeout(uint32_t timeout_ms)
+{
+    if (!sd_lock)
+        sd_lock = xSemaphoreCreateMutex();
+    if (!sd_lock)
+        return false;
+    if (xSemaphoreTake(sd_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+        return false;
+    if (card == NULL)
+    {
+        xSemaphoreGive(sd_lock);
+        return false;
+    }
+    return true;
+}
+
 void sdcard_io_end(void)
 {
     sd_lock_give();

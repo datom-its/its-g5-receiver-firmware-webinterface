@@ -108,6 +108,10 @@ int cmd_reboot(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    /* Write the buffered SD sinks first -- esp_restart() is as abrupt for the
+     * card as cutting power. Bounded internally, so a wedged writer cannot
+     * stop the reboot from happening. */
+    sysmon_flush_persistent();
     esp_restart();
 
     return 1;

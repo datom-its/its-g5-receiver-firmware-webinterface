@@ -43,8 +43,10 @@
 #include "events.h"
 #include "its_decode.h"
 #include "ota.h"
+#include "sysmon.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
+#include "sdlog.h"
 #include "sdpcap.h"
 #endif
 #ifdef CONFIG_ENABLE_TEMPERATURE
@@ -107,6 +109,7 @@ typedef enum {
     S_CHANNEL, S_MQTT, S_MSGS_RECEIVED, S_RATE, S_FREE_HEAP, S_FREE_PSRAM, S_TEMPERATURE,
     S_RUNNING, S_STOPPED, S_CONNECTED, S_DISCONNECTED,
     S_START, S_STOP, S_REBOOT, S_REBOOT_CONFIRM, S_REBOOTING,
+    S_POWEROFF, S_POWEROFF_CONFIRM, S_POWEROFF_BUSY, S_POWEROFF_OK, S_POWEROFF_FAIL,
     S_SNIFFER_LABEL, S_SNIFF_START, S_SNIFF_STOP, S_AUTO_REFRESH,
     S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW,
@@ -130,6 +133,7 @@ typedef enum {
     S_PLAYBACK_BUSY, S_PLAYBACK_STEP, S_MAP_LAYER_DARK, S_MAP_LAYER_LIGHT, S_MAP_LAYER_TRACKS, S_MAP_LAYER_TRACKS_P, S_MAP_TRACK_PTS, S_UPD_WAIT, S_UPD_FLASHING,
     S_PEERS, S_PEERS_HINT, S_MAP_SEEN_BY, S_UNSAVED,
     S_TRACKS_ENABLE, S_TRACKS_DAYS, S_TRACKS_HINT,
+    S_ETH_LEDS, S_ETH_LEDS_HINT,
     S_PCAP_FILTER, S_PCAP_FILT_ALL, S_PCAP_FILT_THIN, S_PCAP_FILT_VEH, S_PCAP_FILT_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL, S_UPD_CHOOSE_FILE,
     S_UPD_NOT_CONFIRMED,
@@ -195,6 +199,21 @@ static const char *STR[S_COUNT][2] = {
      * this uses a JS \u escape instead of &auml;. */
     [S_REBOOT_CONFIRM]  = { "Ger\\u00e4t neu starten?", "Reboot the device?" },
     [S_REBOOTING]       = { "Neustart l&auml;uft...",   "Rebooting..." },
+    [S_POWEROFF]        = { "Zum Ausschalten vorbereiten",
+                                                        "Prepare for power-off" },
+    /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
+    [S_POWEROFF_CONFIRM]= { "Aufzeichnung sichern und SD-Karte aush\\u00e4ngen? "
+                            "Danach zeichnet das Ger\\u00e4t bis zum Neustart nicht mehr auf.",
+                            "Save the recording and unmount the SD card? "
+                            "The device stops recording afterwards until it is restarted." },
+    /* These three are shown via .innerText, which does NOT interpret escapes
+     * -- literal UTF-8 here, unlike the confirm() string above. */
+    [S_POWEROFF_BUSY]   = { "Puffer werden geschrieben...",
+                                                        "Writing buffers..." },
+    [S_POWEROFF_OK]     = { "Fertig. Das Gerät kann jetzt vom Strom getrennt werden.",
+                            "Done. The device can now be disconnected from power." },
+    [S_POWEROFF_FAIL]   = { "Fehlgeschlagen – SD-Karte nicht sauber ausgehängt.",
+                            "Failed – the SD card was not cleanly unmounted." },
     [S_SNIFFER_LABEL]   = { "Sniffer",                  "sniffer" },
     [S_SNIFF_START]     = { "Sniffer starten",          "Start sniffer" },
     [S_SNIFF_STOP]      = { "Sniffer stoppen",          "Stop sniffer" },
@@ -366,6 +385,13 @@ static const char *STR[S_COUNT][2] = {
                             "switchable layer. Very light &ndash; about 150 points an hour, roughly "
                             "150 KB for three days. Starts empty: earlier journeys from the PCAP "
                             "recordings are not included." },
+    [S_ETH_LEDS]        = { "Netzwerk-LEDs",             "Network LEDs" },
+    [S_ETH_LEDS_HINT]   = { "Die zwei LEDs an der Netzwerkbuchse zeigen Verbindung und Datenverkehr. "
+                            "Abschalten st&ouml;rt den Betrieb nicht &ndash; nur die Verbindung ist "
+                            "dann am Ger&auml;t selbst nicht mehr ablesbar. Wirkt sofort.",
+                            "The two LEDs on the network socket show link and traffic. Turning them "
+                            "off does not affect operation &ndash; it just means the link can no "
+                            "longer be checked on the device itself. Takes effect immediately." },
     [S_UPD_INTRO]       = { "W&auml;hle eine Firmware-Datei (.bin) und klicke Hochladen. Das Ger&auml;t "
                             "flasht sie auf die inaktive OTA-Partition und startet neu. Danach musst du "
                             "das Update im Status best&auml;tigen, sonst wird es zur&uuml;ckgerollt.",
@@ -1500,16 +1526,32 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     /* No reload on click -- fetch the toggle, then let window.stSetSniff
      * (defined in applyscript below) update the button + status span from
      * the action just taken, same as a poll would. */
-    char buttons[512];
+    /* 1024, not 512: the power-off button plus its confirm/busy strings add
+     * ~330 bytes in German, and a truncated onclick would silently produce a
+     * dead button rather than an error. */
+    char buttons[1024];
     snprintf(buttons, sizeof(buttons),
         "<p>"
         "<button id='st-sniffbtn' data-action='%s' onclick=\"var a=this.getAttribute('data-action');"
         "fetch('/sniffer?action='+a,{method:'POST'}).then(function(){if(window.stSetSniff)window.stSetSniff(a==='start');})\">%s</button> "
         "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
+#if CONFIG_ENABLE_SD
+        /* Result goes into its own span rather than replacing the page: if the
+         * unmount fails the operator has to stay on the page and see why. */
+        " <button onclick=\"if(!confirm('%s'))return;"
+        "var s=document.getElementById('po-res');s.innerText='%s';"
+        "fetch('/poweroff',{method:'POST'}).then(function(r){return r.text();})"
+        ".then(function(t){s.innerText=t;}).catch(function(){s.innerText='%s';})\">%s</button>"
+        " <span id='po-res'></span>"
+#endif
         "</p>",
         running ? "stop" : "start",
         running ? T(S_SNIFF_STOP) : T(S_SNIFF_START),
-        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT));
+        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT)
+#if CONFIG_ENABLE_SD
+        , T(S_POWEROFF_CONFIRM), T(S_POWEROFF_BUSY), T(S_POWEROFF_FAIL), T(S_POWEROFF)
+#endif
+        );
     httpd_resp_send_chunk(req, buttons, HTTPD_RESP_USE_STRLEN);
 
     /* Applies a /status.json response to the cells above. Sniffer/MQTT
@@ -3945,6 +3987,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     settings_get_str(CONFIG_INDEX_ETH_DNS2, ethdns2, sizeof(ethdns2));
     bool dhcp = (ethip[0] == '\0');
 
+    uint8_t eth_leds = 1;
+    config_get_u8(CONFIG_INDEX_ETH_LEDS, &eth_leds);
+
     /* Live status (what's actually bound right now, e.g. the DHCP-obtained
      * IP), as opposed to the ethip/... above which is only ever set for a
      * static config. Shown read-only above the editable fields. */
@@ -4042,6 +4087,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<input class='ipfield' id='ethdns2' value='%s' size='16' maxlength='15'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='ntpserver' value='%s' size='16'></td></tr>"
+        "<tr><th>%s</th><td><input type='checkbox' id='ethleds'%s>"
+        "<br><small>%s</small></td></tr>"
         "</table>",
         T(S_SET_GROUP_NETWORK),
         cur_line,
@@ -4051,7 +4098,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_ETH_GATEWAY), ethgw,
         T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
         T(S_ETH_NET_NOTE),
-        T(S_NTP_SERVER), ntp_server);
+        T(S_NTP_SERVER), ntp_server,
+        T(S_ETH_LEDS), eth_leds ? " checked" : "", T(S_ETH_LEDS_HINT));
     httpd_resp_send_chunk(req, network, HTTPD_RESP_USE_STRLEN);
 
     /* --- MQTT --- */
@@ -4191,6 +4239,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('ethdns0',document.getElementById('ethdns0').value);"
         "p.append('ethdns1',document.getElementById('ethdns1').value);"
         "p.append('ethdns2',document.getElementById('ethdns2').value);"
+        "p.append('ethleds',document.getElementById('ethleds').checked?'1':'0');"
         "fetch('/settings?lang=%s',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
         ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;"
         "var r2=document.getElementById('result2');if(r2)r2.innerText=t;"
@@ -4333,6 +4382,16 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         unsigned long d = strtoul(value, NULL, 10);
         if (d >= 1 && d <= 7 &&
             config_set_u32(CONFIG_INDEX_TRACKS_DAYS, (uint32_t)d) == ESP_OK) saved++;
+    }
+    if (httpd_query_key_value(buf, "ethleds", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_ETH_LEDS, value[0] == '1' ? 1 : 0) == ESP_OK)
+        {
+            saved++;
+            /* Unlike the other network settings this one needs no restart --
+             * push it to the chip straight away. */
+            ethernet_apply_led_setting();
+        }
     }
     if (httpd_query_key_value(buf, "peers", value, sizeof(value)) == ESP_OK)
     {
@@ -4522,11 +4581,47 @@ static void reboot_timer_cb(void *arg)
 
 static esp_err_t reboot_post_handler(httpd_req_t *req)
 {
+    /* Before the restart, not after the reply: esp_restart() is as abrupt for
+     * the SD card as pulling the plug, so without this a reboot silently
+     * discards whatever the PCAP ring had not written yet (minutes of it). */
+    sysmon_flush_persistent();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_sendstr(req, "Rebooting...");
     esp_timer_start_once(reboot_timer_handle, 1000000);
     return ESP_OK;
 }
+
+/* POST /poweroff -- makes pulling the plug safe. There is no real "shutdown"
+ * on this hardware: /reboot just calls esp_restart(), which is exactly as
+ * abrupt for the card as cutting power. What actually costs data is the
+ * buffering -- the PCAP ring holds minutes of capture in PSRAM between
+ * scheduled flushes -- and a power cut landing inside an SD write.
+ *
+ * So this writes every buffer out and unmounts the card, after which nothing
+ * touches the SD bus again until the device is restarted. Runs inline rather
+ * than on a timer: the reply is the operator's signal that it is safe to
+ * unplug, so it must not come back before the work is actually done.
+ * Recording does NOT resume by itself afterwards -- that is the point, and
+ * the confirm dialog says so. */
+#if CONFIG_ENABLE_SD
+static esp_err_t poweroff_post_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+
+    /* Same flush the restart paths use, plus the unmount that only makes
+     * sense when nothing is going to run afterwards. */
+    sysmon_flush_persistent();
+
+    esp_err_t err = sdcard_unmount();
+    bool ok = (err == ESP_OK);
+    ESP_LOGW(TAG, "prepare-for-power-off: unmount %s",
+             ok ? "ok" : esp_err_to_name(err));
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, ok ? T(S_POWEROFF_OK) : T(S_POWEROFF_FAIL));
+    return ok ? ESP_OK : ESP_FAIL;
+}
+#endif
 
 static esp_err_t confirm_post_handler(httpd_req_t *req)
 {
@@ -5104,6 +5199,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "Web OTA successful, rebooting");
+    sysmon_flush_persistent();   /* same reason as /reboot */
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, T(S_UPLOAD_OK));
     esp_timer_start_once(reboot_timer_handle, 1000000);
@@ -6179,32 +6275,73 @@ static esp_err_t internal_tar_handler(httpd_req_t *req)
 
 /* Stream the last `tail` bytes of an open file into a <pre>, HTML-escaping
  * '<', '>' and '&'. Skips the first (partial) line when not starting at 0. */
+/* True if `s` starts with an ESP-IDF log prefix carrying a millisecond
+ * timestamp -- "I (05:12:44.623) ". Only that exact shape, so the frame CSV
+ * (different columns entirely) is never touched. */
+static bool log_line_has_msec(const char *s, size_t len)
+{
+    if (len < 16) return false;
+    if (!(s[0] >= 'A' && s[0] <= 'Z')) return false;
+    if (s[1] != ' ' || s[2] != '(') return false;
+    for (int i = 0; i < 8; i++)
+    {
+        char c = s[3 + i];
+        bool digit = (c >= '0' && c <= '9');
+        if ((i == 2 || i == 5) ? (c != ':') : !digit) return false;
+    }
+    if (s[11] != '.') return false;
+    return s[12] >= '0' && s[12] <= '9' &&
+           s[13] >= '0' && s[13] <= '9' &&
+           s[14] >= '0' && s[14] <= '9' && s[15] == ')';
+}
+
+/* Streams the tail of a log file into the page, HTML-escaped.
+ *
+ * Line-based rather than fixed-size chunks: the millisecond trim below has to
+ * see a whole timestamp, and a 512-byte read boundary can fall right inside
+ * one. The date is not added per line on purpose -- the system log already
+ * carries "===== YYYY-MM-DD (Day) =====" markers at each session start and
+ * midnight rollover, which pin a multi-day log to a calendar day without
+ * repeating the date on every single line. */
 static void stream_tail_escaped(httpd_req_t *req, FILE *f, long start)
 {
     fseek(f, start, SEEK_SET);
-    char in[512];
-    char out[512 * 5];
-    bool skip_partial = (start > 0);
-    size_t n;
-    while ((n = fread(in, 1, sizeof(in), f)) > 0)
+    char line[512];
+    char out[sizeof(line) * 5];
+
+    /* Starting mid-file lands in the middle of a line; drop that remnant. */
+    if (start > 0 && !fgets(line, sizeof(line), f))
+        return;
+
+    bool at_line_start = true;
+    while (fgets(line, sizeof(line), f))
     {
+        size_t len = strlen(line);
         size_t i = 0;
-        if (skip_partial)
+        /* Only at a real line start, and only for the log's own prefix: drop
+         * the ".623" from "(05:12:44.623)". Milliseconds stay in the file on
+         * the card -- they are worth having when reading the lines right
+         * before a crash, just not on screen. */
+        if (at_line_start && log_line_has_msec(line, len))
         {
-            while (i < n && in[i] != '\n') i++;
-            if (i < n) { i++; skip_partial = false; }
-            else continue;  /* whole chunk was the partial first line */
+            memcpy(out, line, 11);        /* "I (05:12:44" */
+            httpd_resp_send_chunk(req, out, 11);
+            i = 15;                       /* skip ".623", resume at ')' */
         }
+        /* A line longer than the buffer comes back in pieces; only the piece
+         * that actually ended with a newline starts a new line. */
+        at_line_start = (len > 0 && line[len - 1] == '\n');
+
         size_t o = 0;
-        for (; i < n; i++)
+        for (; i < len; i++)
         {
             const char *rep;
-            switch (in[i])
+            switch (line[i])
             {
             case '<': rep = "&lt;";  break;
             case '>': rep = "&gt;";  break;
             case '&': rep = "&amp;"; break;
-            default:  out[o++] = in[i]; continue;
+            default:  out[o++] = line[i]; continue;
             }
             size_t rl = strlen(rep);
             memcpy(out + o, rep, rl);
@@ -6358,6 +6495,9 @@ void webserver_init(void)
         { .uri = "/update",   .method = HTTP_POST, .handler = update_post_handler },
         { .uri = "/sniffer",  .method = HTTP_POST, .handler = sniffer_post_handler },
         { .uri = "/reboot",   .method = HTTP_POST, .handler = reboot_post_handler },
+#if CONFIG_ENABLE_SD
+        { .uri = "/poweroff", .method = HTTP_POST, .handler = poweroff_post_handler },
+#endif
         { .uri = "/confirm",  .method = HTTP_POST, .handler = confirm_post_handler },
         { .uri = "/system",   .method = HTTP_GET,  .handler = system_get_handler },
         { .uri = "/system.json", .method = HTTP_GET, .handler = system_json_get_handler },

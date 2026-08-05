@@ -75,6 +75,7 @@ static esp_err_t config_get_map_stale_sec(uint32_t *out);
 static esp_err_t config_get_pcap_filter(uint8_t *out);
 static esp_err_t config_get_tracks_enable(uint8_t *out);
 static esp_err_t config_get_tracks_days(uint32_t *out);
+static esp_err_t config_get_eth_leds(uint8_t *out);
 static esp_err_t config_set_web_password(const char *value);
 
 static const config_key_t config_keys[] = {
@@ -111,6 +112,7 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_PCAP_FILTER]        = { "pcapfilt",      NVS_TYPE_U8,  0,                           config_get_pcap_filter,        NULL },
     [CONFIG_INDEX_TRACKS_ENABLE]      = { "trkon",         NVS_TYPE_U8,  0,                           config_get_tracks_enable,      NULL },
     [CONFIG_INDEX_TRACKS_DAYS]        = { "trkdays",       NVS_TYPE_U32, 0,                           config_get_tracks_days,        NULL },
+    [CONFIG_INDEX_ETH_LEDS]           = { "ethleds",       NVS_TYPE_U8,  0,                           config_get_eth_leds,           NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -379,6 +381,22 @@ static esp_err_t config_get_tracks_enable(uint8_t *out_val)
         if (res != ESP_ERR_NVS_NOT_FOUND)
             ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
         out = 0;
+    }
+    *out_val = out ? 1 : 0;
+    return ESP_OK;
+}
+
+/* On by default -- the LEDs are the normal behaviour of the port and the only
+ * link indication on the board; switching them off is the deliberate choice. */
+static esp_err_t config_get_eth_leds(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "ethleds", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 1;
     }
     *out_val = out ? 1 : 0;
     return ESP_OK;

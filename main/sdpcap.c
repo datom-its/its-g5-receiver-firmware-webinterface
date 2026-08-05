@@ -40,6 +40,11 @@ static const char TAG[] = "SDPCAP";
 
 #define PCAP_BUF_MB_MIN    1
 #define PCAP_BUF_MB_MAX    4
+/* How long the on-demand flush waits for the SD lock before giving up. Long
+ * enough to outlast a normal in-flight flush, short enough that a wedged
+ * writer cannot stall a restart. */
+#define SDPCAP_FLUSH_LOCK_MS 3000
+
 #define PCAP_FLUSH_SEC_MIN 8
 #define PCAP_FLUSH_SEC_MAX 3600
 
@@ -339,8 +344,9 @@ static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxca
 void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
     /* Same lock as the writer: without it the prune sweep can delete (and the
-     * writer can rotate) a file this walk has open. */
-    if (!cb || !sdcard_io_begin())
+     * writer can rotate) a file this walk has open. Bounded -- this runs on
+     * the single httpd task, which must not freeze on a stuck writer. */
+    if (!cb || !sdcard_io_begin_timeout(2000))
         return;
 
     bool aborted = false;
@@ -443,6 +449,28 @@ static void sdpcap_flush_to(const char *path, size_t limit)
         remaining -= n;
     }
     pcap_del_session(h);  /* closes f (implicit fflush via fclose) */
+}
+
+size_t sdpcap_flush_now(void)
+{
+    if (!s_ready)
+        return 0;
+    /* Bounded: this runs on the restart/power-off path, which must not hang
+     * if a writer is stuck holding the lock. */
+    if (!sdcard_io_begin_timeout(SDPCAP_FLUSH_LOCK_MS))
+        return 0;
+
+    size_t pending = ring_used(&s_ring);
+    if (pending > 0)
+    {
+        time_t now = time(NULL);
+        char path[96];
+        sdpcap_current_path(path, sizeof(path), now);
+        mkdir(PCAP_DIR, 0777);   /* the periodic task may not have run yet */
+        sdpcap_flush_to(path, pending);
+    }
+    sdcard_io_end();
+    return pending;
 }
 
 /* Age+size retention sweep, rate-limited to PRUNE_INTERVAL_MS (not every
@@ -644,6 +672,7 @@ void sdpcap_init(void)
 
 void sdpcap_init(void) {}
 void sdpcap_handle_packet(sniffer_packet_info_t *packet) { (void)packet; }
+size_t sdpcap_flush_now(void) { return 0; }
 void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
     (void)from_sec; (void)to_sec; (void)cb; (void)ctx;

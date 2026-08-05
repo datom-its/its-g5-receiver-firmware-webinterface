@@ -17,6 +17,11 @@ void sdlog_init(void);
  * only enqueues into a buffer, never touches the SD card directly. */
 void sdlog_handle_packet(sniffer_packet_info_t *packet);
 
+/* Writes both ring buffers (system log, frame log) to the card immediately
+ * rather than waiting for the next 2 s writer cycle. Used by the
+ * prepare-for-power-off path; safe to call any time. */
+void sdlog_flush_now(void);
+
 #ifdef __cplusplus
 }
 #endif

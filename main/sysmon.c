@@ -22,9 +22,24 @@
 #include "tracklog.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
+#include "sdlog.h"
+#include "sdpcap.h"
 #endif
 
 static const char TAG[] = "SYSMON";
+
+void sysmon_flush_persistent(void)
+{
+#if CONFIG_ENABLE_SD
+    size_t pcap_bytes = sdpcap_flush_now();
+    sdlog_flush_now();
+    tracklog_tick();      /* both drain their queue to the card and return */
+    events_tick();
+    if (pcap_bytes)
+        ESP_LOGI(TAG, "flushed %u buffered pcap bytes before restart",
+                 (unsigned)pcap_bytes);
+#endif
+}
 
 /* Supervisory loop period. All thresholds below are expressed in wall-clock
  * time and converted to tick counts against this. */
@@ -49,7 +64,12 @@ static const char TAG[] = "SYSMON";
 static void reboot_after(const char *reason)
 {
     ESP_LOGE(TAG, "%s -- rebooting", reason);
-    /* Let the log line flush (also to the SD log's writer task) before we go. */
+    /* Gives the UART log line a moment to drain. It does NOT reliably reach
+     * the SD log: that writer runs on a 2 s cycle, so 300 ms catches it only
+     * by chance. Deliberately left short, and deliberately WITHOUT
+     * sysmon_flush_persistent() -- this path fires because something is
+     * already wedged, possibly the SD writer itself, and getting out fast
+     * beats saving the last few minutes of capture. */
     vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
 }

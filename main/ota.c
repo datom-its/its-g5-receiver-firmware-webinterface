@@ -14,6 +14,8 @@
 #include "esp_timer.h"
 #include "argtable3/argtable3.h"
 
+#include "sysmon.h"
+
 /* 8 KB, not 3 KB: this task runs esp_https_ota(), whose TLS handshake and
  * certificate-bundle verification alone need more than 3 KB of stack -- the
  * old size risked a stack-canary panic mid-update, i.e. the remote update
@@ -58,7 +60,10 @@ static void ota_task(void *)
     if (res == ESP_OK)
     {
         if (reboot_after_update)
+        {
+            sysmon_flush_persistent();   /* see cmd_reboot in main.c */
             esp_restart();
+        }
     }
     else
     {

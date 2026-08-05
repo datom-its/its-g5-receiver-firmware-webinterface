@@ -154,8 +154,10 @@ void events_tick(void)
         return;
 
     /* Guards the append and the prune rewrite against unmount/format, and
-     * against events_read() having the file open at the same time. */
-    if (!sdcard_io_begin())
+     * against events_read() having the file open at the same time. Bounded
+     * for the same reason as tracklog_tick(): this runs on the sysmon
+     * (watchdog) task, which must never block on a stuck SD writer. */
+    if (!sdcard_io_begin_timeout(2000))
         return;
 
     /* Snapshot and clear the queue under the lock, write outside it. */
@@ -216,8 +218,10 @@ int events_read(uint32_t hours, event_rec_t *out, int max)
     /* Keep a rolling window of the newest `max` matching rows. */
     int count = 0;
     /* Same lock as the writer: prune() renames EV_CSV out from under a
-     * concurrent read otherwise. */
-    if (!sdcard_io_begin())
+     * concurrent read otherwise. Bounded -- this runs on the single httpd
+     * task, so waiting indefinitely on a stuck writer would freeze the whole
+     * web UI. An empty list is the better failure here. */
+    if (!sdcard_io_begin_timeout(2000))
         return 0;
     FILE *f = fopen(EV_CSV, "r");
     if (f)

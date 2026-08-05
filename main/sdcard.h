@@ -38,6 +38,13 @@ esp_err_t sdcard_format(void);
 bool sdcard_io_begin(void);
 void sdcard_io_end(void);
 
+/* Same, but gives up after `timeout_ms` instead of waiting forever. For paths
+ * that must stay responsive even when the SD side is wedged -- above all the
+ * flush-before-restart, where blocking would turn a reboot into a hang, and a
+ * reboot is often exactly what someone reaches for when things are stuck.
+ * Returns false on timeout (lock NOT held, do not call sdcard_io_end). */
+bool sdcard_io_begin_timeout(uint32_t timeout_ms);
+
 /* Total and free bytes of the mounted filesystem. */
 esp_err_t sdcard_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 

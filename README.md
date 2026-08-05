@@ -32,6 +32,7 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.25.0-webui** | The Ethernet port's two LEDs can be switched off from the settings page, taking effect immediately. Also adds a "prepare for power-off" button that flushes every buffer and unmounts the SD card, and the same flush now runs before each deliberate restart, so a reboot no longer discards the buffered recording. |
 | **0.23.0-webui** | The map can show the vehicle tracks of every configured receiver at once, each in its own colour, as a second switchable layer. |
 | **0.22.7-webui** | Fixes 28 defects, among them a script injection from a MAPEM intersection name, a deadlock on an MQTT `sniffer --stop`, an SD unmount racing an in-flight write, and four decoder faults. Each device now advertises a unique mDNS instance name and browser-tab title. |
 | **0.22.4-webui** | All decoders (CAM, DENM, SPATEM, MAPEM) validated against the ETSI standards, fixing the DENM cause code and CAM size limits. Adds vehicle detail in map popups (heading, braking, lights, role), a switchable vehicle-track layer, multi-receiver map sharing, and recording thinning. |
