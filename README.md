@@ -8,10 +8,18 @@ of the upstream firmware.
 
 Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 
+![Status page](docs/screenshot-status.png)
+
+*Status page. The node ID and MAC address are masked in this screenshot.*
+
+![File management](docs/screenshot-files.png)
+
+*File management: flash partitions and the SD card.*
+
 ## Download
 
 Pre-compiled binaries are available under
-[**Releases**](https://codeberg.org/datom/its-g5-receiver-firmware-webui/releases)
+[**Releases**](https://codeberg.org/datom/its-g5-receiver-firmware-webinterface/releases)
 — the newest release is at the top of that page. Download
 `its-g5-receiver-firmware.bin` and flash it via the web interface (`/update`),
 or grab all four `.bin` files for an initial flash over serial (see below).
