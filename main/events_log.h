@@ -3,17 +3,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Warning-event log: every DENM (decentralized environmental notification --
- * i.e. a hazard/traffic warning) is recorded with time, sender station type
- * and position to /sdcard/logs/events.csv, so a 24 h..30 d history survives
- * reboots. The "Verkehr" web page lists them. The `cause` field is reserved
- * carries the decoded DENM cause category (0 = unknown). */
+/* Warning-event log: every DENM is recorded (time, sender type, position,
+ * cause) to /sdcard/logs/events.csv; the "Verkehr" page lists them. */
 
-/* One row per WARNING EVENT, not per message. A hazard is re-broadcast for
- * as long as it lasts -- one real event produced 71 messages in a capture --
- * so repeats carrying the same ActionID are folded into a single record with
- * a count and a last-seen time. Listing every message instead made the page
- * both endless and misleading about how much was actually happening. */
+/* One row per warning EVENT, not per message: repeats with the same ActionID
+ * fold into one record with count + last-seen. */
 typedef struct {
     uint32_t seconds;       /* unix time first seen */
     uint32_t last_seen;     /* unix time of the most recent repeat */

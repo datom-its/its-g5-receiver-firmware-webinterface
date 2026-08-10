@@ -79,14 +79,8 @@ extern const uint8_t leaflet_css_end[]            asm("_binary_leaflet_css_end")
 
 static const char TAG[] = "WEBSERVER";
 
-/* snprintf for page markup that says so when it had to truncate.
- * -Wformat-truncation cannot catch these: the arguments are runtime strings
- * (translated UI text), so the compiler has no length to reason about. Cut
- * markup does not fail quietly -- it drops closing tags, and the browser then
- * swallows the rest of the page. That has cost three debugging sessions now:
- * a chip buffer collapsed the traffic page layout, a table row broke the
- * warning list, and an undersized map header removed the map container
- * itself. One log line at the moment of truncation replaces all of that. */
+/* snprintf that logs when it truncated: cut markup drops closing tags and the
+ * browser swallows the rest of the page; -Wformat-truncation can't see runtime strings. */
 #define HTML_PRINTF(buf, ...)                                                  \
     do {                                                                       \
         int _hp_n = snprintf((buf), sizeof(buf), __VA_ARGS__);                 \
@@ -705,12 +699,8 @@ static size_t msg_ring_count;
 static uint32_t msg_total_count;
 static SemaphoreHandle_t msg_ring_mutex;
 
-/* Recent-DENM tracker: remembers the wall-clock second each station last sent
- * a hazard warning (DENM), so /map can flag that sender's marker with a
- * warning for ~60 s. Lockless -- all fields are 32-bit words (atomic
- * read/write on the RISC-V core) and the data is purely cosmetic, so a torn
- * read between the two words is harmless. Uses time(NULL) at both note and
- * read time, so it stays self-consistent whether or not NTP has synced. */
+/* Recent-DENM tracker so /map can flag senders for ~60 s. Lockless: 32-bit
+ * words, cosmetic data, torn reads harmless. */
 #define DENM_TRACK_N 32
 #define DENM_RECENT_SEC 60
 /* Also remembers WHAT the warning was: the map popup used to show only a
@@ -1052,14 +1042,8 @@ static const char PAGE_HEADER_FMT[] =
     "*{box-sizing:border-box;accent-color:#f2b134}"
     /* Amber accent (device's subject is vehicles/traffic lights), signal-
      * blue kept distinct for links so they're never mistaken for buttons. */
-    /* min-height:100vh: on a page shorter than the viewport (e.g. /update),
-     * body's own background otherwise stops at its content height, showing
-     * bare layers underneath as visible horizontal bands. Deliberately no
-     * explicit html{background} here -- that disables the CSS canvas-
-     * background-propagation rule (body's background becomes the viewport's
-     * own canvas paint, body's own box then paints transparent), which is
-     * what let body::before's radar sweep (z-index:-1, otherwise stacked
-     * BEHIND body's own now-opaque background) show through at all. */
+    /* min-height:100vh so short pages don't show bare layers below; deliberately
+     * no html{background} -- it would break canvas propagation and hide the radar sweep. */
     "body{min-height:100vh;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;color:#edf0f2;line-height:1.5;position:relative;"
     "background:"
     "radial-gradient(circle at 12%% -8%%,rgba(242,177,52,.13),transparent 42%%),"
@@ -1123,11 +1107,8 @@ static const char PAGE_HEADER_FMT[] =
     ".scroll td.wrapcell{white-space:normal;word-break:break-word}"
     /* Narrow screens: tighter padding, #mtbl drops its redundant "#" column. */
     "@media(max-width:640px){"
-    /* Collapse nav to a hamburger: burger+flags row, links drop into a
-     * dropdown on tap (.nvt:checked). Sticky so the dropdown stays reachable
-     * while scrolling. z-index:1000, not lower -- Leaflet's own panes
-     * (/map only) go up to 700 and would otherwise render on top of an
-     * open dropdown. */
+    /* Nav collapses to a hamburger dropdown; sticky, z-index above Leaflet's
+     * panes (up to 700) so an open dropdown wins on /map. */
     "nav{flex-wrap:wrap;align-items:center;position:sticky;top:0;z-index:1000}"
     "nav .brgr{display:block;order:1}"
     "nav .lang{order:2;margin-left:auto}"
@@ -1137,11 +1118,8 @@ static const char PAGE_HEADER_FMT[] =
     "nav .navlinks a{padding:9px 12px}"
     ".scroll th,.scroll td{padding:8px 6px}"
     "#mtbl th:first-child,#mtbl td:first-child{display:none}"
-    /* .kv th is nowrap+shrink-to-fit, but that shrinks to the WIDEST label
-     * in the WHOLE table (shared column width) -- one long label (e.g.
-     * "Web-Passwort (Benutzer ...)") was enough to push that column, and so
-     * the whole table, wider than the screen on every row, not just its
-     * own. Wrapping it onto 2 lines above this width caps the damage. */
+    /* th column width is shared table-wide: one long label pushed the whole
+     * table off-screen, so wrap labels beyond this width. */
     ".kv th{white-space:normal;max-width:38vw}"
     "}"
     "button{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;font-weight:600;border:none;font-size:13.5px;padding:9px 15px;border-radius:8px;margin:3px 5px 3px 0;cursor:pointer;"
@@ -1150,11 +1128,8 @@ static const char PAGE_HEADER_FMT[] =
     "button:active{transform:translateY(1px)}"
     "input,select{background:#0c1013;color:#edf0f2;border:1px solid #333a41;border-radius:7px;padding:7px 9px;font-size:13.5px;max-width:100%%}"
     "input:focus,select:focus{outline:none;border-color:#4fb8e0;box-shadow:0 0 0 3px rgba(79,184,224,.18)}"
-    /* File inputs sit directly before an upload button (/update, file
-     * management); on narrow screens where they don't fit on one line, the
-     * button wrapped to its own line with NO gap above it, looking stuck to
-     * the field. margin-bottom gives that wrapped line some breathing room;
-     * harmless when they DO fit side by side (just a little extra space). */
+    /* Breathing room for the upload button when it wraps under its file input
+     * on narrow screens; harmless when they fit side by side. */
     "input[type=file]{margin:4px 8px 8px 0}"
     ".kv input:not([type=checkbox]):not([type=range]){width:100%%;max-width:360px}"
     /* Range inputs were excluded above and need their own width cap, else
@@ -1197,7 +1172,9 @@ static const char PAGE_HEADER_FMT[] =
     "<a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
     "<a href='/map?lang=%s'>%s</a>"
+#if CONFIG_ENABLE_SD
     "<a href='/traffic?lang=%s'>%s</a>"
+#endif
     "<a href='/system?lang=%s'>%s</a>"
 #if CONFIG_ENABLE_SD
     "<a href='/sdcard?lang=%s'>%s</a><a href='/logs?lang=%s'>%s</a>"
@@ -1218,12 +1195,8 @@ static const char PAGE_FOOTER[] =
     "if(h&&h===location.pathname)a.className='active';});</script>"
     "</div></body></html>";
 
-/* `json_url` != NULL enables the floating pause/resume button + polling
- * loop: it fetches that URL every `CONFIG_INDEX_REFRESH_SEC` seconds and
- * hands the parsed JSON to `window.arApply` (defined by the page's own
- * inline script, further down in the same HTML stream -- already parsed
- * by the time this runs, since it only fires on the `load` event). No
- * full-page reload, so CSS animations (the radar sweep) never restart. */
+/* `json_url` enables the pause/resume button + polling loop feeding
+ * window.arApply -- no full reload, so CSS animations never restart. */
 static void send_page_header_refresh(httpd_req_t *req, const char *heading, const char *json_url)
 {
     /* static EXT_RAM_BSS_ATTR, not a stack buffer -- the httpd task's stack
@@ -1259,12 +1232,8 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
     const char *lang_de_active = (current_lang == LANG_DE) ? "active" : "";
     const char *lang_en_active = (current_lang == LANG_EN) ? "active" : "";
 
-    /* Browser-tab / home-screen title: append the node id so it's still
-     * distinguishable with several receivers open at once -- "ITS G5 Node"
-     * alone (the old fixed text) looked identical in every tab. Nodeid is
-     * free text from NVS (user-editable on /settings), so it must be
-     * HTML-escaped same as everywhere else it's rendered (see the
-     * /settings page's own nodeid_esc). */
+    /* Tab/home-screen title carries the node id so several receivers stay
+     * distinguishable; nodeid is user-editable, hence HTML-escaped. */
     char nodeid_raw[CONFIG_NODEID_BUFFER_SIZE] = {0};
     size_t nodeid_raw_size = sizeof(nodeid_raw);
     config_get_str(CONFIG_INDEX_NODEID, nodeid_raw, &nodeid_raw_size);
@@ -1298,7 +1267,9 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
              lc, T(S_NAV_SETTINGS),
              lc, T(S_NAV_UPDATE),
              lc, T(S_NAV_MAP),
+#if CONFIG_ENABLE_SD
              lc, T(S_NAV_TRAFFIC),
+#endif
              lc, T(S_NAV_SYSTEM),
 #if CONFIG_ENABLE_SD
              lc, T(S_NAV_SD),
@@ -1387,12 +1358,8 @@ static void build_typeline_html(char *out, size_t out_size)
 
 static void render_activity_stats(httpd_req_t *req)
 {
-    /* Sent as separate chunks (title / svg / breakdown) rather than composed
-     * into one buffer: the sparkline alone can approach its 6 KiB capacity,
-     * and gcc's -Werror=format-truncation assumes that worst case for any
-     * %s of a fixed-size array -- concatenating it into another snprintf
-     * would need an implausibly large destination just to satisfy the
-     * compiler. */
+    /* Sent as separate chunks: the sparkline nears its 6 KiB buffer and
+     * -Werror=format-truncation would demand an absurd combined destination. */
     char title[128];
     snprintf(title, sizeof(title), "<h3>%s</h3>", T(S_ACTIVITY_TITLE));
     httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
@@ -1554,12 +1521,8 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         );
     httpd_resp_send_chunk(req, buttons, HTTPD_RESP_USE_STRLEN);
 
-    /* Applies a /status.json response to the cells above. Sniffer/MQTT
-     * labels are embedded here (not re-sent every poll) since they're
-     * fixed for the page's lifetime; innerHTML (not textContent) because
-     * they may contain an HTML entity (e.g. "l&auml;uft"). Also swaps the
-     * Start/Stop button's label + action so it stays correct without a
-     * reload after a start/stop triggered from elsewhere. */
+    /* Applies /status.json to the cells; innerHTML because labels can carry
+     * entities, and the Start/Stop button swaps label+action in the same pass. */
     char applyscript[1536];
     snprintf(applyscript, sizeof(applyscript),
         "<script>(function(){"
@@ -1659,6 +1622,11 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
 
 static httpd_handle_t g_httpd_server;
 static uint32_t ws_last_broadcast_count = UINT32_MAX;
+#endif /* CONFIG_HTTPD_WS_SUPPORT */
+
+/* The JSON/text builders below are shared: the WS live feed, the /messages
+ * page and /markers.json (multi-receiver map) all use them, so they must
+ * exist even when websocket support is compiled out. */
 
 /* Compact JSON for the browser to turn into table rows; single-letter field
  * names (t/r/l/y/h, a/o/i for lat/lon/stationId) to keep the payload small.
@@ -1686,20 +1654,8 @@ static size_t denm_json(uint32_t station_id, uint32_t now, char *out, size_t cap
     return (size_t)snprintf(out, cap, ",\"d\":1");
 }
 
-/* Appends the optional CAM-detail keys shared by the live feed and the map
- * seed. Kept in one place so the two can't drift apart -- they already
- * carried two separate copies of the speed/size/line block.
- *
- * KEYS ALREADY TAKEN in this message object, check before adding one:
- *   i station id   a lat        o lon         y label      t time
- *   r rssi         l length     h HEX PREVIEW s speed      d denm flag
- *   vl length      vw width     pl pt line
- *   hd heading     ac pedals    el lights     vr role      eb embarking
- *   ph path
- * `h` is the frame hex dump and predates all of this -- naming the heading
- * `h` made every popup read "heading NaN", because m.h was that string.
- *
- * Returns the number of bytes written (0 if the entry carries none). */
+/* Optional CAM-detail keys shared by live feed and map seed. Single-letter
+ * keys are crowded -- check for collisions before adding one (`h` is the hex dump!). */
 static size_t cam_json_extra(const web_msg_entry_t *e, char *out, size_t cap)
 {
     size_t n = 0;
@@ -1733,12 +1689,8 @@ static size_t cam_json_extra(const web_msg_entry_t *e, char *out, size_t cap)
     return n;
 }
 
-/* One-line human summary of a message for the /messages table, replacing the
- * 32-byte hex preview that used to sit there. Measured over 3965 real frames,
- * 25 of those 32 bytes were identical in every single one: the preview showed
- * the 802.11 header, the sender MAC (already a column) and a sequence
- * counter. Everything a reader cares about begins well past byte 32. Raw
- * bytes remain available in full via the PCAP download. */
+/* One-line human summary replacing the hex preview -- 25 of those 32 bytes
+ * were identical boilerplate on every real frame; raw bytes stay in the PCAP. */
 static void msg_detail_text(const web_msg_entry_t *e, uint32_t now,
                             char *out, size_t cap)
 {
@@ -1809,6 +1761,9 @@ static void msg_detail_text(const web_msg_entry_t *e, uint32_t now,
         snprintf(out, cap, "&ndash;");
 }
 
+/* Only two consumers: the websocket broadcast and /markers.json (SD builds).
+ * Guarded so a build with neither doesn't carry a dead function. */
+#if CONFIG_HTTPD_WS_SUPPORT || CONFIG_ENABLE_SD
 static size_t build_msg_json(char *out, size_t out_size)
 {
     static EXT_RAM_BSS_ATTR web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
@@ -1863,20 +1818,10 @@ static size_t build_msg_json(char *out, size_t out_size)
                 denm_json(e->station_id, jnow, possuffix + po, sizeof(possuffix) - po);
         }
 
-        /* msgtype/clock/rssi_str hold only digits, letters, spaces, ':',
-         * '-', '.' (see its_decode_frame/format_clock), and `detail` is
-         * assembled from our own tables and formatted numbers -- none of it
-         * is frame-controlled, so no JSON escaping is needed. It does carry
-         * HTML entities and a <span>, which is fine: the row is built with
-         * innerHTML on the client. */
-        /* Measure first and stop while the closing bracket still fits. The
-         * old form let `o` run past the buffer, and then the final `]` was
-         * silently skipped -- the client received malformed JSON, its parse
-         * threw, and the live table and map quietly stopped updating. With
-         * a fully decoded detail line per entry the worst case is around
-         * 20 KB against a 6 KB buffer, so this is reachable, not theoretical.
-         * Entries are walked newest-first, so what gets dropped is the
-         * oldest -- the right end to lose. */
+        /* All inputs here are our own tables and formatted numbers, nothing frame-
+         * controlled -- no JSON escaping needed; entities/<span> are fine via innerHTML. */
+        /* Measure first and stop while the closing `]` still fits -- overrunning
+         * silently dropped it and the client's JSON.parse threw. Newest first, oldest drop. */
         static const char ENTRY_FMT[] =
             "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"%s}";
         int need = snprintf(NULL, 0, ENTRY_FMT,
@@ -1893,14 +1838,11 @@ static size_t build_msg_json(char *out, size_t out_size)
     out[o] = '\0';
     return o;
 }
+#endif /* CONFIG_HTTPD_WS_SUPPORT || CONFIG_ENABLE_SD */
 
-/* Sockets whose last send failed, so the next ticks skip them instead of
- * retrying once a second. A browser tab closed without a clean WebSocket
- * close leaves esp_http_server still reporting the socket as a live
- * websocket for many minutes; every tick then tried again, failed again and
- * logged again -- 816 warnings in one day of testing, in bursts of twelve a
- * minute lasting a quarter hour each. The entry expires so a reused file
- * descriptor is not shut out permanently. */
+#if CONFIG_HTTPD_WS_SUPPORT
+/* Sockets whose last send failed are skipped for a while (a dirty-closed tab
+ * stays "live" for minutes and spammed warnings); entries expire so reused fds recover. */
 #define WS_DEAD_N        8
 #define WS_DEAD_HOLD_SEC 60
 
@@ -2348,11 +2290,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, "];</script>", HTTPD_RESP_USE_STRLEN);
 
 #if CONFIG_HTTPD_WS_SUPPORT
-    /* Reuses the /ws feed from /messages, also reading its a/o/i keys.
-     * Markers are emoji divIcons (no image asset needed), keyed by
-     * station_id, evicted after 60s without an update. Initial view guessed
-     * from the browser's IANA timezone (Geolocation API needs HTTPS, which
-     * this plain-HTTP device doesn't have) -- overridden on first real fix. */
+    /* Reuses the /ws feed keys. Emoji divIcon markers keyed by station_id, evicted
+     * after 60 s; initial view guessed from the browser timezone (plain HTTP = no geolocation). */
     static const char MAP_SCRIPT[] =
         "<script>(function(){"
         "var TZVIEW={'Europe/Vienna':[47.6,14.5,7],'Europe/Berlin':[51,10.3,6],"
@@ -2366,12 +2305,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "var sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/"
         "World_Imagery/MapServer/tile/{z}/{y}/{x}',"
         "{maxZoom:19,attribution:'Tiles &copy; Esri'});"
-        /* Two CARTO layers alongside OSM and the satellite view. The dark
-         * one is what loads by default: the rest of the interface is dark,
-         * and the coloured lane and track overlays read far better on it
-         * than on the bright street map. Its light, low-contrast sibling is
-         * there for daylight. Same external-tile arrangement as the other
-         * two already use. */
+        /* Dark CARTO layer by default (the overlays read better on it); light sibling
+         * for daylight, same external-tile arrangement as OSM/satellite. */
         "var dark=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',"
         "{maxZoom:20,subdomains:'abcd',"
         "attribution:'&copy; OpenStreetMap contributors, &copy; CARTO'}).addTo(map);"
@@ -2390,27 +2325,12 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         /* Vehicle tracks as a switchable overlay, loaded only when actually
          * switched on -- it is a separate request against the SD card, and
          * most visits to the map do not want it. */
-        /* One shared canvas renderer for every track polyline. The first
-         * version created a fresh L.canvas() per line, and Leaflet backs each
-         * one with its own <canvas> element sized to the map viewport times
-         * device pixel ratio -- a few MB EACH on a retina phone. With a few
-         * hundred vehicle tracks that piled up past a gigabyte and mobile
-         * Safari killed the tab ("page was reset because it used too much
-         * memory"). One renderer shared across all of them uses one canvas
-         * no matter how many tracks there are. */
+        /* ONE shared canvas renderer for all track polylines -- per-line L.canvas()
+         * cost megabytes each on retina, and mobile Safari killed the tab. */
         "var trackRenderer=L.canvas();"
         "var trackLayer=L.layerGroup(),tracksLoaded=false;"
-        /* Second overlay for the other receivers' tracks, offered only when
-         * any are configured. Deliberately a SEPARATE layer rather than
-         * folding them into the one above: both can then be on at once (which
-         * is the "all three together" view) or either on its own, with no
-         * mutually-exclusive-checkbox trickery. Tracks are drawn per receiver
-         * and never merged into one line per vehicle -- /tracks.json carries
-         * no timestamps, so points from two receivers could not be ordered
-         * against each other, and interleaving them by guess would draw a
-         * zigzag that no vehicle ever drove. Two lines for one vehicle is
-         * also the more informative picture: it shows where the receivers'
-         * ranges overlap. */
+        /* Separate overlay for peers' tracks, never merged per vehicle -- no
+         * timestamps to order points across receivers, and separate lines show the overlap. */
         "var peerTrackLayer=L.layerGroup(),peerTracksLoaded=false;"
         "var overlays={};overlays[ITS_MAP_L_TRACKS]=trackLayer;"
         "if(ITS_MAP_PEERS.length)overlays[ITS_MAP_L_TRACKS_P]=peerTrackLayer;"
@@ -2454,14 +2374,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "LTruck:'\\ud83d\\ude9a',HTruck:'\\ud83d\\ude9b',Trailer:'\\ud83d\\ude9b',"
         "Special:'\\ud83d\\udea7',Tram:'\\ud83d\\ude8a',RSU:'\\ud83d\\udea6'};"
         "function emojiFor(y){for(var k in EMOJI){if(y===k||y.indexOf(k+' ')===0)return EMOJI[k];}return '\\ud83d\\udccd';}"
-        /* Heading is drawn as a needle sweeping around the emoji, not by
-         * rotating the emoji itself -- a tilted car glyph reads as a
-         * rendering fault. A CSS border triangle, deliberately NOT a text
-         * arrow: the first attempt used an arrow character sitting at a
-         * negative offset outside the icon box, and it never became visible
-         * on the device. A triangle inside the box depends on no font and
-         * cannot be clipped. `transform-origin` is the box centre, so the
-         * needle orbits the marker; 0 deg points north, as headings do. */
+        /* Heading is a CSS border-triangle needle orbiting the emoji (rotating the
+         * glyph reads as a rendering fault; a text arrow never showed on device). */
         "function iconFor(y,hd){var a='';"
         "if(hd!==undefined)a='<span style=\"position:absolute;top:0;left:50%;'"
         "+'width:0;height:0;margin-left:-5px;'"
@@ -2539,25 +2453,15 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * only ~30% of a bus's CAMs carry the public-transport container, so
          * remember it per station and keep showing it on the later messages
          * that omit it (otherwise it just flickers past). */
-        /* Sparse per-vehicle attributes: only ~40% of a bus's CAMs carry the
-         * public-transport container, so without a memory the line number
-         * flickers. Held OUTSIDE `markers` on purpose -- seeking backwards in
-         * playback destroys and rebuilds markers, which used to wipe it and
-         * left the replay showing a line only on the odd frame. `vr` (role)
-         * is just as sparse and gets the same treatment. */
-        /* Not every CAM carries every field: a car sends its lights in ~75%
-         * of messages and its line/role only occasionally, so the popup used
-         * to blink them in and out. Remember the last value SEEN per station
-         * and fill it back in when a message omits it -- a field only ever
-         * changes when the vehicle actually sends a new value for it. */
+        /* Sparse attributes held OUTSIDE `markers`: playback seeks rebuild markers
+         * and used to wipe them, making line numbers flicker. */
+        /* Remember the last value seen per station -- not every CAM carries every
+         * field, and the popup used to blink them in and out. */
         "var mem=VMEM[key]||(VMEM[key]={});"
         "['pl','vr','ac','el','hd','vl','vw','dt'].forEach(function(f){"
         "if(m[f]!==undefined)mem[f]=m[f]; else if(mem[f]!==undefined)m[f]=mem[f];});"
-        /* Which receivers heard this station, as a set with timestamps. The
-         * local feed and each peer arrive as separate updates, so a single
-         * field would just be overwritten by whichever landed last -- the
-         * local one, once a second. Sources age out on the same staleness
-         * rule as the markers themselves. */
+        /* Which receivers heard this station, as a timestamped set -- a single field
+         * would be overwritten by whichever update landed last. */
         "var who=m.src||ITS_MAP_SELF;"
         "mem.src=mem.src||{};mem.src[who]=now;"
         "var lst=[];for(var w in mem.src){"
@@ -2594,16 +2498,10 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         /* Poll traffic-light phases; refreshed into SPAT so the next popup
          * render (each /ws tick rebinds popups) shows current phases. Only in
          * live mode -- historical playback has no phase data. */
-        /* Other receivers, merged in from the browser. Markers are keyed by
-         * station id, so a vehicle two receivers both hear collapses into one
-         * marker on its own -- and where their ranges overlap becomes
-         * visible. Failures are ignored silently: a peer being rebooted or
-         * off must not disturb the local map. */
-        /* One request per peer in flight, never more: against a host that
-         * drops packets instead of refusing them, a browser fetch can hang
-         * for minutes -- fired again every two seconds, those pile up (and
-         * mobile Safari is the first to mind). A peer is simply skipped
-         * until its previous request has finished either way. */
+        /* Peers merged in the browser; markers keyed by station id, so shared
+         * vehicles collapse and range overlap becomes visible. Failures stay silent. */
+        /* One request per peer in flight: hung fetches against a dead host pile up
+         * when re-fired every two seconds (mobile Safari minds first). */
         "var peerBusy={};"
         "function fetchPeers(){if(!liveMode||!ITS_MAP_PEERS.length)return;"
         "ITS_MAP_PEERS.forEach(function(hp){"
@@ -2716,11 +2614,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "document.getElementById('pbctl').style.display='none';"
         "for(var k in markers)dropMarker(k);markers={};"
         "apply(window.ITS_MAP_SEED||[]);startSweep();}"
-        /* Wired up here (not inline HTML onclick=/oninput=) because those
-         * run in the *global* scope, not inside this IIFE -- an inline
-         * onclick='pbLoad()' can't see pbLoad at all, since it's private to
-         * this closure. This is exactly why nothing happened when clicking
-         * Load: a silent "pbLoad is not defined" in the console. */
+        /* Wired here, not inline onclick= -- inline handlers run in global scope and
+         * can't see functions private to this IIFE. */
         "document.getElementById('pbload').onclick=pbLoad;"
         "document.getElementById('pbplay').onclick=pbToggle;"
         "document.getElementById('pbslider').oninput=function(){pbSeek(this.value);};"
@@ -2766,13 +2661,8 @@ static esp_err_t spatem_json_handler(httpd_req_t *req)
     {
         spatem_intersection_t *e = &ints[i];
         unsigned long age = now > e->last_seen ? (unsigned long)(now - e->last_seen) : 0;
-        /* Name is IA5 from the MAPEM and further filtered to printable ASCII
-         * by the decoder, but '"' and '\' would still break the JSON string.
-         * '<' '>' '&' are dropped too: this string comes off the air from an
-         * unauthenticated sender and the map popup renders it as markup
-         * (Leaflet bindPopup -> innerHTML). The client escapes it as well
-         * (htxt() in MAP_SCRIPT) -- both, because either alone would leave a
-         * script-injection path open for any future consumer of this field. */
+        /* The name comes off the air unauthenticated and the popup renders markup, so
+         * strip quotes AND angle brackets here; the client escapes again (htxt) -- both on purpose. */
         char nm[ITS_MAP_NAME_LEN];
         size_t nw = 0;
         for (size_t k = 0; e->name[k] && nw + 1 < sizeof(nm); k++)
@@ -2835,11 +2725,8 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
         first = false;
 
-        /* Separator keys off what was actually emitted, not off the loop
-         * index: lanes with fewer than two nodes are skipped, and a skipped
-         * lane 0 would otherwise put a leading comma into the array --
-         * malformed JSON that kills the lane overlay for ALL intersections,
-         * silently (the client's fetch has a bare .catch). */
+        /* Separator keys off what was actually emitted -- a skipped lane 0 would
+         * emit a leading comma: malformed JSON that silently kills the whole overlay. */
         bool first_lane = true;
         for (uint8_t l = 0; l < g->n_lanes; l++)
         {
@@ -2874,12 +2761,8 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
 /* ================================================================== */
 
 #if CONFIG_ENABLE_SD
-/* A stationary RSU broadcasts SPATEM ~10x a second from an unchanging
- * position, so replaying every frame verbatim produced ~9000 identical
- * entries per quarter hour -- megabytes of JSON, each entry its own chunked
- * write, and the browser gave up long before the end. Playback only needs
- * "where was this station at time T", so a station is re-emitted when it has
- * actually moved, and otherwise only occasionally to keep the marker alive. */
+/* An RSU repeats an unchanged position ~10x/s; re-emit only on movement (plus
+ * an occasional keep-alive) or playback JSON runs to megabytes. */
 #define PB_MAX_STATIONS  96   /* distinct senders tracked; beyond that, no dedup */
 #define PB_MIN_GAP_SEC    1   /* fastest re-emit for a station that IS moving */
 #define PB_KEEPALIVE_SEC 30   /* re-emit an unmoved station this often */
@@ -2970,12 +2853,8 @@ static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
 
     /* Same optional keys as the live /ws feed, so the map's popupHtml renders
      * a replayed marker exactly like a live one. */
-    /* MUST be initialised: when a frame carries none of these optional keys
-     * (every RSU message, for one), nothing below writes to it, and the
-     * uninitialised stack bytes were being printed straight into the JSON.
-     * That produced invalid UTF-8 mid-response and made the browser's
-     * JSON.parse throw -- i.e. "error loading" on an otherwise fine reply.
-     * Worst case with every key set is ~92 bytes. */
+    /* MUST be initialised: frames without these optional keys (every RSU) would
+     * otherwise print uninitialised stack bytes into the JSON. */
     char extra[320] = "";
     size_t eo = 0;
     if (d->has_speed)
@@ -3040,6 +2919,9 @@ static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
 /*  GET /traffic  -- per-hour traffic statistics + warning list       */
 /* ================================================================== */
 
+
+#endif /* CONFIG_ENABLE_SD -- the cause-code texts below are shared with the
+        * always-present map/messages JSON, so they stay outside the guard. */
 
 /* DENM cause code -> plain text. The numbering is the ETSI CauseCodeChoice
  * index, which the ASN.1 keeps equal to the classic cause code by way of
@@ -3147,6 +3029,35 @@ static const char *denm_sub_text(uint8_t cause, uint8_t sub)
     return NULL;
 }
 
+/* What a signal group controls, as short text ("geradeaus", "links, rechts",
+ * "Fussgaenger"), from the MAPEM lane geometry. Empty when no MAPEM for that
+ * intersection has been decoded yet. Outside the SD guard: /spatem.json
+ * needs it too. */
+static void spat_movement_text(const spatem_intersection_t *e, uint8_t sg,
+                               char *out, size_t out_size)
+{
+    out[0] = '\0';
+    uint16_t man = 0;
+    bool ped = false;
+    if (!spatem_movement(e, sg, &man, &ped))
+        return;
+    if (ped)
+    {
+        snprintf(out, out_size, "%s", T(S_DIR_PED));
+        return;
+    }
+    size_t o = 0;
+    const struct { uint16_t bit; str_id_t id; } D[] = {
+        { ITS_MAN_STRAIGHT, S_DIR_STRAIGHT }, { ITS_MAN_LEFT, S_DIR_LEFT },
+        { ITS_MAN_RIGHT, S_DIR_RIGHT },       { ITS_MAN_UTURN, S_DIR_UTURN },
+    };
+    for (size_t i = 0; i < sizeof(D) / sizeof(D[0]); i++)
+        if ((man & D[i].bit) && o < out_size)
+            o += snprintf(out + o, out_size - o, "%s%s", o ? ", " : "", T(D[i].id));
+}
+
+#if CONFIG_ENABLE_SD  /* traffic statistics + playback continue */
+
 /* ETSI station type -> localized road-user category label. */
 static const char *trf_cat_label(uint8_t st)
 {
@@ -3175,32 +3086,6 @@ static const char *spat_phase_color(uint8_t phase)
     }
 }
 
-/* What a signal group controls, as short text ("geradeaus", "links, rechts",
- * "Fussgaenger"), from the MAPEM lane geometry. Empty when no MAPEM for that
- * intersection has been decoded yet. */
-static void spat_movement_text(const spatem_intersection_t *e, uint8_t sg,
-                               char *out, size_t out_size)
-{
-    out[0] = '\0';
-    uint16_t man = 0;
-    bool ped = false;
-    if (!spatem_movement(e, sg, &man, &ped))
-        return;
-    if (ped)
-    {
-        snprintf(out, out_size, "%s", T(S_DIR_PED));
-        return;
-    }
-    size_t o = 0;
-    const struct { uint16_t bit; str_id_t id; } D[] = {
-        { ITS_MAN_STRAIGHT, S_DIR_STRAIGHT }, { ITS_MAN_LEFT, S_DIR_LEFT },
-        { ITS_MAN_RIGHT, S_DIR_RIGHT },       { ITS_MAN_UTURN, S_DIR_UTURN },
-    };
-    for (size_t i = 0; i < sizeof(D) / sizeof(D[0]); i++)
-        if ((man & D[i].bit) && o < out_size)
-            o += snprintf(out + o, out_size - o, "%s%s", o ? ", " : "", T(D[i].id));
-}
-
 /* MovementPhaseState -> short localized phase name (chip hover title). */
 static const char *spat_phase_name(uint8_t phase)
 {
@@ -3216,11 +3101,8 @@ static const char *spat_phase_name(uint8_t phase)
 /* Live traffic-light snapshot: one block per intersection, a coloured dot per
  * signal group. Emitted at the top of #trf-body so it refreshes with the page.
  * No-op (nothing rendered) when no SPATEM has been received. */
-/* Renders IntersectionStatusObject into a short human sentence. Only the
- * flags a bystander can actually observe are listed, ordered most-notable
- * first: faults, then who is being given priority, then the base operating
- * mode. `alert` reports whether anything abnormal is set, so the caller can
- * colour it. Returns the length written (0 = nothing worth showing). */
+/* IntersectionStatusObject as a short sentence, most-notable first; `alert`
+ * lets the caller colour abnormal states. Returns length (0 = nothing to show). */
 static size_t spat_status_text(uint16_t st, bool *alert, char *out, size_t cap)
 {
     static const struct { uint16_t bit; bool warn; const char *de, *en; } F[] = {
@@ -3660,12 +3542,8 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
 /* GET /tracks.json?days=N -- vehicle tracks for the map overlay, grouped by
  * station so each vehicle becomes one polyline. Points come from the small
  * running log, NOT from the PCAP archive: see tracklog.h for why. */
-/* GET /markers.json -- the same array the live feed pushes, but as a plain
- * request so ANOTHER receiver's map page can fetch and merge it. Deliberately
- * read by the browser rather than by the peer device: an ESP32 polling its
- * neighbours would need an HTTP client on the box that is already decoding
- * traffic-light messages ten times a second, for no gain when the person
- * looking at the map can reach all of them anyway. */
+/* The same array the live feed pushes, as a plain request so another receiver's
+ * map can merge it -- deliberately read by the browser, not polled device-to-device. */
 static esp_err_t markers_json_handler(httpd_req_t *req)
 {
     static EXT_RAM_BSS_ATTR char json[6144];
@@ -3694,11 +3572,8 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
         }
     }
 
-    /* Sized for the MAXIMUM retention (7 days at the measured ~150 points an
-     * hour is ~25,000), not the typical case -- at 12,000 this had the same
-     * flaw just fixed in the prune: the read stops at the cap, and since the
-     * file is chronological, it is the newest tracks that would silently
-     * vanish from the map. 26,000 x 20 bytes is 520 KB of PSRAM, transient. */
+    /* Sized for MAX retention (~25k points), not typical: a smaller cap dropped
+     * the NEWEST tracks, same flaw as the old prune. Transient 520 KB PSRAM. */
     const int MAXPT = 26000;
     track_pt_t *pts = heap_caps_malloc(sizeof(track_pt_t) * MAXPT, MALLOC_CAP_SPIRAM);
     if (!pts)
@@ -3987,8 +3862,10 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     settings_get_str(CONFIG_INDEX_ETH_DNS2, ethdns2, sizeof(ethdns2));
     bool dhcp = (ethip[0] == '\0');
 
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
     uint8_t eth_leds = 1;
     config_get_u8(CONFIG_INDEX_ETH_LEDS, &eth_leds);
+#endif
 
     /* Live status (what's actually bound right now, e.g. the DHCP-obtained
      * IP), as opposed to the ethip/... above which is only ever set for a
@@ -4087,8 +3964,12 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<input class='ipfield' id='ethdns2' value='%s' size='16' maxlength='15'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='ntpserver' value='%s' size='16'></td></tr>"
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
+        /* LED control exists only on the KSZ8851SNL; on other chips the row
+         * is omitted entirely (see ethernet_apply_led_setting). */
         "<tr><th>%s</th><td><input type='checkbox' id='ethleds'%s>"
         "<br><small>%s</small></td></tr>"
+#endif
         "</table>",
         T(S_SET_GROUP_NETWORK),
         cur_line,
@@ -4098,8 +3979,11 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_ETH_GATEWAY), ethgw,
         T(S_ETH_DNS), ethdns0, ethdns1, ethdns2,
         T(S_ETH_NET_NOTE),
-        T(S_NTP_SERVER), ntp_server,
-        T(S_ETH_LEDS), eth_leds ? " checked" : "", T(S_ETH_LEDS_HINT));
+        T(S_NTP_SERVER), ntp_server
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
+        , T(S_ETH_LEDS), eth_leds ? " checked" : "", T(S_ETH_LEDS_HINT)
+#endif
+        );
     httpd_resp_send_chunk(req, network, HTTPD_RESP_USE_STRLEN);
 
     /* --- MQTT --- */
@@ -4186,12 +4070,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     static EXT_RAM_BSS_ATTR char save_block[4096];
     HTML_PRINTF(save_block,
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
-        /* The page is long enough that changing one field near the top meant
-         * scrolling all the way down to save. This bar appears as soon as
-         * anything is edited and stays within reach; it also doubles as the
-         * "you have unsaved changes" indicator, which the page had no way of
-         * showing before. The button at the top of this block stays, so the
-         * familiar way still works. */
+        /* Floating save bar: appears once anything is edited and doubles as the
+         * unsaved-changes indicator; the top button stays. */
         "<style>#savebar{position:fixed;left:0;right:0;bottom:0;z-index:900;"
         "display:none;padding:10px clamp(14px,4vw,32px);"
         "background:rgba(21,25,29,.96);border-top:1px solid #2a2f34;"
@@ -4239,7 +4119,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('ethdns0',document.getElementById('ethdns0').value);"
         "p.append('ethdns1',document.getElementById('ethdns1').value);"
         "p.append('ethdns2',document.getElementById('ethdns2').value);"
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
         "p.append('ethleds',document.getElementById('ethleds').checked?'1':'0');"
+#endif
         "fetch('/settings?lang=%s',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
         ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;"
         "var r2=document.getElementById('result2');if(r2)r2.innerText=t;"
@@ -4383,6 +4265,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         if (d >= 1 && d <= 7 &&
             config_set_u32(CONFIG_INDEX_TRACKS_DAYS, (uint32_t)d) == ESP_OK) saved++;
     }
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
     if (httpd_query_key_value(buf, "ethleds", value, sizeof(value)) == ESP_OK)
     {
         if (config_set_u8(CONFIG_INDEX_ETH_LEDS, value[0] == '1' ? 1 : 0) == ESP_OK)
@@ -4393,6 +4276,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
             ethernet_apply_led_setting();
         }
     }
+#endif
     if (httpd_query_key_value(buf, "peers", value, sizeof(value)) == ESP_OK)
     {
         url_decode(value);
@@ -4591,18 +4475,8 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* POST /poweroff -- makes pulling the plug safe. There is no real "shutdown"
- * on this hardware: /reboot just calls esp_restart(), which is exactly as
- * abrupt for the card as cutting power. What actually costs data is the
- * buffering -- the PCAP ring holds minutes of capture in PSRAM between
- * scheduled flushes -- and a power cut landing inside an SD write.
- *
- * So this writes every buffer out and unmounts the card, after which nothing
- * touches the SD bus again until the device is restarted. Runs inline rather
- * than on a timer: the reply is the operator's signal that it is safe to
- * unplug, so it must not come back before the work is actually done.
- * Recording does NOT resume by itself afterwards -- that is the point, and
- * the confirm dialog says so. */
+/* POST /poweroff: flushes every buffer and unmounts -- the reply IS the "safe
+ * to unplug" signal, so it runs inline. Recording stays off until restart, by design. */
 #if CONFIG_ENABLE_SD
 static esp_err_t poweroff_post_handler(httpd_req_t *req)
 {
@@ -4765,13 +4639,8 @@ static const char *task_state_str(eTaskState s)
     }
 }
 
-/* Builds the per-task CPU-load rows (no <table>/header wrapper) shared by
- * the initial /system render and /system.json. Two snapshots ~300 ms apart
- * give the *current* load (delta), which is wrap-safe unlike a cumulative
- * since-boot counter. Task names come from our own FreeRTOS task creation
- * calls, not attacker input, but html_escape() still strips quotes so the
- * result is also safe to embed as a JSON string value with no extra
- * escaping (same reasoning as build_msg_json). */
+/* Per-task CPU rows shared by /system and /system.json; two snapshots ~300 ms
+ * apart give current load, wrap-safe. html_escape keeps it JSON-safe too. */
 static void build_task_rows_html(char *out, size_t out_size)
 {
     out[0] = '\0';
@@ -5047,24 +4916,16 @@ static const char UPDATE_FORM_FMT[] =
     "var p=Math.round(e.loaded*100/e.total);bar.style.width=p+'%%';"
     "pct.textContent=p+'%% \\u00b7 '+(e.loaded/1048576).toFixed(1)+'/'"
     "+(e.total/1048576).toFixed(1)+' MB';};"
-    /* Upload done, device now writing flash -- and this is where nearly all
-     * the waiting happens. onprogress measures what the browser handed to
-     * the network stack, not what the device has processed, so over a LAN it
-     * reaches 100%% almost at once and then falls silent. The bar therefore
-     * switches to an indeterminate stripe and says what is going on; an
-     * earlier version left this phase blank, which read as a freeze. */
+    /* onprogress measures the browser's send, not the device's flashing -- so
+     * this phase shows an indeterminate stripe instead of reading as a freeze. */
     "xhr.upload.onload=function(){bar.style.width='100%%';bar.className='busy';"
     "pct.textContent='%s';};"
     "xhr.onload=function(){b.disabled=false;b.style.opacity=1;"
     "bar.className='';pct.textContent='';"
     "document.getElementById('result').innerText=xhr.responseText;"
     "if(xhr.status===200)waitBack();};"
-    /* The device reboots a moment after answering, and the page used to sit
-     * there unchanged forever -- nothing told the reader when it was safe to
-     * carry on. Poll a tiny static asset until it answers again, then go
-     * back to the status page. The first poll is delayed: right after the
-     * reply the device is still up, and an immediate success would "detect"
-     * a reboot that has not happened yet. */
+    /* Poll a tiny asset until the device answers again, then return to the status
+     * page; the first poll is delayed so the not-yet-rebooted device can't "succeed". */
     "function waitBack(){var t0=Date.now(),r=document.getElementById('result'),"
     "base=r.innerText;"
     "setTimeout(function(){var iv=setInterval(function(){"
@@ -5424,12 +5285,8 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "<p><small>%s</small></p>"
         "<script>"
         "var P='%s';"
-        /* P and the paths handed to del() are ALREADY url-encoded server-side
-         * (url_encode); running encodeURIComponent over them again turned a
-         * space into %2520, and the server -- which decodes exactly once --
-         * then looked for a file literally named "my%20file.txt". Only values
-         * read raw out of the DOM (the checkbox values in seltar/seldel) still
-         * need encoding here. */
+        /* P and del() paths are ALREADY url-encoded server-side -- encoding again
+         * made %2520 out of a space. Only raw DOM values still need encoding. */
         "function up(){var f=document.getElementById('fw').files[0];if(!f){return;}"
         "var x=new XMLHttpRequest();"
         "x.open('POST','/sdcard/upload?p='+P+'&name='+encodeURIComponent(f.name));"
@@ -5633,11 +5490,8 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
             strlcpy(name, v, sizeof(name));
         }
     }
-    /* A filename must be a single path component. Also reject '"': it's later
-     * spliced unescaped into the download's Content-Disposition header value
-     * (filename="..."), so a name containing one could break out of that
-     * quoted value. FatFs's own name validation likely already rejects '"'
-     * at fopen() time, but don't rely solely on that. */
+    /* A single path component only; '"' is also rejected because the name is
+     * later spliced into a quoted Content-Disposition value. */
     if (name[0] == '\0' || strchr(name, '/') || strstr(name, "..") ||
         strchr(name, '"') || has_control_char(name))
     {
@@ -5687,13 +5541,8 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* Deletes `path`, recursing into directories -- plain remove() only does
- * rmdir() on a directory, which fails on any non-empty one (that silently
- * left folders like a reused card's old dashcam directory undeletable).
- *
- * Works on ONE caller-owned buffer (append child name, recurse, truncate):
- * the httpd task's stack is only 16 KB, so a per-level SD_PATH_MAX buffer
- * would be far too expensive. `depth` bounds recursion on a corrupt card. */
+/* Recursive delete on ONE caller-owned buffer (append, recurse, truncate) --
+ * the 16 KB httpd stack can't afford per-level buffers; `depth` bounds corrupt cards. */
 static bool sd_rm_tree(char *path, size_t size, int depth)
 {
     struct stat st;
@@ -6295,14 +6144,8 @@ static bool log_line_has_msec(const char *s, size_t len)
            s[14] >= '0' && s[14] <= '9' && s[15] == ')';
 }
 
-/* Streams the tail of a log file into the page, HTML-escaped.
- *
- * Line-based rather than fixed-size chunks: the millisecond trim below has to
- * see a whole timestamp, and a 512-byte read boundary can fall right inside
- * one. The date is not added per line on purpose -- the system log already
- * carries "===== YYYY-MM-DD (Day) =====" markers at each session start and
- * midnight rollover, which pin a multi-day log to a calendar day without
- * repeating the date on every single line. */
+/* Streams the log tail HTML-escaped, line-based so the millisecond trim always
+ * sees a whole timestamp; dates come from the log's own daily marker lines. */
 static void stream_tail_escaped(httpd_req_t *req, FILE *f, long start)
 {
     fseek(f, start, SEEK_SET);
@@ -6427,13 +6270,8 @@ void webserver_init(void)
      * "httpd_sock_err: error in recv : 104" (ECONNRESET) warning on every
      * occurrence — pure noise, especially in the SD log. Only real errors. */
     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
-    /* Same story one layer up: a tab closed without a clean WebSocket close
-     * makes every broadcast to that socket warn ("Failed to send WS header").
-     * Measured on a day of testing: 823 such lines, all of them describing a
-     * browser that had simply gone away -- nothing the device can act on,
-     * while crowding real entries out of the SD log. The skip-list in
-     * ws_broadcast_work already cuts the retries; this silences the rest.
-     * Genuine WebSocket faults still surface, they are logged at E. */
+    /* A dirty-closed tab makes every broadcast warn -- hundreds of lines a day
+     * describing a browser that left. Genuine faults still log at E. */
     esp_log_level_set("httpd_ws", ESP_LOG_ERROR);
 
     msg_ring_mutex = xSemaphoreCreateMutex();
@@ -6506,7 +6344,11 @@ void webserver_init(void)
         { .uri = "/map",         .method = HTTP_GET, .handler = map_get_handler },
         { .uri = "/spatem.json", .method = HTTP_GET, .handler = spatem_json_handler },
         { .uri = "/lanes.json",  .method = HTTP_GET, .handler = lanes_json_handler },
+#if CONFIG_ENABLE_SD
+        /* Hourly statistics live on the SD card; without one the page has
+         * nothing to show, and its handler is compiled out. */
         { .uri = "/traffic",     .method = HTTP_GET, .handler = traffic_get_handler },
+#endif
         { .uri = "/leaflet.js",  .method = HTTP_GET, .handler = leaflet_js_get_handler },
         { .uri = "/leaflet.css", .method = HTTP_GET, .handler = leaflet_css_get_handler },
         { .uri = "/favicon*",          .method = HTTP_GET, .handler = favicon_get_handler },

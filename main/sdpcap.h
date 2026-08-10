@@ -23,20 +23,13 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet);
  * Returns the number of bytes written. */
 size_t sdpcap_flush_now(void);
 
-/* Hands over the whole decode result rather than a hand-picked subset: the
- * previous per-field signature silently dropped everything added later (line
- * number, vehicle size), so playback showed less than the live map.
- * Returns false to abort the walk -- the HTTP consumer uses this when its
- * client has hung up, so a reply nobody is reading stops costing SD reads. */
+/* Hands over the whole decode result (a hand-picked subset silently lagged
+ * behind the live map). Return false to abort the walk (client hung up). */
 typedef bool (*sdpcap_position_cb_t)(uint32_t seconds, uint32_t microseconds,
                                       const its_decoded_t *decoded, void *ctx);
 
-/* Reads back stored PCAP files covering [from_sec, to_sec] (device
- * wall-clock epoch seconds), decoding each frame's position (and speed, for
- * vehicles) via its_decode_frame() and invoking cb for each one found, in
- * chronological order. Read-only, independent of whether capture is
- * currently enabled; no-ops if CONFIG_ENABLE_SD is off or the SD card isn't
- * mounted. */
+/* Reads stored PCAPs covering [from_sec, to_sec], decoding each frame's
+ * position via its_decode_frame and invoking cb chronologically. Read-only. */
 void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx);
 
 #ifdef __cplusplus

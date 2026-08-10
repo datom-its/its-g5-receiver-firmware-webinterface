@@ -118,14 +118,8 @@ static const char *lookup_station_name(uint8_t t)
     return NULL; /* 0 = unknown, or a value we don't have a name for */
 }
 
-/* Parses a GeoNetworking "Common Header onward" (Common Header + extended
- * header + BTP-B + facility message), starting at `off` in `frame`. Used
- * both on unsecured GN packets and on the structure re-embedded inside a
- * Secured Packet (see unwrap_secured) -- same shape either way. Outputs:
- * station name (or NULL), the ITS PDU header's byte offset (SIZE_MAX if
- * unreached), and the Source Position Vector's byte offset (SIZE_MAX if this
- * header type doesn't carry one) -- both needed again by its_decode_frame,
- * kept in one traversal rather than walked twice. */
+/* Parses GeoNetworking "Common Header onward" at `off` (plain or re-embedded
+ * secured form); yields name + ITS-PDU + Source Position Vector offsets in one walk. */
 static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
                                  char *out, size_t out_size, const char **station_out,
                                  size_t *pdu_off_out, size_t *pv_off_out)
@@ -166,11 +160,8 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
     {
         if (len < off + 2) { snprintf(out, out_size, "GeoNet"); return; }
         uint16_t port = rd_u16be(frame + off);
-        /* ITS PDU header starts right after the 4-byte BTP-B header;
-         * reported regardless of whether a name is found, so
-         * its_decode_frame can look further into the body without redoing
-         * this walk. Falls back to the raw port if messageId isn't in the
-         * table. */
+        /* ITS PDU header starts right after the 4-byte BTP-B header; reported even
+         * without a name so its_decode_frame needn't redo this walk. */
         if (len >= off + 6) *pdu_off_out = off + 4;
         const char *name = (len >= off + 6) ? lookup_msgid_name(frame[off + 5]) : NULL;
         if (name) snprintf(out, out_size, "%s", name);
@@ -181,12 +172,8 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
     else                     { snprintf(out, out_size, "GeoNet"); }
 }
 
-/* Reads a COER length determinant (ITU-T X.696 clause 8.6) at frame[off]:
- * short form (top bit clear) is the length directly, in that one byte; long
- * form (top bit set) gives, in the low 7 bits, how many following big-endian
- * octets encode the actual length. Returns false if there isn't room, or the
- * encoded length needs an implausible number of octets (defends against a
- * corrupt or crafted frame; real messages need at most 2). */
+/* COER length determinant (X.696 8.6): short form is the length itself, long
+ * form counts following big-endian octets. False on truncation or implausible size. */
 static bool read_oer_length(const uint8_t *frame, size_t len, size_t off,
                              size_t *value_len, size_t *field_len)
 {
@@ -209,13 +196,8 @@ static bool read_oer_length(const uint8_t *frame, size_t len, size_t off,
     return true;
 }
 
-/* --- SPATEM (SAE J2735 SPAT) UPER decode, scope B ------------------------
- * A running MSB-first bit cursor over the frame (bounded by `nbits`), used
- * only here -- SPAT is deeply bit-packed with variable-length inner lists, so
- * a stateful cursor reads far cleaner than absolute-offset read_bits_msb
- * calls. `err` latches once a read runs past the end. Bit layout validated
- * against real traffic (445/445 sampled frames) -- see reference-its-decode
- * in project memory before touching any field width. */
+/* SPATEM (SAE J2735 SPAT) UPER decode: stateful MSB-first bit cursor, `err`
+ * latches on overrun. Widths validated against real traffic -- see reference-its-decode. */
 typedef struct { const uint8_t *b; size_t nbits, pos; bool err; } spat_bitr_t;
 
 static uint32_t sb(spat_bitr_t *r, unsigned n)
@@ -230,11 +212,8 @@ static uint32_t sb(spat_bitr_t *r, unsigned n)
     return v;
 }
 
-/* TimeChangeDetails: opt{startTime,maxEndTime,likelyTime,confidence,nextTime}
- * (5b) + mandatory minEndTime; TimeMark=16b, confidence=4b. Must be fully
- * consumed either way to keep the cursor aligned -- amber / pre-movement
- * events carry it. Returns minEndTime (TimeMark, tenths of a second within
- * the current hour; 36001 = unknown). */
+/* TimeChangeDetails: 5 option bits + mandatory minEndTime (TimeMark 16b,
+ * confidence 4b); consumed fully to keep the cursor aligned. Returns minEndTime. */
 static uint32_t spat_read_time_change(spat_bitr_t *r)
 {
     uint32_t o = sb(r, 5);
@@ -247,20 +226,8 @@ static uint32_t spat_read_time_change(spat_bitr_t *r)
     return min_end;
 }
 
-/* AdvisorySpeedList: SEQUENCE (SIZE(1..16)) OF AdvisorySpeed.
- *
- * Widths read off the pinned ASN.1 (ISO/TS 19091 DSRC module as published by
- * ETSI for TS 103 301, branch release2 -- local copy in
- * ~/esp/captures/asn1/dsrc.asn), not guessed: every width used here before
- * was wrong. AdvisorySpeed is an extensible SEQUENCE, so 1 extension bit,
- * then a FIVE-bit optional bitmap (speed, confidence, distance, class,
- * regional), then the components.
- *
- * Watch the confidence field if this is ever revisited: release2 uses
- * SpeedConfidenceDSRC (ENUMERATED, 8 values, no extension marker -> 3 bits).
- * Older DSRC.asn snapshots instead import ETSI's SpeedConfidence from
- * ITS-Container, which is INTEGER (1..127) and would be 7 bits. Same field
- * name in prose, different type and width -- take it from the pinned file. */
+/* AdvisorySpeed: 1 ext bit + FIVE option bits; widths from the pinned release2
+ * ASN.1 (confidence = SpeedConfidenceDSRC, 3 bits, NOT the 7-bit ETSI type). */
 static void spat_skip_speeds(spat_bitr_t *r)
 {
     uint32_t n = sb(r, 4) + 1;              /* SIZE(1..16) length determinant */
@@ -277,11 +244,8 @@ static void spat_skip_speeds(spat_bitr_t *r)
     }
 }
 
-/* One ConnectionManeuverAssist (per-movement maneuverAssistList is variable-
- * length and must be fully walked to reach the next movement). Same source as
- * above: extensible SEQUENCE, 5 optional bits, and both length fields are
- * ZoneLength (14 bits) -- the 8 used before desynchronised the whole
- * remaining movement list whenever one appeared. */
+/* One ConnectionManeuverAssist, walked fully to stay aligned; both length
+ * fields are ZoneLength (14 bits, not 8). */
 static void spat_skip_conn_maneuver(spat_bitr_t *r)
 {
     if (sb(r, 1)) { r->err = true; return; }  /* extension addition present */
@@ -294,11 +258,8 @@ static void spat_skip_conn_maneuver(spat_bitr_t *r)
     if (o & 0x01) r->err = true;  /* regional: open type, not walkable */
 }
 
-/* Parse a SPAT message starting at bit `start` (= (pdu_off+6)*8, right after
- * the 6-byte ItsPduHeader) into `out`. Only the first IntersectionState is
- * decoded (every observed SPATEM carries exactly one). Optional fields not
- * seen in real traffic (SPAT name/regional, enabledLanes, per-movement/event
- * regional) cause a clean abort (out->valid stays false) rather than a guess. */
+/* Parses SPAT at bit `start` into `out`; first IntersectionState only. Constructs
+ * unseen in real traffic abort cleanly (out->valid false) rather than guess. */
 static void parse_spatem(const uint8_t *frame, size_t len, size_t start,
                          its_spat_t *out)
 {
@@ -330,12 +291,8 @@ static void parse_spatem(const uint8_t *frame, size_t len, size_t start,
     uint32_t iid = sb(&r, 16);
     uint32_t revision = sb(&r, 7);
     out->status = (uint16_t)sb(&r, 16);   /* IntersectionStatusObject flags */
-    /* Reference time-of-hour in tenths of a second (TimeMark's own scale),
-     * for the countdown below. Prefer our own clock: measured against real
-     * captures it beats the RSU's moy/timeStamp (median error -0.1 s vs
-     * +0.7 s), because those fields stay frozen for several messages while
-     * frames arrive at ~10/s. The RSU clock is only the fallback for when
-     * our own isn't NTP-synced yet. */
+    /* Countdown reference in TimeMark scale: prefer our own NTP clock over the
+     * RSU's (its moy/timeStamp freeze across messages); RSU clock is the fallback. */
     uint32_t moy = has_moy ? sb(&r, 20) : 0;
     uint32_t dsecond = has_ts ? sb(&r, 16) : 0;
     bool have_clock = has_moy && has_ts && dsecond < 60000;
@@ -468,11 +425,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     out->id = (uint16_t)iid;
     out->valid = true;
 
-    /* --- Lane geometry, to learn what each signal group controls ---------
-     * Everything from here on is optional enrichment: if any construct we
-     * haven't seen in real traffic turns up, we bail out and simply leave
-     * n_sg at 0, keeping the name/id above. Widths validated against 9734
-     * real MAPEM frames -- see reference-its-decode before touching one. */
+    /* Lane geometry -- optional enrichment: any unseen construct bails out with
+     * n_sg 0, keeping name/id. Widths validated, see reference-its-decode. */
     out->revision = (uint8_t)sb(&r, 7);
     /* refPoint Position3D: 3 preamble bits (ext + elevation + regional),
      * then lat/long as UPER-biased integers (we don't need their values). */
@@ -649,29 +603,10 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     }
 }
 
-/* --- DENM cause category --------------------------------------------------
- * Walks the ManagementContainer to reach the SituationContainer's cause
- * code. Field widths cross-checked against tshark's own byte offsets on real
- * DENMs (originatingStationId, sequenceNumber, latitude and altitudeValue all
- * land on the bytes tshark reports).
- *
- * CAVEAT, deliberately conservative: every DENM captured here so far is the
- * same cause ("trafficCondition"), so only that one value is actually
- * confirmed. Callers therefore treat anything they don't have a label for as
- * "warning, code N" rather than inventing a description. */
-/* Decodes a DENM's cause and sub-cause. Structure per ETSI TS 103 831
- * (DENM v2) and TS 102 894-2 (CDD); every field width below was then checked
- * against tshark on real frames -- mopt, stationType, informationQuality,
- * cause and sub-cause all match on 71/71.
- *
- * The trap that cost the most: **DenmPayload has no extension marker**, so
- * there is no ext bit before its three optional-container bits. Assuming one
- * shifted everything by a single bit, which silently mis-read the management
- * optional mask and put the cause 22 bits off -- while still yielding a
- * plausible-looking number. Don't add it back.
- *
- * The CHOICE index doubles as the classic cause code: the ASN.1 keeps
- * `reserved` placeholders so that e.g. accident is still 2, slowVehicle 26. */
+/* DENM cause walk, widths cross-checked against tshark. Only cause 1 is
+ * field-confirmed, so callers label unknown codes "warning, code N". */
+/* DENM cause/sub-cause (TS 103 831/CDD, tshark-verified). DenmPayload has NO
+ * extension marker -- don't add one; the CHOICE index doubles as the classic cause code. */
 static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
                              its_decoded_t *d)
 {
@@ -725,23 +660,8 @@ static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
     d->denm_subcause = (uint8_t)sub;
 }
 
-/* --- Public-transport container, walked properly ---------------------------
- * Reaches specialVehicleContainer by decoding the CAM structurally instead of
- * hunting for a byte signature. `start` is the referencePosition anchor
- * (pdu_off+9)*8+4. Twelve bits before it sit, in order: the CamParameters
- * extension bit, the lowFrequencyContainer and specialVehicleContainer
- * presence bits, BasicContainer's own extension bit, and the 8-bit
- * stationType.
- *
- * Field widths come from the ETSI ASN.1 (EN 302 637-2 / TS 102 894-2), with
- * one deliberate deviation: the CDD v2 published there declares PathHistory
- * as SEQUENCE (SIZE(40)) -- fixed, hence no length determinant -- but real
- * frames carry 2/4/8/9/10 points, so the SIZE(0..40) form with a 6-bit length
- * is what is actually on the wire. Trusting the file here would have thrown
- * the walk off by everything after the low-frequency container.
- *
- * Returns false if the frame doesn't carry a public-transport container or
- * the walk hit something unexpected; `*out_line` is only touched on success. */
+/* Walks the CAM structurally to specialVehicleContainer. Deviation from the
+ * published CDD: on the wire PathHistory is SIZE(0..40) with a 6-bit length, not fixed SIZE(40). */
 static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
                              its_decoded_t *d)
 {
@@ -753,15 +673,8 @@ static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
     if (start < 12)
         return false;
 
-    /* CamParameters preamble: [ext][lowFrequencyContainer present]
-     * [specialVehicleContainer present]. It sits 12 bits before the anchor,
-     * not 4 -- BasicContainer's extension bit and the 8-bit stationType come
-     * between it and referencePosition. Reading at start-4 took the low
-     * nibble of stationType instead, so both flags were really a function of
-     * the sender's station type: a car always looked like it had a
-     * lowFrequencyContainer, a tram never did (and its LF bits were then
-     * consumed as a specialVehicleContainer, which is how a tram ended up
-     * reported as "boarding" whenever its low beam was on). */
+    /* CamParameters preamble sits 12 bits before the anchor, NOT 4 -- stationType
+     * lies between; reading at -4 made the flags a function of the sender's type. */
     uint32_t pre;
     if (!read_bits_msb(frame, len, start - 12, 3, &pre))
         return false;
@@ -893,12 +806,8 @@ static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
 }
 
 
-/* Unwraps an ETSI TS 103 097 / IEEE 1609.2 "Secured Packet" envelope (GN
- * Basic Header next-header == 2) far enough to reach the plain
- * GeoNetworking structure it carries as payload, without ever touching the
- * certificate/signature that follows. Only the two CHOICE tag *values* are
- * checked (0x81 "signedData", 0x80 "unsecuredData"); anything else bails
- * out to plain "Signed" rather than guess at an unverified encoding. */
+/* Unwraps a TS 103 097 Secured Packet just far enough to reach the embedded
+ * GeoNetworking payload; unknown CHOICE tags bail out to plain "Signed". */
 static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
                            size_t *inner_off, size_t *inner_len)
 {
@@ -1092,13 +1001,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
         frame[pdu_off + 1] == 2)
         r->pt_container = parse_cam_detail(frame, pdu_len, (pdu_off + 9) * 8 + 4, r);
 
-    /* GN-layer position: the Source Position Vector carries a position for
-     * EVERY message, not just CAM (this is what puts RSUs on the map).
-     * Plain big-endian signed integers, no UPER bit-packing, no bias/offset
-     * (unlike CAM's referencePosition below). Layout relative to pv_off:
-     * GN_ADDR(8)+Timestamp(4)+Latitude(4)+Longitude(4)+PAI&Speed(2)+
-     * Heading(2) = 24 bytes. Only a fallback -- CAM's own body position
-     * overrides it below when available. */
+    /* GN Source Position Vector: a position for EVERY message (puts RSUs on the
+     * map); plain big-endian ints. Fallback only -- CAM's own position overrides it. */
     if (have_sid && pv_off != SIZE_MAX && pdu_len >= pv_off + 20)
     {
         int32_t gn_lat = (int32_t)rd_u32be(frame + pv_off + 12);
@@ -1111,11 +1015,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
             r->has_position = true;
         }
 
-        /* Speed sits right after the position: PAI(1 bit)+Speed(15 bits),
-         * 0.01 m/s units (raw value is already cm/s). The 15 bits are TWO'S
-         * COMPLEMENT (EN 302 636-4-1) -- a reversing vehicle sends a negative
-         * speed, which without sign extension would surface as ~327 m/s.
-         * Skipped for RSUs (stationary -- a speed reading is meaningless). */
+        /* PAI(1)+Speed(15) right after the position, cm/s, TWO'S COMPLEMENT
+         * (a reversing vehicle is negative); skipped for RSUs. */
         if (pdu_len >= pv_off + 22 && !(station && strcmp(station, "RSU") == 0))
         {
             uint16_t raw = rd_u16be(frame + pv_off + 20) & 0x7FFF;
@@ -1131,12 +1032,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     if (frame[pdu_off + 1] != 2 /* CAM */)
         return;
 
-    /* referencePosition starts at byte pdu_off+9 (protocolVersion+messageId+
-     * stationId+generationDeltaTime+basicContainer.stationType), PLUS 4
-     * extra UPER bits: CamParameters' extension marker + 2 optional-
-     * container presence bits, plus 1 from basicContainer's own extensible
-     * SEQUENCE. Empirically pinned down (byte offset alone gives garbage
-     * lat/lon) -- don't simplify this without re-validating against tshark. */
+    /* referencePosition = byte pdu_off+9 PLUS 4 UPER bits (ext + 2 option bits +
+     * basicContainer ext). Empirically pinned -- re-validate against tshark before touching. */
     size_t bitoff = (pdu_off + 9) * 8 + 4;
     uint32_t raw_lat, raw_lon;
     if (!read_bits_msb(frame, pdu_len, bitoff, 31, &raw_lat))
@@ -1144,24 +1041,11 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     if (!read_bits_msb(frame, pdu_len, bitoff + 31, 32, &raw_lon))
         return;
 
-    /* Vehicle dimensions, further into the same BasicVehicleContainerHigh-
-     * Frequency. Offsets from the (already validated) referencePosition
-     * anchor: lat31+lon32, posConfidenceEllipse 12+12+12, altitude 20+4,
-     * HighFrequencyContainer CHOICE 2, container optional-bitmap 7,
-     * heading 12+7, speed 14+7, driveDirection 2 = 174 bits, then
-     * vehicleLength 10, its confidence 3, vehicleWidth 6.
-     *
-     * Two things that a spec skim gets wrong, both caught by comparing
-     * against tshark on real CAMs: the confidence enum is 3 bits, not 2 (it
-     * has five values -- the four trailer states plus "unavailable"), and
-     * both sizes are UPER constrained integers with lower bound 1, so the
-     * encoded value is the real one minus 1. */
+    /* Vehicle dimensions at fixed bit offsets from the validated anchor (174 bits
+     * to driveDirection, then length 10 + conf 3 + width 6); sizes are lower-bound-1 encoded. */
     {
-        /* Those offsets only hold for basicVehicleContainerHighFrequency.
-         * The CHOICE sits at +123 (extension marker, then the alternative
-         * index); for an RSU CAM the bits at +174 are unrelated content and
-         * were being reported as a vehicle size regardless. Same two checks
-         * parse_cam_detail already makes on its own walk. */
+        /* Only valid for basicVehicleContainerHighFrequency -- check the CHOICE at
+         * +123 first; RSU CAMs carry unrelated bits at +174. */
         uint32_t hf_ext, hf_alt;
         if (!read_bits_msb(frame, pdu_len, bitoff + 123, 1, &hf_ext) || hf_ext)
             goto skip_dimensions;
@@ -1183,12 +1067,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     }
 skip_dimensions:
 
-    /* ETSI's dedicated "unavailable" sentinels for Latitude/Longitude,
-     * compared in the ENCODED domain -- raw_lat/raw_lon still carry the UPER
-     * bias that gets subtracted below. Against the semantic values this test
-     * never fired for a real "no fix" CAM (which then landed on the map at
-     * the north pole) and instead threw away a genuine position at
-     * +0.0000001 deg. Same constants parse_denm_cause already uses. */
+    /* ETSI "unavailable" sentinels compared in the ENCODED domain (raw values
+     * still carry the UPER bias) -- comparing decoded values missed real no-fix CAMs. */
     if (raw_lat == 1800000001u || raw_lon == 3600000001u)
         return;
 

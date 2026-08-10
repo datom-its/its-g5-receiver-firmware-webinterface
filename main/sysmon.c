@@ -64,12 +64,8 @@ void sysmon_flush_persistent(void)
 static void reboot_after(const char *reason)
 {
     ESP_LOGE(TAG, "%s -- rebooting", reason);
-    /* Gives the UART log line a moment to drain. It does NOT reliably reach
-     * the SD log: that writer runs on a 2 s cycle, so 300 ms catches it only
-     * by chance. Deliberately left short, and deliberately WITHOUT
-     * sysmon_flush_persistent() -- this path fires because something is
-     * already wedged, possibly the SD writer itself, and getting out fast
-     * beats saving the last few minutes of capture. */
+    /* Lets the UART line drain; deliberately short and WITHOUT flush_persistent:
+     * this fires because something is wedged, possibly the SD writer itself. */
     vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
 }
@@ -186,12 +182,8 @@ static void start_mdns(void)
     }
     mdns_hostname_set(host);
 
-    /* Instance name must be unique per device too, not just the hostname --
-     * otherwise every receiver on the LAN announces the exact same _http
-     * service instance name and Bonjour silently de-dupes them with a
-     * registration-order-dependent -2/-3 suffix that can shuffle across
-     * reboots. Instance names allow free text (unlike host labels), so the
-     * raw, unsanitised node id is fine here. */
+    /* Instance name must be unique per device too: identical names get a
+     * registration-order -2/-3 suffix from Bonjour that shuffles across reboots. */
     char instance[32 + CONFIG_NODEID_BUFFER_SIZE];
     snprintf(instance, sizeof(instance), "ITS-G5 Receiver (%s)", nodeid);
     mdns_instance_name_set(instance);

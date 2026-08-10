@@ -14,15 +14,8 @@ static spatem_intersection_t s_int[SPATEM_MAX_INT];
 static int s_count;
 static SemaphoreHandle_t s_lock;
 
-/* Lane geometry, one slot per cached intersection. Big enough that it only
- * belongs in PSRAM; allocated on first sight of an intersection and then
- * reused. `ready` is set last, so a reader either sees a fully decoded
- * geometry or none -- but that alone only covers the FIRST decode: a new
- * revision (or a slot taken over by another intersection) re-decodes in
- * place, which a reader already walking the lanes would see as a torn mix of
- * old and new. s_geom_lock closes that window; it is separate from s_lock so
- * an HTTP reader walking geometry can't block the SPAT hot path's own
- * bookkeeping. */
+/* Lane geometry, one PSRAM slot per intersection; re-decodes happen in place,
+ * so readers hold s_geom_lock (separate from s_lock to keep the SPAT hot path free). */
 static its_map_geom_t *s_geom[SPATEM_MAX_INT];
 static bool s_geom_ready[SPATEM_MAX_INT];
 static SemaphoreHandle_t s_geom_lock;
@@ -84,13 +77,8 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
     }
 
     spatem_intersection_t *e = &s_int[slot];
-    /* A slot taken over by a DIFFERENT intersection must start empty: the
-     * assignments below only cover the SPAT-derived fields, so the previous
-     * occupant's MAPEM data (name, lane width, speed limits, movement and
-     * pedestrian tables) and its RSU position would otherwise stay attached
-     * to the new one -- shown in the UI under the wrong name, with the old
-     * intersection's arrows matched against signal-group numbers that merely
-     * happen to overlap. */
+    /* A slot taken over by a DIFFERENT intersection must start empty -- the previous
+     * occupant's MAPEM data would otherwise stay attached to the new one. */
     if (!same_intersection)
         memset(e, 0, sizeof(*e));
 

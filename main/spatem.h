@@ -5,12 +5,8 @@
 
 #include "its_decode.h"
 
-/* Live traffic-light state cache. Every decoded SPATEM (SAE J2735 SPAT)
- * updates the current phase per signal group for its intersection; the
- * "Verkehr" web page renders them as coloured indicators. Purely in-RAM and
- * ephemeral -- phases are a "right now" view, not a history, so nothing is
- * persisted to SD. Sized for a handful of intersections (one RSU controller
- * each) within reception range. */
+/* Live traffic-light cache: current phase per signal group, purely in-RAM
+ * (a "right now" view, nothing persisted). Sized for a handful of intersections. */
 
 #define SPATEM_MAX_INT 8   /* distinct intersections cached (most-recent wins) */
 
@@ -70,12 +66,8 @@ int spatem_snapshot(spatem_intersection_t *out, int max);
  * ~5.5 KB per intersection lives in PSRAM, allocated on first use. */
 void spatem_note_geometry(const uint8_t *frame, size_t len, const its_map_t *m);
 
-/* The cached geometry for an intersection, or NULL if none is held.
- * The returned pointer aims into a buffer the packet path re-decodes IN
- * PLACE when the intersection publishes a new revision, so a caller that
- * walks the lanes must hold spatem_geometry_lock() for as long as it uses
- * the pointer -- otherwise it can observe a half-old, half-new mixture.
- * Always pair with spatem_geometry_unlock(), including on early returns. */
+/* Cached geometry or NULL. Re-decoded IN PLACE on a new revision -- hold
+ * spatem_geometry_lock() while using the pointer, unlock on every path. */
 void spatem_geometry_lock(void);
 void spatem_geometry_unlock(void);
 const its_map_geom_t *spatem_geometry(uint16_t region, uint16_t id);

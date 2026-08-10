@@ -131,12 +131,8 @@ static volatile bool cfg_log_frames;
 
 static vprintf_like_t s_orig_vprintf;
 
-/* ESP-IDF's log timestamps are time-only (HH:MM:SS.mmm), so a multi-day
- * system.log can't be pinned to a calendar day. We inject a dated header
- * line whenever the local date rolls over (and on the first line after NTP
- * sync). s_next_day_boundary caches the epoch-second of the next local
- * midnight so the expensive localtime_r/strftime runs once per day, not per
- * log line. */
+/* IDF log timestamps are time-only, so inject a dated header line at local
+ * midnight (and after NTP sync); the boundary is cached so localtime runs once a day. */
 static time_t s_next_day_boundary;
 
 /* Called from the vprintf hook (any task). Appends a date header to the sys

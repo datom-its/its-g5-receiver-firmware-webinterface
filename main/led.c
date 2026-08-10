@@ -49,15 +49,8 @@ static void set_led_with_brightness(led_indicator_handle_t handle, uint32_t irgb
 
 #if CONFIG_LEDSTRIP_COUNT == 1
 
-/*
- * Single-LED mode: one WS2812 shows overall system state via color.
- * Priority (highest first):
- *   - Sniffer stopped:    Red
- *   - No IP:              Yellow
- *   - MQTT disconnected:  Green blink
- *   - MQTT connected:     Green solid
- *   - C-ITS packet flash: Blue (with MQTT) / Orange (without MQTT), 50ms
- */
+/* Single-LED mode: red = sniffer stopped, yellow = no IP, green blink = MQTT
+ * down, green = OK; packet flash blue (with MQTT) / orange (without). */
 
 typedef enum {
     LED_ST_SNIFFER_STOPPED,

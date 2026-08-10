@@ -10,11 +10,8 @@ extern "C" {
 
 #define ITS_SPAT_MAX_SG 32  /* signal groups (movements) decoded per intersection */
 
-/* SPATEM decode result (scope B: intersection identity + current phase per
- * signal group; no timing). `phase` is the SAE J2735 MovementPhaseState enum
- * of the first movement-event: 3=stop/RED, 5/6=go/GREEN, 7/8=clearance/AMBER,
- * 4=pre-movement, 0=unavailable, 1=dark, 2/9=flashing. Bit layout validated
- * against real captured SPATEM -- see reference-its-decode in project memory. */
+/* SPATEM decode result (identity + phase per signal group; no timing). `phase`
+ * is the SAE J2735 MovementPhaseState enum. Validated -- see reference-its-decode. */
 /* IntersectionStatusObject, a BIT STRING(16) whose bit 0 is the MSB -- so the
  * standard's bit n is (1 << (15 - n)) here. Cross-checked against real
  * traffic: the Graz controller sends 0x0200 = TRAFFIC_DEPENDENT, constant. */
@@ -71,11 +68,8 @@ typedef struct {
     uint16_t lane_width_cm;
     uint16_t speed_max_kmh, speed_min_kmh;
 
-    /* What each signal group actually controls, from the lane geometry:
-     * every ingress lane names the signal group for its movement, so the
-     * maneuver bits of all lanes sharing a group are OR-ed together. `ped`
-     * marks groups whose controlling lanes are crosswalks -- those are the
-     * pedestrian signals. Empty (n_sg 0) if the lane walk didn't complete. */
+    /* What each signal group controls, OR-ed over the lanes that name it; `ped`
+     * marks crosswalk groups. Empty (n_sg 0) if the lane walk didn't complete. */
     uint8_t  n_sg;
     uint8_t  sg[ITS_SPAT_MAX_SG];
     uint16_t maneuvers[ITS_SPAT_MAX_SG];
@@ -130,12 +124,8 @@ typedef struct {
     uint8_t  width_dm;   /* 0 = unavailable */
 } its_veh_t;
 
-/* --- MAPEM lane geometry -------------------------------------------------
- * The node coordinates behind each lane, so the intersection can actually be
- * drawn. Kept out of its_decoded_t on purpose: that one lives on the packet
- * path's stack, and this is kilobytes. Decode it separately, into a buffer
- * the caller placed in PSRAM (see spatem.c), and only when the intersection
- * or its revision is new -- the geometry never changes between messages. */
+/* MAPEM lane geometry -- kilobytes, so kept out of its_decoded_t (packet-path
+ * stack); decoded separately into a caller-provided PSRAM buffer, only when new. */
 
 #define ITS_GEOM_MAX_LANES 40
 #define ITS_GEOM_MAX_NODES 16
@@ -166,31 +156,9 @@ typedef struct {
  * don't handle -- `out` is then left invalid rather than half-filled. */
 bool its_decode_map_geometry(const uint8_t *frame, size_t len, its_map_geom_t *out);
 
-/* Identifies the facility-layer message type in a raw 802.11p frame (walks
- * LLC/SNAP -> GeoNetworking -> BTP-B to the message's ITS PDU header) and
- * prefixes it with the sender's station type when known, e.g. "Bus CAM",
- * "RSU SPATEM", "Signed" (secured, envelope not decoded), "?" (not GeoNet).
- * `out` is always a valid non-empty string.
- *
- * Position: prefers the GeoNetworking extended header's own Source Position
- * Vector (present for every facility message, so RSUs get a position too);
- * for CAM specifically, the message body's own (UPER-encoded)
- * referencePosition overrides it as the more precise value. `station_id` is
- * ItsPduHeader.stationId (the map-marker tracking key), not the GN source
- * address used for the station-type label. `has_speed`/`speed_cmps` come
- * from the same Source Position Vector (cm/s), skipped for RSUs (stationary).
- * Byte offsets validated against real captured traffic -- see
- * reference-its-decode in the project's memory before changing any of them.
- *
- * `station_type_code` (ETSI ITS-S type, 0 = unknown) and `message_id`
- * (ItsPduHeader.messageId, 0 = none/unknown) are the raw numeric forms of
- * what's already in `out`, for callers that aggregate by type (stats) or
- * branch on the message (e.g. DENM). Pass NULL to skip either.
- *
- * `spat`: when non-NULL and the frame is a SPATEM, filled with the decoded
- * traffic-light phases (`spat->valid` reports success); NULL to skip.
- * `map`: likewise for a MAPEM's intersection name/id; NULL to skip.
- * `veh`: likewise for a CAM's vehicle dimensions; NULL to skip. */
+/* Identifies the facility message ("Bus CAM", "RSU SPATEM", "Signed", "?") and
+ * decodes position/speed/ids; optional spat/map/veh outputs are filled when non-NULL.
+ * Offsets validated against real traffic -- see reference-its-decode before changing any. */
 
 #define ITS_LABEL_LEN 32
 
@@ -235,13 +203,8 @@ typedef struct {
 
 void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *out);
 
-/* Just the facility message type (ItsPduHeader.messageId, 0 = unknown), for
- * callers that only need to know what kind of message this is -- the PCAP
- * recorder's thinning filter. Implemented on top of its_decode_frame rather
- * than as a second copy of the header walk: that walk has been wrong before
- * (the 44-vs-40-byte extended header), and two copies would eventually
- * disagree. The extra work is affordable at the ~30 messages a second this
- * device actually receives. */
+/* Just the messageId (0 = unknown), built on its_decode_frame rather than a
+ * second copy of the header walk that would eventually disagree. */
 uint8_t its_peek_message_id(const uint8_t *frame, size_t len);
 
 #ifdef __cplusplus

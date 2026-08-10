@@ -23,12 +23,8 @@
 
 static const char TAG[] = "ETHERNET";
 
-/* KSZ8851SNL port 1 control register and its "all port LEDs off" bit. The
- * driver's PHY-register accessor passes the address straight through to the
- * chip's own register space, so these are the datasheet numbers verbatim.
- * Defined here rather than pulled from the managed component's private
- * ksz8851.h, which is not on the include path. A board with a different
- * Ethernet chip simply fails the ioctl and keeps its LEDs. */
+/* KSZ8851SNL port-1 control register and its "all port LEDs off" bit --
+ * datasheet values; the component's own ksz8851.h is not on the include path. */
 #define KSZ8851_REG_P1CR    0xF6
 #define KSZ8851_P1CR_LED_OFF 0x8000U
 
@@ -72,11 +68,8 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
             {
                 ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
             }
-            /* A static IP produces no DHCP lease and therefore no
-             * IP_EVENT_ETH_GOT_IP on reconnect, so the "got IP" event has to
-             * be raised here as well -- the link-down handler already stopped
-             * MQTT via LOST_IP, and without this nothing ever restarts it.
-             * DHCP units recover on their own and must not get a duplicate. */
+            /* Static IP has no DHCP lease, hence no GOT_IP event on reconnect -- raise
+             * it here or MQTT never restarts. DHCP units must not get a duplicate. */
             if (static_ip)
             {
                 post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
@@ -322,6 +315,11 @@ void initialize_ethernet(void)
 
 esp_err_t ethernet_apply_led_setting(void)
 {
+#if !CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
+    /* The LED-off bit exists only on the KSZ8851SNL; on MDIO PHYs the
+     * address would alias to an unrelated register, so don't try. */
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     if (!mgmt_eth)
         return ESP_ERR_INVALID_STATE;
 
@@ -357,6 +355,7 @@ esp_err_t ethernet_apply_led_setting(void)
 
     ESP_LOGI(TAG, "Ethernet port LEDs %s", on ? "on" : "off");
     return ESP_OK;
+#endif
 }
 
 eth_speed_t ethernet_get_mgmt_if_link_speed(void)

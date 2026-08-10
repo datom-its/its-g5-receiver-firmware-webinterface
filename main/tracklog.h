@@ -3,17 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Vehicle track log: where vehicles actually drove, kept for a few days so
- * the map can draw the routes they took. Deliberately NOT derived from the
- * PCAP archive on demand -- three days of recordings is about a gigabyte,
- * which would take minutes to walk and would hammer the SD bus (the very
- * path behind this project's unsolved write faults). Instead a few hundred
- * bytes per hour are appended as they arrive: measured on real traffic,
- * 49-279 vehicle positions an hour from 14-25 distinct vehicles, so three
- * days come to roughly 10,000 points -- well under half a megabyte.
- *
- * Off by default; the map layer and the recording are enabled together in
- * the settings page. RSUs are skipped: they never move. */
+/* Vehicle track log, appended live (~150 points/h) -- deriving it from the PCAP
+ * archive would walk a gigabyte over the fragile SD bus. Off by default; RSUs skipped. */
 
 typedef struct {
     uint32_t seconds;

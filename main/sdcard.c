@@ -29,17 +29,8 @@ static const char TAG[] = "SDCARD";
 
 static sdmmc_card_t *card = NULL;
 
-/* Serialises mount/unmount/format, which mutate `card` and touch the shared
- * SPI bus, AND the file I/O of every writer task (via sdcard_io_begin/end).
- * Both are needed: the web UI (httpd task), the system monitor's auto-remount
- * and the console can unmount or format, while sdlog/sdpcap/tracklog/
- * events_log are writing -- without a common lock an unmount frees the FATFS
- * structures an in-flight fwrite is still using (use-after-free, and the
- * resulting crash looks exactly like the known SD/SPI driver bug).
- * Serialising the writers against each other too is a bonus rather than a
- * cost: the card is a single serial device on a bus shared with Ethernet.
- * First use is from app_main (single-threaded), so the lazy create below is
- * race-free in practice. */
+/* One lock for mount/unmount/format AND all writer I/O (sdcard_io_begin/end):
+ * an unmount during an in-flight fwrite frees FATFS structures still in use. */
 static SemaphoreHandle_t sd_lock;
 
 static void sd_lock_take(void)
@@ -111,11 +102,8 @@ esp_err_t sdcard_mount(void)
     }
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        /* NOT true: an unreadable filesystem is far more often a card the
-         * driver stumbled over (or one carrying data from elsewhere) than a
-         * card that wants erasing, and auto-format would silently destroy the
-         * whole PCAP archive and log history on a mount that failed for any
-         * reason. Formatting is available on demand on the /sdcard page. */
+        /* An unreadable filesystem is usually a stumbled-over or foreign card, not one
+         * that wants erasing -- auto-format would destroy the archive. /sdcard can format. */
         .format_if_mount_failed = false,
         /* Concurrent openers: sdlog, sdpcap, tracklog, events_log, plus
          * whatever the web UI has open for a download -- 4 was below the

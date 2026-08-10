@@ -30,11 +30,8 @@ typedef struct {
 
 void ethernet_get_status(ethernet_status_t *out);
 
-/* Pushes CONFIG_INDEX_ETH_LEDS to the Ethernet port's link/activity LEDs.
- * Called at startup and on every link-up; call it again after changing the
- * setting so it takes effect without a restart. Returns the ioctl error on
- * hardware whose PHY has no such register -- harmless, the LEDs stay as they
- * are. */
+/* Pushes CONFIG_INDEX_ETH_LEDS to the port's link/activity LEDs. Runs at
+ * startup and on link-up; call again after changing the setting. */
 esp_err_t ethernet_apply_led_setting(void);
 
 #ifdef __cplusplus

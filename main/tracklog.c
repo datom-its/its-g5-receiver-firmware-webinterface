@@ -132,13 +132,8 @@ void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
     xSemaphoreGive(s_lock);
 }
 
-/* Rewrites the file without rows older than `keep_from_sec`, streaming to a
- * temporary file and swapping it in. The first version collected kept rows in
- * a malloc'd 256 KB block capped at 4096 lines -- that allocation would
- * likely fail outright on the internal heap (so pruning silently never ran),
- * and even when it worked, two days of tracks are ~7200 rows: everything
- * past the cap, i.e. the NEWEST rows, was dropped on rewrite. Streaming
- * needs no memory and has no cap. */
+/* Prunes by streaming to a temp file and swapping it in -- the old fixed-size
+ * buffer failed to alloc or silently dropped the NEWEST rows. */
 #define TR_TMP   TR_DIR "/tracks.tmp"
 
 static void prune(uint32_t keep_from_sec)
@@ -182,11 +177,8 @@ void tracklog_tick(void)
     if (!s_lock || !sdcard_is_mounted())
         return;
 
-    /* Guards the append and the prune rewrite below against unmount/format.
-     * Bounded, NOT an unlimited wait: this runs on the sysmon task, which is
-     * the watchdog. Blocking here on a stuck SD writer would wedge the very
-     * task whose job it is to notice a wedge -- and one skipped cycle costs
-     * nothing, the points stay queued for the next one. */
+    /* Bounded wait, NOT unlimited: this runs on the sysmon (watchdog) task; a
+     * skipped cycle is free, the points stay queued. */
     if (!sdcard_io_begin_timeout(2000))
         return;
 
@@ -228,12 +220,8 @@ void tracklog_tick(void)
         s_flushes++;
     }
 
-    /* Pruning rewrites the whole file, so do it rarely -- roughly hourly at
-     * the sysmon tick rate, which is ample for a days-long retention.
-     * Counts TICKS, not flushes: keying it on the flush counter meant that
-     * with nothing to write (night, no vehicles in range) the counter stayed
-     * put at a multiple of 64 and every single tick rewrote the whole file --
-     * hours of pointless traffic on the very SD bus behind the known crash. */
+    /* Prune roughly hourly, counted in TICKS: keying on the flush counter made
+     * idle nights rewrite the whole file every tick on the fragile SD bus. */
     static uint32_t prune_ticks;
     if (++prune_ticks >= 64)
     {

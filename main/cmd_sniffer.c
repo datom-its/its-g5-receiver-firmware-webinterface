@@ -69,14 +69,8 @@ static void queue_packet(void *recv_packet, sniffer_packet_info_t *packet_info)
         memcpy(packet_to_queue, recv_packet, packet_info->length);
         packet_info->payload = packet_to_queue;
         if (work_queue) {
-            /* Never block here: this runs in the WiFi driver's own task, and
-             * waiting 100 ms for a full queue stalled frame reception itself
-             * (at ~650 frames/s the backlog grows faster than the wait drains
-             * it, so the wait only ever made the loss worse). Dropping
-             * immediately is the correct behaviour for a full queue, and the
-             * counter keeps it from being invisible -- the old per-frame
-             * ESP_LOGE could emit hundreds of lines a second, which on this
-             * device also means hundreds of SD log writes. */
+            /* Runs in the WiFi driver's task: never block on a full queue -- drop with
+             * a counter (a 100 ms wait stalled reception, per-frame logs flooded the SD). */
             static uint32_t dropped;
             if (xQueueSend(work_queue, packet_info, 0) != pdTRUE) {
                 free(packet_info->payload);
@@ -94,11 +88,8 @@ static void wifi_sniffer_cb(void *recv_buf, wifi_promiscuous_pkt_type_t type)
 {
     sniffer_packet_info_t packet_info;
     wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)recv_buf;
-    /* Wall-clock, not rx_ctrl.timestamp: that field is a PHY microsecond
-     * counter that wraps roughly every 71 minutes, so PCAPs written from the
-     * console path carried timestamps that jumped backwards. The rolling SD
-     * capture (sdpcap) already stamps with gettimeofday() for this reason;
-     * this is the same fix for the other writer. */
+    /* Wall-clock, not rx_ctrl.timestamp: that PHY counter wraps every ~71 min
+     * and made console-path PCAP timestamps jump backwards. */
     struct timeval tv;
     gettimeofday(&tv, NULL);
     packet_info.seconds = (uint32_t)tv.tv_sec;

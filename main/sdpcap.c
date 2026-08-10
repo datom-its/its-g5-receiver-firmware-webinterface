@@ -61,11 +61,8 @@ typedef struct { uint32_t sec, usec, caplen, len; } pcap_rec_hdr_t;
 /*  PSRAM ring buffer                                                  */
 /* ================================================================== */
 
-/* Holds formatted pcap records (header+payload, back to back) until the
- * writer task flushes them to SD in one bulk write -- bounds RAM use in
- * otherwise-idle PSRAM while allowing a large flush interval, and turns
- * many small SD writes into few large ones (fewer SPI-bus acquisitions on
- * the bus shared with Ethernet). */
+/* Ring of formatted pcap records, flushed in bulk -- few large SD writes
+ * instead of many small ones on the bus shared with Ethernet. */
 typedef struct {
     uint8_t *buf;
     size_t   size;
@@ -187,14 +184,8 @@ static void config_event_handler(void *arg, esp_event_base_t base, int32_t id, v
         reload_config();
 }
 
-/* Thinning filter. One traffic light accounts for 85% of everything recorded
- * here -- 26,679 SPATEM an hour, the same intersection repeating itself ten
- * times a second, 12.1 of the 14.3 MB. Dropping the security envelope from
- * each frame would save less (a factor of three) while making the recording
- * no longer a faithful capture; skipping repeats costs nothing structurally
- * and saves more. Modes: 0 keep everything, 1 thin the infrastructure
- * chatter to one message a second per type, 2 keep only vehicles and
- * warnings. */
+/* Thinning filter: one traffic light is ~85% of the recording (the same SPATEM
+ * 10x/s). 0 = keep all, 1 = infra chatter to 1/s per type, 2 = vehicles+warnings only. */
 static uint32_t s_filtered;
 static uint32_t s_last_kept[256];   /* last second kept, per messageId */
 
@@ -223,11 +214,8 @@ static bool pcap_keep_frame(const uint8_t *frame, size_t len, uint32_t sec)
     return true;
 }
 
-/* Called from the sniffer's hot path -- must never block, never malloc.
- * The record-assembly buffer is `static`, not a stack local:
- * CONFIG_SNIFFER_TASK_STACK_SIZE is only 4096 bytes total, and a ~2 KB
- * local array here would eat half of it. Safe as `static` since only
- * sniffer_task ever calls this, sequentially. */
+/* Sniffer hot path: never block, never malloc. Assembly buffer is static -- the
+ * 4 KB sniffer stack can't afford ~2 KB locals; single sequential caller. */
 void sdpcap_handle_packet(sniffer_packet_info_t *packet)
 {
     if (!s_ready || !cfg_enabled || !packet)
@@ -296,12 +284,8 @@ static bool pcap_rec_plausible(const pcap_rec_hdr_t *rh, uint32_t hour, size_t m
            rh->sec >= hour && rh->sec < hour + 3605u;
 }
 
-/* Slides forward from the current position until a plausible record header
- * is found, leaving the stream positioned just after it. Scans in-memory
- * chunks: the first version issued an fseek+fread pair PER BYTE, which on a
- * thoroughly damaged file meant up to 262,144 SD accesses before giving up --
- * the same scan over 2 KB chunks is 128 reads. Bounded either way so a broken
- * file cannot stall the request indefinitely. */
+/* Resync scan over in-memory 2 KB chunks (per-byte fseek+fread was up to 262k
+ * SD accesses on a damaged file); bounded either way. */
 #define PCAP_RESYNC_MAX 262144   /* 256 KB of garbage before giving up */
 
 static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxcap)
@@ -371,12 +355,8 @@ void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_c
         pcap_rec_hdr_t rh;
         while (fread(&rh, sizeof(rh), 1, f) == 1)
         {
-            /* A torn SD write desynchronises the record framing, and giving up
-             * at that point threw away the rest of the hour -- measured on a
-             * real file: readable up to 19:07, 50 minutes of perfectly good
-             * frames beyond it lost. So resynchronise instead: slide forward
-             * a byte at a time until a header looks plausible again (timestamp
-             * inside this file's own hour, sane lengths). */
+            /* A torn write desynchronises the framing; resync forward instead of
+             * discarding the rest of the hour. */
             if (!pcap_rec_plausible(&rh, (uint32_t)bucket, sizeof(buf)))
             {
                 if (!pcap_resync(f, &rh, (uint32_t)bucket, sizeof(buf)))
@@ -400,14 +380,8 @@ void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_c
     sdcard_io_end();
 }
 
-/* Flushes the ring to `path` (the file for the hour its contents belong to
- * -- see sdpcap_task's hour-boundary handling), draining in fixed 4 KB
- * chunks rather than needing a buffer the size of the whole ring.
- * `limit` caps how many bytes are taken; 0 means "drain everything". The cap
- * matters at an hour boundary: the sniffer keeps appending during the flush,
- * and those records belong to the NEW hour. Writing them into the old hour's
- * file put them past the reader's +5 s plausibility window, where playback
- * rejects them and then gives up on the rest of the file. */
+/* Flushes the ring to `path` in 4 KB chunks. `limit` caps the drain (0 = all):
+ * at an hour boundary, records arriving DURING the flush belong to the new hour's file. */
 static void sdpcap_flush_to(const char *path, size_t limit)
 {
     FILE *f = fopen(path, "ab");
@@ -473,11 +447,8 @@ size_t sdpcap_flush_now(void)
     return pending;
 }
 
-/* Age+size retention sweep, rate-limited to PRUNE_INTERVAL_MS (not every
- * poll tick): delete files older than cfg_retain_hours by filename
- * comparison (UTC-aligned names sort chronologically by construction), then
- * if the directory is still over cfg_max_mb, delete oldest-first until under
- * budget. The currently-active bucket is never pruned. */
+/* Age+size retention sweep, rate-limited: delete beyond cfg_retain_hours by
+ * filename (names sort chronologically), then oldest-first until under cfg_max_mb. */
 static void sdpcap_prune(void)
 {
     char current[96];
@@ -593,11 +564,8 @@ static void sdpcap_task(void *arg)
         time_t now = time(NULL);
         time_t bucket_now = now - (now % 3600);
 
-        /* Hour boundary: flush to the OLD bucket's file first, so every
-         * record lands in the file matching its own hour (required for
-         * sdpcap_read_positions' bucket lookup). Polling every second means
-         * whatever's still buffered here is guaranteed to predate the
-         * boundary. */
+        /* Hour boundary: flush to the OLD bucket first so every record lands in the
+         * file matching its own hour (playback's bucket lookup relies on it). */
         if (current_bucket != 0 && bucket_now != current_bucket)
         {
             size_t pending = ring_used(&s_ring);

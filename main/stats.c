@@ -107,12 +107,8 @@ static void write_row(FILE *f, const stat_hour_t *h)
     fprintf(f, "\n");
 }
 
-/* Drop rows older than the retention window by streaming to a temp file and
- * swapping it in. The previous version read the whole file into a 64 KB
- * buffer -- but 30 days of hourly rows at real traffic volume measure about
- * 107 KB, so everything past the buffer, i.e. the NEWEST rows, would have
- * been silently dropped on every prune. Same defect family (and same fix) as
- * the vehicle-track log's prune. */
+/* Prunes by streaming to a temp file and swapping it in -- a fixed read buffer
+ * capped the file and silently dropped the NEWEST rows. */
 #define STATS_TMP   STATS_DIR "/traffic.tmp"
 
 static void prune(uint32_t keep_from_hour)

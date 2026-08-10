@@ -40,6 +40,7 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.25.1-webui** | Fix: compiling for the alternative SPI Ethernet chips (W5500, ENC28J60) works now, and the prototype sdkconfigs are updated to match. The network-LED switch stays KSZ8851SNL-only — the W5500 has no LED register, the ENC28J60 would allow it but is untested for lack of hardware — and such builds hide the setting in the web interface. |
 | **0.25.0-webui** | The Ethernet port's two LEDs can be switched off from the settings page, taking effect immediately. Also adds a "prepare for power-off" button that flushes every buffer and unmounts the SD card, and the same flush now runs before each deliberate restart, so a reboot no longer discards the buffered recording. |
 | **0.23.0-webui** | The map can show the vehicle tracks of every configured receiver at once, each in its own colour, as a second switchable layer. |
 | **0.22.7-webui** | Fixes 28 defects, among them a script injection from a MAPEM intersection name, a deadlock on an MQTT `sniffer --stop`, an SD unmount racing an in-flight write, and four decoder faults. Each device now advertises a unique mDNS instance name and browser-tab title. |
