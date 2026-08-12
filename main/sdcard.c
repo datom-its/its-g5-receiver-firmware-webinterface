@@ -93,7 +93,9 @@ void sdcard_io_end(void)
     sd_lock_give();
 }
 
-esp_err_t sdcard_mount(void)
+/* format_if_failed = true is reserved for the user's explicit format request
+ * on a card that never mounted (e.g. factory exFAT) -- never automatic. */
+static esp_err_t sdcard_mount_internal(bool format_if_failed)
 {
     sd_lock_take();
     if (card != NULL) {
@@ -104,7 +106,7 @@ esp_err_t sdcard_mount(void)
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         /* An unreadable filesystem is usually a stumbled-over or foreign card, not one
          * that wants erasing -- auto-format would destroy the archive. /sdcard can format. */
-        .format_if_mount_failed = false,
+        .format_if_mount_failed = format_if_failed,
         /* Concurrent openers: sdlog, sdpcap, tracklog, events_log, plus
          * whatever the web UI has open for a download -- 4 was below the
          * real worst case, and the overflow shows up as a sporadic,
@@ -153,6 +155,20 @@ esp_err_t sdcard_mount(void)
     return ESP_OK;
 }
 
+esp_err_t sdcard_mount(void)
+{
+    return sdcard_mount_internal(false);
+}
+
+/* Set by /poweroff so sysmon's auto-remount doesn't re-mount the card the
+ * user just had unmounted -- not reset by sdcard_mount(), which sysmon
+ * itself calls. */
+static volatile bool s_no_auto_remount;
+
+void sdcard_inhibit_auto_remount(void) { s_no_auto_remount = true; }
+void sdcard_allow_auto_remount(void)   { s_no_auto_remount = false; }
+bool sdcard_auto_remount_inhibited(void) { return s_no_auto_remount; }
+
 esp_err_t sdcard_unmount(void)
 {
     sd_lock_take();
@@ -180,7 +196,17 @@ esp_err_t sdcard_format(void)
     sd_lock_take();
     if (card == NULL) {
         sd_lock_give();
-        return ESP_ERR_INVALID_STATE;
+        /* A merely unmounted card mounts here and falls through to the real
+         * format; only an unreadable one takes the format-on-mount path. */
+        if (sdcard_mount_internal(false) != ESP_OK) {
+            ESP_LOGW(TAG, "Formatting unreadable SD card via mount...");
+            return sdcard_mount_internal(true);
+        }
+        sd_lock_take();
+        if (card == NULL) {
+            sd_lock_give();
+            return ESP_ERR_INVALID_STATE;
+        }
     }
 
     ESP_LOGW(TAG, "Formatting SD card...");

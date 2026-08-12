@@ -134,7 +134,7 @@ typedef enum {
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
     S_FS_INTERNAL, S_FS_NOTE, S_TAR_SELECTED, S_TAR_NONE, S_TAR_HINT,
     S_SD_DELETE_SELECTED, S_SD_DELETE_SEL_CONFIRM,
-    S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
+    S_SD_NOT_MOUNTED, S_SD_UNMOUNTED_HINT, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
     S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
@@ -439,6 +439,12 @@ static const char *STR[S_COUNT][2] = {
                              "Note: larger downloads can take several minutes due to the "
                              "device architecture &ndash; the web UI is unresponsive meanwhile." },
     [S_SD_NOT_MOUNTED]  = { "Keine SD-Karte eingebunden.", "No SD card mounted." },
+    [S_SD_UNMOUNTED_HINT] = { "Steckt eine Karte, l&auml;sst sich aber nicht einbinden, ist sie "
+                              "vermutlich nicht FAT-formatiert (fabrikneue Karten &uuml;ber 32 GB "
+                              "kommen als exFAT) &ndash; einmal formatieren richtet sie ein.",
+                              "If a card is inserted but cannot be mounted, it is probably not "
+                              "FAT-formatted (factory cards above 32 GB ship as exFAT) &ndash; "
+                              "formatting it once sets it up." },
     [S_SD_MOUNT]        = { "Einbinden",               "Mount" },
     [S_SD_USAGE]        = { "Belegung",                 "Usage" },
     [S_SD_USED_OF]      = { "%s von %s belegt (%s frei)", "%s of %s used (%s free)" },
@@ -4486,6 +4492,10 @@ static esp_err_t poweroff_post_handler(httpd_req_t *req)
      * sense when nothing is going to run afterwards. */
     sysmon_flush_persistent();
 
+    /* Before the unmount: sysmon would otherwise mount the card straight
+     * back after 30 s, undoing the safe state while the user walks over. */
+    sdcard_inhibit_auto_remount();
+
     esp_err_t err = sdcard_unmount();
     bool ok = (err == ESP_OK);
     ESP_LOGW(TAG, "prepare-for-power-off: unmount %s",
@@ -5238,11 +5248,20 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     if (!sdcard_is_mounted())
     {
-        char buf[256];
+        /* The format button must be reachable HERE: an unreadable card never
+         * mounts, and since 0.22.7 nothing formats it automatically. */
+        char buf[1024];
         snprintf(buf, sizeof(buf),
-            "<p>%s</p><form method='post' action='/sdcard/mount'>"
-            "<button>%s</button></form>",
-            T(S_SD_NOT_MOUNTED), T(S_SD_MOUNT));
+            "<p>%s</p><p><small>%s</small></p>"
+            "<form method='post' action='/sdcard/mount' style='display:inline-block;margin-right:8px'>"
+            "<button>%s</button></form>"
+            "<button onclick=\"if(confirm('%s')){"
+            "var x=new XMLHttpRequest();x.open('POST','/sdcard/format');"
+            "x.onload=function(){location.reload();};"
+            "this.innerText='%s';x.send();}\">%s</button>",
+            T(S_SD_NOT_MOUNTED), T(S_SD_UNMOUNTED_HINT),
+            T(S_SD_MOUNT),
+            T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING), T(S_SD_FORMAT));
         httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, NULL, 0);
@@ -5658,6 +5677,8 @@ static esp_err_t sdcard_format_handler(httpd_req_t *req)
     resolve_language(req);
     if (!check_update_auth(req))
         return send_auth_required(req);
+    /* Formatting means the card is meant to be in use again. */
+    sdcard_allow_auto_remount();
     esp_err_t e = sdcard_format();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, e == ESP_OK ? "OK" : "Error");
@@ -5668,6 +5689,9 @@ static esp_err_t sdcard_mount_handler(httpd_req_t *req)
 {
     if (!check_update_auth(req))
         return send_auth_required(req);
+    /* Mounting by hand takes the device out of the prepared-for-power-off
+     * state, so let sysmon look after the card again. */
+    sdcard_allow_auto_remount();
     sdcard_mount();
     httpd_resp_set_status(req, "303 See Other");
     httpd_resp_set_hdr(req, "Location", "/sdcard");

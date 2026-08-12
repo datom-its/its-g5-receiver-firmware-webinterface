@@ -131,7 +131,7 @@ static void sysmon_task(void *arg)
 #if CONFIG_ENABLE_SD
         /* (5) SD auto-remount: retry every SYSMON_SD_RETRY_MS while unmounted
          * (e.g. the card wasn't ready at boot, or was briefly removed). */
-        if (!sdcard_is_mounted())
+        if (!sdcard_is_mounted() && !sdcard_auto_remount_inhibited())
         {
             if (++sd_wait >= (int)MS_TO_TICKS_COUNT(SYSMON_SD_RETRY_MS))
             {

@@ -40,6 +40,7 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.25.2-webui** | The format button now also appears while no card is mounted, and formatting a card the device cannot read (e.g. a factory exFAT card) actually works. Cards with a readable filesystem are still never touched without asking. |
 | **0.25.1-webui** | Fix: compiling for the alternative SPI Ethernet chips (W5500, ENC28J60) works now, and the prototype sdkconfigs are updated to match. The network-LED switch stays KSZ8851SNL-only — the W5500 has no LED register, the ENC28J60 would allow it but is untested for lack of hardware — and such builds hide the setting in the web interface. |
 | **0.25.0-webui** | The Ethernet port's two LEDs can be switched off from the settings page, taking effect immediately. Also adds a "prepare for power-off" button that flushes every buffer and unmounts the SD card, and the same flush now runs before each deliberate restart, so a reboot no longer discards the buffered recording. |
 | **0.23.0-webui** | The map can show the vehicle tracks of every configured receiver at once, each in its own colour, as a second switchable layer. |

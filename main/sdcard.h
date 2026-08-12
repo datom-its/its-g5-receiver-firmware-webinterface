@@ -18,6 +18,13 @@ esp_err_t sdcard_mount(void);
 /* Unmount the SD card. */
 esp_err_t sdcard_unmount(void);
 
+/* Stops the system monitor's 30 s auto-remount from undoing a deliberate
+ * unmount (/poweroff) before the plug is actually pulled. Cleared by a manual
+ * mount and by a restart. */
+void sdcard_inhibit_auto_remount(void);
+void sdcard_allow_auto_remount(void);
+bool sdcard_auto_remount_inhibited(void);
+
 /* True while the card is mounted. */
 bool sdcard_is_mounted(void);
 
