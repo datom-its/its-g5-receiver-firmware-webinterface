@@ -1,7 +1,6 @@
 # ITS-G5 Receiver Firmware (Web-UI Fork)
 
-Modified firmware for the **opentrafficmap ITS-G5 receiver** (official board,
-HW variant `i5r-r1`) — a passive 802.11p / ITS-G5 (V2X) sniffer on ESP32-C5 that
+Modified firmware for the **opentrafficmap ITS-G5 receiver** (official board) — a passive 802.11p / ITS-G5 (V2X) sniffer on ESP32-C5 that
 forwards raw frames over MQTT. This fork adds a built-in web interface, a live
 map, on-device PCAP recording with playback, and a number of bug fixes on top
 of the upstream firmware.
