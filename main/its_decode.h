@@ -182,7 +182,23 @@ typedef struct {
     its_veh_t  veh;                /* CAM vehicle dimensions */
     its_cam_detail_t cam;          /* heading, pedals, lights, role, path */
 
-    uint8_t  pt_line;              /* public-transport line number, 0 = none */
+    /* 802.11 sender address (Addr2). Always at offset 10 for the frames this
+     * decoder accepts (ToDS=0, FromDS=0), so no ambiguity. */
+    uint8_t  src_mac[6];
+    bool     has_src_mac;
+
+    /* VDV R09.16 telegram out of the CAM's publicTransportContainer. Field
+     * names are the standard's own; byte layout validated against tshark on
+     * real frames (see reference-its-decode). 0xFFFF/0xFF = not carried. */
+    uint16_t pt_line;              /* LN Liniennummer  (0..999, 0 = none) */
+    uint8_t  pt_course;            /* KN Kursnummer    (0..99) */
+    uint16_t pt_dest;              /* ZN Zielnummer    (0..999) */
+    uint16_t pt_point;             /* MP Meldepunktnummer */
+    uint8_t  pt_train_len;         /* ZL Zuglänge */
+    uint8_t  pt_priority;          /* PR Priorität */
+    uint8_t  pt_request;           /* HA 0=keine, 1=gerade, 2=links, 3=rechts */
+    int16_t  pt_deviation;         /* ZW mit Vorzeichen aus ZV: + = Verspätung */
+    bool     pt_telegram;          /* the R09 fields above are valid */
     bool     pt_container;         /* CAM carried a publicTransportContainer */
     /* EmbarkationStatus: passengers boarding/alighting right now. Decoded but
      * never yet observed true in real traffic -- treat as unverified. */

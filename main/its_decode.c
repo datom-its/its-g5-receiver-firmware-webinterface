@@ -665,7 +665,6 @@ static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
 static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
                              its_decoded_t *d)
 {
-    uint8_t *out_line = &d->pt_line;
     bool *out_embarking = &d->pt_embarking;
     its_cam_detail_t *cd = &d->cam;
     cd->role = 0xFF;
@@ -788,20 +787,42 @@ static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
     if (nbytes > 20 || r.err)
         return false;
 
-    /* R09 telegram: five fixed bytes, then the line number as BCD. */
-    static const uint8_t R09[5] = { 0x91, 0x06, 0x00, 0x00, 0x00 };
-    if (nbytes < 6)
+    /* VDV R09.16 telegram, 9 bytes, all numbers BCD:
+     *   0: Modus(4)=9 TY(4)      1: ZV(1) ZW(3) TL(4)      2-3: MP(16)
+     *   4: PR(2) HA(2) LN1(4)    5: LN2(4) LN3(4)          6: KN(2 digits)
+     *   7: ZN1(4) ZN2(4)         8: ZN3(4) ZL(4)
+     * Byte 4 was previously required to be 0x00, which silently dropped every
+     * three-digit line and every vehicle signalling priority or a request. */
+    if (nbytes < 9)
         return true;
-    for (int i = 0; i < 5; i++)
-        if (sb(&r, 8) != R09[i])
-            return true;            /* some other activation telegram */
-    uint32_t v = sb(&r, 8);
+    uint8_t b[9];
+    for (int i = 0; i < 9; i++)
+        b[i] = (uint8_t)sb(&r, 8);
     if (r.err)
         return false;
-    uint8_t hi = (v >> 4) & 0xF, lo = v & 0xF;
-    if (hi > 9 || lo > 9)
+    /* Gate on Modus=9, TY=1 AND TL=6: only that combination has the fixed
+     * R09.16 layout below. Modus alone would force-decode other subtypes. */
+    if ((b[0] >> 4) != 9 || (b[0] & 0x0F) != 1 || (b[1] & 0x0F) != 6)
+        return true;
+
+    uint8_t ln1 = b[4] & 0x0F, ln2 = b[5] >> 4,   ln3 = b[5] & 0x0F;
+    uint8_t kn1 = b[6] >> 4,   kn2 = b[6] & 0x0F;
+    uint8_t zn1 = b[7] >> 4,   zn2 = b[7] & 0x0F, zn3 = b[8] >> 4;
+    if (ln1 > 9 || ln2 > 9 || ln3 > 9 || kn1 > 9 || kn2 > 9 ||
+        zn1 > 9 || zn2 > 9 || zn3 > 9)
         return true;                /* not BCD -- report the container only */
-    if (out_line) *out_line = (uint8_t)(hi * 10 + lo);
+
+    d->pt_line      = (uint16_t)(ln1 * 100 + ln2 * 10 + ln3);
+    d->pt_course    = (uint8_t)(kn1 * 10 + kn2);
+    d->pt_dest      = (uint16_t)(zn1 * 100 + zn2 * 10 + zn3);
+    d->pt_point     = (uint16_t)((b[2] << 8) | b[3]);
+    d->pt_priority  = (uint8_t)(b[4] >> 6);
+    d->pt_request   = (uint8_t)((b[4] >> 4) & 0x03);
+    d->pt_train_len = (uint8_t)(b[8] & 0x07);   /* ZL is 3 bits, not 4 */
+    /* ZV is the sign of the schedule deviation: 0 = late, 1 = early. */
+    int16_t zw = (int16_t)((b[1] >> 4) & 0x07);
+    d->pt_deviation = (b[1] & 0x80) ? (int16_t)-zw : zw;
+    d->pt_telegram  = true;
     return true;
 }
 
@@ -908,6 +929,10 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
         snprintf(out, out_size, "?");
         return;
     }
+
+    /* Addr2 = sender, fixed at offset 10 for the frame shape accepted above. */
+    memcpy(r->src_mac, frame + 10, 6);
+    r->has_src_mac = true;
 
     const uint8_t *llc = frame + off;
     if (llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03 ||

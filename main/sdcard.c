@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
@@ -93,6 +94,54 @@ void sdcard_io_end(void)
     sd_lock_give();
 }
 
+/* Streaming readers run WITHOUT sd_lock, only counted; unmount/format
+ * refuse to free the filesystem while the count is nonzero. */
+static portMUX_TYPE rd_mux = portMUX_INITIALIZER_UNLOCKED;
+static int rd_count;
+static bool rd_closing;
+
+bool sdcard_read_begin(void)
+{
+    portENTER_CRITICAL(&rd_mux);
+    if (card == NULL || rd_closing)
+    {
+        portEXIT_CRITICAL(&rd_mux);
+        return false;
+    }
+    rd_count++;
+    portEXIT_CRITICAL(&rd_mux);
+    return true;
+}
+
+void sdcard_read_end(void)
+{
+    portENTER_CRITICAL(&rd_mux);
+    if (rd_count > 0)
+        rd_count--;
+    portEXIT_CRITICAL(&rd_mux);
+}
+
+/* Called with sd_lock held. True: no readers left, rd_closing stays set (new
+ * readers refused) until the caller clears it after its operation. */
+static bool sd_wait_readers(void)
+{
+    rd_closing = true;
+    for (int waited = 0; ; waited += 100)
+    {
+        portENTER_CRITICAL(&rd_mux);
+        int n = rd_count;
+        portEXIT_CRITICAL(&rd_mux);
+        if (n == 0)
+            return true;
+        if (waited >= 3000)
+        {
+            rd_closing = false;
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 /* format_if_failed = true is reserved for the user's explicit format request
  * on a card that never mounted (e.g. factory exFAT) -- never automatic. */
 static esp_err_t sdcard_mount_internal(bool format_if_failed)
@@ -120,10 +169,10 @@ static esp_err_t sdcard_mount_internal(bool format_if_failed)
     /* The SPI bus is initialised elsewhere (shared with Ethernet). */
     ESP_LOGI(TAG, "Mounting SD card (SPI)");
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    /* 15 MHz, not the 20 MHz default: the SD card shares one SPI bus with
-     * the Ethernet controller, and a slower clock gives more setup/hold
-     * margin under concurrent traffic (see reference-sd-spi-bug in memory). */
-    host.max_freq_khz = 15000;
+    /* Back at the 20 MHz default: the bus-error source was fixed in 0.22.7
+     * (see reference-sd-spi-bus-bug); if 0x107/0x108/0x109 lines return to
+     * the log, dropping to 15000 here was the old mitigation. */
+    host.max_freq_khz = 20000;
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
@@ -177,7 +226,14 @@ esp_err_t sdcard_unmount(void)
         return ESP_OK;
     }
 
+    if (!sd_wait_readers()) {
+        ESP_LOGW(TAG, "Unmount refused: a download is still streaming");
+        sd_lock_give();
+        return ESP_ERR_TIMEOUT;
+    }
+
     esp_err_t ret = esp_vfs_fat_sdcard_unmount(MOUNT_POINT, card);
+    rd_closing = false;
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Card unmount failed: %s", esp_err_to_name(ret));
         sd_lock_give();
@@ -209,8 +265,15 @@ esp_err_t sdcard_format(void)
         }
     }
 
+    if (!sd_wait_readers()) {
+        ESP_LOGW(TAG, "Format refused: a download is still streaming");
+        sd_lock_give();
+        return ESP_ERR_TIMEOUT;
+    }
+
     ESP_LOGW(TAG, "Formatting SD card...");
     esp_err_t ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, card);
+    rd_closing = false;
     if (ret != ESP_OK)
         ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
     else

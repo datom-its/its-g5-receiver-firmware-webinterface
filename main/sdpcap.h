@@ -29,8 +29,18 @@ typedef bool (*sdpcap_position_cb_t)(uint32_t seconds, uint32_t microseconds,
                                       const its_decoded_t *decoded, void *ctx);
 
 /* Reads stored PCAPs covering [from_sec, to_sec], decoding each frame's
- * position via its_decode_frame and invoking cb chronologically. Read-only. */
-void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx);
+ * position via its_decode_frame and invoking cb chronologically. Read-only.
+ * Returns false when the range could NOT be fully read (writer-lock timeout
+ * or card gone) -- callers reporting coverage must not claim completeness. */
+bool sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx);
+
+/* Raw-frame variant of the walk above: cb also gets the frame bytes, for
+ * consumers that re-send rather than draw (and it sees EVERY decoded frame,
+ * not just those with a position). Return false to abort. */
+typedef bool (*sdpcap_frame_cb_t)(uint32_t seconds, uint32_t microseconds,
+                                  const uint8_t *frame, size_t frame_len,
+                                  const its_decoded_t *decoded, void *ctx);
+bool sdpcap_read_frames(uint32_t from_sec, uint32_t to_sec, sdpcap_frame_cb_t cb, void *ctx);
 
 #ifdef __cplusplus
 }

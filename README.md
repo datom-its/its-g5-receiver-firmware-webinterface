@@ -39,6 +39,7 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.26.0-webui** | Full VDV R09.16 decoding — line, course, destination, priority, turn request and schedule deviation (a decoder bug had hidden lines from 100 up) — and the message list shows the 802.11 sender address. Long transfers now run on a worker task, so the web UI stays responsive during multi-MB downloads, and the messages page gains a search across the PCAP recording, a live filter box, and a manual re-upload of recorded stationary senders (RSUs, traffic lights) to the server — capped at 24 h, with optional thinning. SD SPI clock back at the 20 MHz default. |
 | **0.25.2-webui** | The format button now also appears while no card is mounted, and formatting a card the device cannot read (e.g. a factory exFAT card) actually works. Cards with a readable filesystem are still never touched without asking. |
 | **0.25.1-webui** | Fix: compiling for the alternative SPI Ethernet chips (W5500, ENC28J60) works now, and the prototype sdkconfigs are updated to match. The network-LED switch stays KSZ8851SNL-only — the W5500 has no LED register, the ENC28J60 would allow it but is untested for lack of hardware — and such builds hide the setting in the web interface. |
 | **0.25.0-webui** | The Ethernet port's two LEDs can be switched off from the settings page, taking effect immediately. Also adds a "prepare for power-off" button that flushes every buffer and unmounts the SD card, and the same flush now runs before each deliberate restart, so a reboot no longer discards the buffered recording. |
@@ -166,8 +167,8 @@ field device.
 - Ethernet: **KSZ8851SNL** (SPI) — not W5500/ENC28J60; the upstream
   `sdkconfig.proto-*` files do **not** match this board.
 - The SD card shares the SPI bus with the Ethernet controller. Under
-  concurrent traffic this bus is timing-sensitive; the firmware runs the SD
-  clock at 15 MHz (down from the 20 MHz default) for robustness.
+  concurrent traffic this bus is timing-sensitive; since 0.26.0 the SD clock
+  is back at the 20 MHz default (0.22.7 fixed the underlying bus errors).
 - Flash: **8 MB**, partition table `partitions_8M.csv` (A/B OTA slots plus a
   small coredump partition).
 - The correct board config lives in the project's `sdkconfig`

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include <time.h>
 #include <sys/time.h>
 #if CONFIG_ENABLE_SD
@@ -48,6 +49,7 @@
 #include "sdcard.h"
 #include "sdlog.h"
 #include "sdpcap.h"
+#include "mqtt.h"
 #endif
 #ifdef CONFIG_ENABLE_TEMPERATURE
 #include "temperature.h"
@@ -104,14 +106,16 @@ typedef enum {
     S_RUNNING, S_STOPPED, S_CONNECTED, S_DISCONNECTED,
     S_START, S_STOP, S_REBOOT, S_REBOOT_CONFIRM, S_REBOOTING,
     S_POWEROFF, S_POWEROFF_CONFIRM, S_POWEROFF_BUSY, S_POWEROFF_OK, S_POWEROFF_FAIL,
+    S_POWEROFF_DOWNLOAD,
     S_SNIFFER_LABEL, S_SNIFF_START, S_SNIFF_STOP, S_AUTO_REFRESH,
     S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
-    S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW,
+    S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW, S_COL_SENDER,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
     S_SET_GROUP_GENERAL, S_SET_GROUP_NETWORK, S_SET_GROUP_MQTT,
     S_SET_GROUP_STORAGE, S_SET_GROUP_SECURITY, S_SET_GROUP_TRAFFIC,
     S_STATS_RETAIN_DAYS, S_EVENT_RETAIN_DAYS,
-    S_MAP_STALE_SEC, S_MAP_STALE_HINT, S_MAP_LINE, S_EVT_TRAFFIC,
+    S_MAP_STALE_SEC, S_MAP_STALE_HINT, S_MAP_LINE, S_MAP_COURSE, S_MAP_DEST,
+    S_MAP_LATE, S_MAP_EARLY, S_MAP_ONTIME, S_EVT_TRAFFIC,
     S_BROADCAST_ONLY, S_BROADCAST_ONLY_HINT,
     S_LED_OVERRIDE, S_LED_OVERRIDE_HINT,
     S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
@@ -124,7 +128,7 @@ typedef enum {
     S_PCAP_ENABLE, S_PCAP_RETAIN_HOURS, S_PCAP_MAX_MB, S_PCAP_HINT,
     S_PCAP_BUF_MB, S_PCAP_BUF_HINT, S_PCAP_FLUSH_SEC,
     S_PLAYBACK_FROM, S_PLAYBACK_TO, S_PLAYBACK_LOAD, S_PLAYBACK_LIVE, S_PLAYBACK_NONE, S_PLAYBACK_ERROR,
-    S_PLAYBACK_BUSY, S_PLAYBACK_STEP, S_MAP_LAYER_DARK, S_MAP_LAYER_LIGHT, S_MAP_LAYER_TRACKS, S_MAP_LAYER_TRACKS_P, S_MAP_TRACK_PTS, S_UPD_WAIT, S_UPD_FLASHING,
+    S_PLAYBACK_BUSY, S_PLAYBACK_PARTIAL, S_PLAYBACK_STEP, S_MAP_LAYER_DARK, S_MAP_LAYER_LIGHT, S_MAP_LAYER_TRACKS, S_MAP_LAYER_TRACKS_P, S_MAP_TRACK_PTS, S_UPD_WAIT, S_UPD_FLASHING,
     S_PEERS, S_PEERS_HINT, S_MAP_SEEN_BY, S_UNSAVED,
     S_TRACKS_ENABLE, S_TRACKS_DAYS, S_TRACKS_HINT,
     S_ETH_LEDS, S_ETH_LEDS_HINT,
@@ -134,6 +138,10 @@ typedef enum {
     S_NAV_SD, S_TITLE_SD, S_FS_PARTITIONS, S_FS_SDCARD, S_FS_USED, S_FS_MOUNT_AT,
     S_FS_INTERNAL, S_FS_NOTE, S_TAR_SELECTED, S_TAR_NONE, S_TAR_HINT,
     S_SD_DELETE_SELECTED, S_SD_DELETE_SEL_CONFIRM,
+    S_RSU_UP_TITLE, S_RSU_UP_HINT, S_RSU_UP_BTN, S_RSU_UP_NOMQTT, S_RSU_UP_RUN,
+    S_RSU_UP_THIN, S_RSU_UP_ONCE, S_RSU_UP_BUSY,
+    S_SRCH_TITLE, S_SRCH_HINT, S_SRCH_FILTER, S_SRCH_BTN, S_SRCH_RUN,
+    S_SRCH_NONE, S_SRCH_LIMIT, S_SRCH_PARTIAL,
     S_SD_NOT_MOUNTED, S_SD_UNMOUNTED_HINT, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
@@ -208,6 +216,8 @@ static const char *STR[S_COUNT][2] = {
                             "Done. The device can now be disconnected from power." },
     [S_POWEROFF_FAIL]   = { "Fehlgeschlagen – SD-Karte nicht sauber ausgehängt.",
                             "Failed – the SD card was not cleanly unmounted." },
+    [S_POWEROFF_DOWNLOAD] = { "Nicht ausgehängt – ein Download läuft noch. Danach erneut versuchen.",
+                              "Not unmounted – a download is still running. Try again afterwards." },
     [S_SNIFFER_LABEL]   = { "Sniffer",                  "sniffer" },
     [S_SNIFF_START]     = { "Sniffer starten",          "Start sniffer" },
     [S_SNIFF_STOP]      = { "Sniffer stoppen",          "Stop sniffer" },
@@ -233,6 +243,7 @@ static const char *STR[S_COUNT][2] = {
     [S_COL_NUM]         = { "#",                        "#" },
     [S_COL_TIME]        = { "Zeit",                     "Time" },
     [S_COL_RSSI]        = { "RSSI",                     "RSSI" },
+    [S_COL_SENDER]      = { "Absender",                 "Sender" },
     [S_COL_LENGTH]      = { "L&auml;nge",               "Length" },
     [S_COL_PREVIEW]     = { "Details",                  "Details" },
     [S_SET_INTRO]       = { "&Auml;nderungen werden im NVS gespeichert. Die meisten wirken nach einem Neustart.",
@@ -323,6 +334,8 @@ static const char *STR[S_COUNT][2] = {
     /* Rendered via textContent, so no HTML entities here -- they would show
      * up literally as "&hellip;" instead of an ellipsis. */
     [S_PLAYBACK_BUSY]   = { "Lese von SD-Karte ...", "Reading from SD card ..." },
+    [S_PLAYBACK_PARTIAL] = { "Zeitraum nur teilweise gelesen (SD-Karte war belegt).",
+                             "Period only partly read (SD card was busy)." },
     [S_PLAYBACK_STEP]   = { "Schritt",                   "Step" },
     [S_MAP_LAYER_DARK]  = { "Dunkel",                    "Dark" },
     [S_MAP_LAYER_LIGHT] = { "Hell",                      "Light" },
@@ -461,6 +474,39 @@ static const char *STR[S_COUNT][2] = {
      * browser), same as the existing S_SD_DELETE_CONFIRM right above. */
     [S_SD_DELETE_SEL_CONFIRM] = { "Ausgewählte Dateien/Ordner löschen?",
                                   "Delete selected files/folders?" },
+    [S_RSU_UP_TITLE]    = { "Standortfeste Sender nachliefern", "Re-send stationary transmitters" },
+    [S_RSU_UP_HINT]     = { "Sendet Ampeln und RSUs aus der PCAP-Aufzeichnung des gew&auml;hlten "
+                            "Zeitraums (h&ouml;chstens 24 h) nachtr&auml;glich an opentrafficmap "
+                            "&ndash; z.&nbsp;B. was w&auml;hrend eines Ausfalls empfangen wurde. "
+                            "Bewegliche Sender (Fahrzeuge) werden nie mitgesendet. Die "
+                            "Ausd&uuml;nnung bestimmt, wie viel je Station und Nachrichtentyp "
+                            "rausgeht &ndash; f&uuml;r den Karteneintrag reicht die Voreinstellung.",
+                            "Re-sends traffic lights and RSUs from the PCAP recording of the "
+                            "chosen period (24 h at most) to opentrafficmap &ndash; e.g. what was "
+                            "received during an outage. Moving senders (vehicles) are never "
+                            "included. Thinning controls how much is sent per station and message "
+                            "type &ndash; for a map entry the default is plenty." },
+    [S_RSU_UP_THIN]     = { "Ausd&uuml;nnung",           "Thinning" },
+    [S_RSU_UP_ONCE]     = { "1 Frame je Station u. Typ", "1 frame per station &amp; type" },
+    [S_RSU_UP_BTN]      = { "An opentrafficmap senden",  "Send to opentrafficmap" },
+    [S_RSU_UP_NOMQTT]   = { "MQTT ist nicht verbunden – nichts gesendet.",
+                            "MQTT is not connected – nothing sent." },
+    [S_RSU_UP_RUN]      = { "Sende…",               "Sending…" },
+    [S_RSU_UP_BUSY]     = { "Läuft bereits.",        "Already running." },
+    [S_SRCH_TITLE]      = { "Suche in der Aufzeichnung", "Search the recording" },
+    [S_SRCH_HINT]       = { "Durchsucht die PCAP-Aufzeichnung des Zeitraums (h&ouml;chstens 24 h). "
+                            "Der Filter wirkt auf Typ, Absender-Adresse und Stations-Nummer. "
+                            "RSSI steht nicht in der Aufzeichnung und bleibt leer.",
+                            "Searches the PCAP recording of the chosen period (24 h at most). "
+                            "The filter matches type, sender address and station id. "
+                            "RSSI is not part of the recording and stays empty." },
+    [S_SRCH_FILTER]     = { "Filter",                   "Filter" },
+    [S_SRCH_BTN]        = { "Suchen",                   "Search" },
+    [S_SRCH_RUN]        = { "Suche…",                   "Searching…" },
+    [S_SRCH_NONE]       = { "Keine Treffer.",           "No matches." },
+    [S_SRCH_LIMIT]      = { "Limit von 200 Treffern erreicht &ndash; Zeitraum oder Filter eingrenzen.",
+                            "Hit the 200-match limit &ndash; narrow the period or filter." },
+    [S_SRCH_PARTIAL]    = { "Zeitraum nur teilweise gelesen.", "Period only partly read." },
     [S_SD_FORMAT]       = { "Karte formatieren",        "Format card" },
     /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
     [S_SD_FORMAT_CONFIRM] = { "Karte wirklich formatieren? Alle Daten gehen verloren!",
@@ -567,6 +613,11 @@ static const char *STR[S_COUNT][2] = {
     [S_MAP_LAYER_SATELLITE] = { "Satellit",             "Satellite" },
     [S_MAP_DENM]        = { "Gefahrenmeldung aktiv",   "Hazard warning active" },
     [S_MAP_LINE]        = { "Linie",                   "Line" },
+    [S_MAP_COURSE]      = { "Kurs",                    "Course" },
+    [S_MAP_DEST]        = { "Ziel",                    "Destination" },
+    [S_MAP_LATE]        = { "Versp&auml;tung",         "delay" },
+    [S_MAP_EARLY]       = { "Vorsprung",               "ahead" },
+    [S_MAP_ONTIME]      = { "p&uuml;nktlich",          "on time" },
     [S_SYS_COREDUMP]      = { "&#9888; Crash-Dump verf&uuml;gbar", "&#9888; Crash dump available" },
     [S_SYS_COREDUMP_DOWNLOAD] = { "Herunterladen",      "Download" },
     [S_SYS_COREDUMP_CLEAR] = { "L&ouml;schen",          "Delete" },
@@ -574,10 +625,23 @@ static const char *STR[S_COUNT][2] = {
     [S_SYS_COREDUMP_CLEAR_CONFIRM] = { "Crash-Dump löschen?", "Delete crash dump?" },
 };
 
-/* Per-request language, resolved from ?lang= or a cookie. Because
- * esp_http_server handles requests sequentially in one task, a single
- * global is safe here. */
-static lang_t current_lang = LANG_DE;
+/* Per-request language, one slot per serving task (httpd + slow worker) --
+ * a streaming search must not flip a concurrently rendered page's language. */
+static lang_t lang_httpd = LANG_DE;
+#if CONFIG_ENABLE_SD
+static lang_t lang_worker = LANG_DE;
+static TaskHandle_t slow_worker_handle;
+#endif
+
+static inline lang_t *cur_lang_slot(void)
+{
+#if CONFIG_ENABLE_SD
+    if (slow_worker_handle && xTaskGetCurrentTaskHandle() == slow_worker_handle)
+        return &lang_worker;
+#endif
+    return &lang_httpd;
+}
+#define current_lang (*cur_lang_slot())
 
 static inline const char *T(str_id_t id) { return STR[id][current_lang]; }
 
@@ -684,7 +748,16 @@ typedef struct {
     int32_t  speed_cmps;   /* speed in cm/s (0.01 m/s units, matches the wire encoding) */
     uint16_t length_dm;    /* CAM vehicle size, decimetres; 0 = not sent/unavailable */
     uint8_t  width_dm;
-    uint8_t  pt_line;      /* public-transport line number, 0 = none */
+    uint8_t  src_mac[6];   /* 802.11 sender address (Addr2) */
+    bool     has_src_mac;
+    /* VDV R09.16 telegram out of a public-transport CAM, 0 = not carried. */
+    uint16_t pt_line;      /* LN Liniennummer */
+    uint8_t  pt_course;    /* KN Kursnummer */
+    uint16_t pt_dest;      /* ZN Zielnummer */
+    uint8_t  pt_request;   /* HA 0=keine, 1=gerade, 2=links, 3=rechts */
+    uint8_t  pt_priority;  /* PR */
+    int16_t  pt_deviation; /* ZW signiert: + = Verspätung */
+    bool     pt_telegram;
     /* CAM detail (see its_cam_detail_t). The path history costs 64 bytes an
      * entry, i.e. 1.3 KB across this 20-slot ring in PSRAM -- cheap enough
      * to carry rather than re-derive. */
@@ -824,6 +897,40 @@ static uint32_t rate_packets_last_minute(void)
     return sum;
 }
 
+/* One place maps a decode result onto a message entry -- the live ring and
+ * the archive search share it, so their columns can never drift apart. */
+static void entry_from_decoded(web_msg_entry_t *e, const its_decoded_t *d)
+{
+    snprintf(e->msgtype, sizeof(e->msgtype), "%s", d->label);
+    e->has_position = d->has_position;
+    e->lat_e7 = d->lat_e7;
+    e->lon_e7 = d->lon_e7;
+    e->station_id = d->station_id;
+    e->has_speed = d->has_speed;
+    e->speed_cmps = d->speed_cmps;
+    e->length_dm = d->veh.valid ? d->veh.length_dm : 0;
+    e->width_dm = d->veh.valid ? d->veh.width_dm : 0;
+    memcpy(e->src_mac, d->src_mac, sizeof(e->src_mac));
+    e->has_src_mac = d->has_src_mac;
+    e->pt_line = d->pt_line;
+    e->pt_course = d->pt_course;
+    e->pt_dest = d->pt_dest;
+    e->pt_request = d->pt_request;
+    e->pt_priority = d->pt_priority;
+    e->pt_deviation = d->pt_deviation;
+    e->pt_telegram = d->pt_telegram;
+    e->heading_ddeg = d->cam.has_heading ? d->cam.heading_ddeg : 0xFFFF;
+    e->has_accel_ctrl = d->cam.has_accel_ctrl;
+    e->accel_ctrl = d->cam.accel_ctrl;
+    e->has_lights = d->cam.has_lights;
+    e->ext_lights = d->cam.ext_lights;
+    e->role = d->cam.role;
+    e->embarking = d->pt_embarking;
+    e->n_path = d->cam.n_path;
+    memcpy(e->path_lat_e7, d->cam.path_lat_e7, sizeof(e->path_lat_e7));
+    memcpy(e->path_lon_e7, d->cam.path_lon_e7, sizeof(e->path_lon_e7));
+}
+
 void webserver_handle_packet(sniffer_packet_info_t *packet)
 {
     if (!msg_ring_mutex)
@@ -854,26 +961,7 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
      * BTP header sits hundreds of bytes in. */
     its_decoded_t d;
     its_decode_frame(packet->payload, packet->length, &d);
-    snprintf(e->msgtype, sizeof(e->msgtype), "%s", d.label);
-    e->has_position = d.has_position;
-    e->lat_e7 = d.lat_e7;
-    e->lon_e7 = d.lon_e7;
-    e->station_id = d.station_id;
-    e->has_speed = d.has_speed;
-    e->speed_cmps = d.speed_cmps;
-    e->length_dm = d.veh.valid ? d.veh.length_dm : 0;
-    e->width_dm = d.veh.valid ? d.veh.width_dm : 0;
-    e->pt_line = d.pt_line;
-    e->heading_ddeg = d.cam.has_heading ? d.cam.heading_ddeg : 0xFFFF;
-    e->has_accel_ctrl = d.cam.has_accel_ctrl;
-    e->accel_ctrl = d.cam.accel_ctrl;
-    e->has_lights = d.cam.has_lights;
-    e->ext_lights = d.cam.ext_lights;
-    e->role = d.cam.role;
-    e->embarking = d.pt_embarking;
-    e->n_path = d.cam.n_path;
-    memcpy(e->path_lat_e7, d.cam.path_lat_e7, sizeof(e->path_lat_e7));
-    memcpy(e->path_lon_e7, d.cam.path_lon_e7, sizeof(e->path_lon_e7));
+    entry_from_decoded(e, &d);
     uint8_t st_code = d.station_type, msg_id = d.message_id;
     msg_type_stats_record(e->msgtype);
     tstat_note(st_code, msg_id, e->has_speed, e->speed_cmps);
@@ -1017,7 +1105,9 @@ static void url_decode(char *s)
 static void resolve_language(httpd_req_t *req)
 {
     current_lang = LANG_DE;
-    char query[64];
+    /* Full CONFIG_HTTPD_MAX_URI_LEN: at 64, long search URLs silently fell
+     * back to German although &lang=en was right there. */
+    char query[512];
     char val[8];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
         httpd_query_key_value(query, "lang", val, sizeof(val)) == ESP_OK)
@@ -1111,6 +1201,7 @@ static const char PAGE_HEADER_FMT[] =
     /* Detail/Type cells wrap at ANY width -- the detail text alone can
      * be ~100 chars, wide enough to force scroll even on desktop. */
     ".scroll td.wrapcell{white-space:normal;word-break:break-word}"
+    ".scroll td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}"
     /* Narrow screens: tighter padding, #mtbl drops its redundant "#" column. */
     "@media(max-width:640px){"
     /* Nav collapses to a hamburger dropdown; sticky, z-index above Leaflet's
@@ -1678,6 +1769,14 @@ static size_t cam_json_extra(const web_msg_entry_t *e, char *out, size_t cap)
     /* role 0 is "default" -- nothing worth showing, so only send 1..15. */
     if (e->role != 0xFF && e->role != 0 && n < cap)
         n += snprintf(out + n, cap - n, ",\"vr\":%u", (unsigned)e->role);
+    /* R09 telegram detail. `pd` is sent even when zero: "on time" is a real
+     * statement, and the client keeps the last value per station. */
+    if (e->pt_telegram && e->pt_course && n < cap)
+        n += snprintf(out + n, cap - n, ",\"pk\":%u", (unsigned)e->pt_course);
+    if (e->pt_telegram && e->pt_dest && n < cap)
+        n += snprintf(out + n, cap - n, ",\"pz\":%u", (unsigned)e->pt_dest);
+    if (e->pt_telegram && n < cap)
+        n += snprintf(out + n, cap - n, ",\"pd\":%d", (int)e->pt_deviation);
     if (e->embarking && n < cap)
         n += snprintf(out + n, cap - n, ",\"eb\":1");
     /* Where the vehicle just came from, as [[lat,lon],...] in 1e-7 degrees.
@@ -1733,6 +1832,17 @@ static void msg_detail_text(const web_msg_entry_t *e, uint32_t now,
     if (e->pt_line && n < cap)
         n += snprintf(out + n, cap - n, "%s%s %u", DETAIL_SEP,
                       de ? "Linie" : "line", (unsigned)e->pt_line);
+    /* Course number distinguishes the individual run of a line; the schedule
+     * deviation is what makes a delayed tram visible. */
+    if (e->pt_telegram && e->pt_course && n < cap)
+        n += snprintf(out + n, cap - n, "%s%s %u", DETAIL_SEP,
+                      de ? "Kurs" : "course", (unsigned)e->pt_course);
+    if (e->pt_telegram && e->pt_dest && n < cap)
+        n += snprintf(out + n, cap - n, "%s%s %u", DETAIL_SEP,
+                      de ? "Ziel" : "dest", (unsigned)e->pt_dest);
+    if (e->pt_telegram && e->pt_deviation && n < cap)
+        n += snprintf(out + n, cap - n, "%s%+d %s", DETAIL_SEP,
+                      (int)e->pt_deviation, de ? "Min" : "min");
     if (e->role != 0xFF && e->role < 16 && (de ? ROLE_DE : ROLE_EN)[e->role] && n < cap)
         n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP,
                       (de ? ROLE_DE : ROLE_EN)[e->role]);
@@ -1828,16 +1938,24 @@ static size_t build_msg_json(char *out, size_t out_size)
          * controlled -- no JSON escaping needed; entities/<span> are fine via innerHTML. */
         /* Measure first and stop while the closing `]` still fits -- overrunning
          * silently dropped it and the client's JSON.parse threw. Newest first, oldest drop. */
+        char mac_str[20];
+        if (e->has_src_mac)
+            snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     e->src_mac[0], e->src_mac[1], e->src_mac[2],
+                     e->src_mac[3], e->src_mac[4], e->src_mac[5]);
+        else
+            snprintf(mac_str, sizeof(mac_str), "-");
+
         static const char ENTRY_FMT[] =
-            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"h\":\"%s\"%s}";
+            "%s{\"t\":\"%s\",\"r\":\"%s\",\"l\":%lu,\"y\":\"%s\",\"sm\":\"%s\",\"h\":\"%s\"%s}";
         int need = snprintf(NULL, 0, ENTRY_FMT,
             n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length,
-            e->msgtype, detail, possuffix);
+            e->msgtype, mac_str, detail, possuffix);
         if (need < 0 || o + (size_t)need + 2 > out_size)
             break;
         o += snprintf(out + o, out_size - o, ENTRY_FMT,
             n == 0 ? "" : ",", clock, rssi_str, (unsigned long)e->length,
-            e->msgtype, detail, possuffix);
+            e->msgtype, mac_str, detail, possuffix);
     }
     /* Always closes: the loop above never consumes the two bytes kept back. */
     out[o++] = ']';
@@ -1970,11 +2088,25 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     snprintf(typehint, sizeof(typehint), "<p><small>%s</small></p>", T(S_TYPE_HINT));
     httpd_resp_send_chunk(req, typehint, HTTPD_RESP_USE_STRLEN);
 
+    /* Formatted output is ~300 bytes -- at 256 this truncated inside the open
+     * <script>, and the browser swallowed the whole table as script text. */
+    char fbar[512];
+    HTML_PRINTF(fbar,
+        "<p>%s: <input id='lf' size='18' oninput='applyf()'></p>"
+        "<script>window.applyf=function(){"
+        "var n=document.getElementById('lf').value.toLowerCase();"
+        "document.querySelectorAll('#msgtbody tr').forEach(function(r){"
+        "r.style.display=(!n||r.textContent.toLowerCase().indexOf(n)>=0)?'':'none';});};"
+        "</script>",
+        T(S_SRCH_FILTER));
+    httpd_resp_send_chunk(req, fbar, HTTPD_RESP_USE_STRLEN);
+
     char thead[384];
     snprintf(thead, sizeof(thead),
-        "<div class='scroll'><table id='mtbl'><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
+        "<div class='scroll'><table id='mtbl'><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
         "<tbody id='msgtbody'>",
-        T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE), T(S_COL_PREVIEW));
+        T(S_COL_NUM), T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE),
+        T(S_COL_SENDER), T(S_COL_PREVIEW));
     httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR web_msg_entry_t snapshot[WEB_MSG_RING_SIZE];
@@ -2007,11 +2139,19 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         char typeesc[WEB_MSG_TYPE_LEN * 6];
         html_escape(e->msgtype, typeesc, sizeof(typeesc));
 
-        char row[768];
+        char mac_str[20];
+        if (e->has_src_mac)
+            snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     e->src_mac[0], e->src_mac[1], e->src_mac[2],
+                     e->src_mac[3], e->src_mac[4], e->src_mac[5]);
+        else
+            snprintf(mac_str, sizeof(mac_str), "-");
+
+        char row[832];
         HTML_PRINTF(row,
             "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td>"
-            "<td class='wrapcell'>%s</td><td class='wrapcell'>%s</td></tr>",
-            n + 1, clock, rssi_str, (unsigned long)e->length, typeesc, detail);
+            "<td class='wrapcell'>%s</td><td class='mono'>%s</td><td class='wrapcell'>%s</td></tr>",
+            n + 1, clock, rssi_str, (unsigned long)e->length, typeesc, mac_str, detail);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -2033,8 +2173,8 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         /* Vehicle size, when the CAM carried it, rides along in the type
          * cell rather than costing the table another mostly-empty column. */
         "var ty=m.y+(m.pl?' <b>'+m.pl+'</b>':'')+((m.vl&&m.vw)?' <small>'+(m.vl/10).toFixed(1)+'\\u00d7'+(m.vw/10).toFixed(1)+'m</small>':'');"
-        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+ty+'</td><td class=\"wrapcell\">'+m.h+'</td></tr>';}"
-        "document.getElementById('msgtbody').innerHTML=h;delay=1000;};"
+        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+m.r+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+ty+'</td><td class=\"mono\">'+(m.sm||'-')+'</td><td class=\"wrapcell\">'+m.h+'</td></tr>';}"
+        "document.getElementById('msgtbody').innerHTML=h;if(window.applyf)window.applyf();delay=1000;};"
         "ws.onclose=function(){if(closing)return;setTimeout(connect,delay);delay=Math.min(delay*2,30000);};"
         "}"
         "connect();"
@@ -2044,6 +2184,69 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         "window.addEventListener('pagehide',function(){closing=true;if(ws)ws.close();});"
         "})();</script>";
     httpd_resp_send_chunk(req, ws_script, HTTPD_RESP_USE_STRLEN);
+#endif
+
+#if CONFIG_ENABLE_SD
+    /* Archive tools live here with the messages they operate on: search the
+     * PCAP recording, and the manual re-send of stationary senders. */
+    {
+        static EXT_RAM_BSS_ATTR char arch[4096];
+        snprintf(arch, sizeof(arch),
+            "<h2>%s</h2><p><small>%s</small></p>"
+            "<p><input type='datetime-local' id='sf'> &ndash; "
+            "<input type='datetime-local' id='st'> &nbsp; %s: "
+            "<input id='sq' size='14' maxlength='32'> "
+            "<button onclick='srch()'>%s</button></p>"
+            "<div id='sr'></div>"
+            "<h2>%s</h2><p><small>%s</small></p>"
+            "<p><input type='datetime-local' id='rf'> &ndash; "
+            "<input type='datetime-local' id='rt'> &nbsp; %s: "
+            "<select id='rth'><option value='0' selected>%s</option>"
+            "<option value='3600'>1/h</option>"
+            "<option value='600'>1/10 min</option></select> "
+            "<button onclick='rsuup()'>%s</button></p>"
+            "<pre id='rr'></pre>"
+            "<script>"
+            "(function(){function f(d){var p=function(n){return (n<10?'0':'')+n;};"
+            "return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}"
+            "var n=new Date();"
+            "document.getElementById('st').value=f(n);"
+            "document.getElementById('sf').value=f(new Date(n.getTime()-216e5));"
+            "document.getElementById('rt').value=f(n);"
+            "document.getElementById('rf').value=f(new Date(n.getTime()-864e5));})();"
+            "function srch(){"
+            "var f=Math.floor(new Date(document.getElementById('sf').value).getTime()/1000);"
+            "var t=Math.floor(new Date(document.getElementById('st').value).getTime()/1000);"
+            "if(!f||!t)return;"
+            "var o=document.getElementById('sr');o.textContent='%s';"
+            "fetch('/messages/search?from='+f+'&to='+t+'&q='+encodeURIComponent(document.getElementById('sq').value)+'&lang=%s')"
+            ".then(function(r){return r.text();}).then(function(x){o.innerHTML=x;})"
+            ".catch(function(){o.textContent='Fehler';});}"
+            "var RS='%s';"
+            "function rsuup(){"
+            "var f=Math.floor(new Date(document.getElementById('rf').value).getTime()/1000);"
+            "var t=Math.floor(new Date(document.getElementById('rt').value).getTime()/1000);"
+            "if(!f||!t)return;"
+            "var o=document.getElementById('rr');o.textContent=RS;"
+            "fetch('/sdcard/upload_rsu?from='+f+'&to='+t+'&thin='+document.getElementById('rth').value+'&lang=%s',{method:'POST'})"
+            ".then(function(r){return r.text();}).then(function(x){"
+            "if(x!=='OK'){o.textContent=x;return;}"
+            "var iv=setInterval(function(){"
+            "fetch('/sdcard/upload_rsu/status',{cache:'no-store'}).then(function(r){return r.json();})"
+            ".then(function(s){if(s.run){o.textContent=RS+' '+s.sent;}"
+            "else{o.textContent=s.msg;clearInterval(iv);}})"
+            ".catch(function(){});},1500);})"
+            ".catch(function(){o.textContent='Fehler';});}"
+            "</script>",
+            T(S_SRCH_TITLE), T(S_SRCH_HINT), T(S_SRCH_FILTER), T(S_SRCH_BTN),
+            T(S_RSU_UP_TITLE), T(S_RSU_UP_HINT), T(S_RSU_UP_THIN), T(S_RSU_UP_ONCE),
+            T(S_RSU_UP_BTN),
+            /* The fetches carry the page's language along -- without it the
+             * search table and upload status came back German on ?lang=en. */
+            T(S_SRCH_RUN), current_lang == LANG_EN ? "en" : "de",
+            T(S_RSU_UP_RUN), current_lang == LANG_EN ? "en" : "de");
+        httpd_resp_send_chunk(req, arch, HTTPD_RESP_USE_STRLEN);
+    }
 #endif
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -2191,7 +2394,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         if (open_q && o + 1 < sizeof(peerjs)) peerjs[o++] = '"';
         peerjs[o] = '\0';
     }
-    char labels[1152];
+    char labels[1536];   /* worst case ~1110 with all texts, peers and node id */
     HTML_PRINTF(labels,
              "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\","
              "ITS_MAP_L_DARK=\"%s\",ITS_MAP_L_LIGHT=\"%s\","
@@ -2199,16 +2402,22 @@ static esp_err_t map_get_handler(httpd_req_t *req)
              "ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
              "ITS_MAP_SEEN_BY=\"%s\",ITS_MAP_PEERS=[%s],ITS_MAP_SELF=\"%s\","
              "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\",ITS_PB_BUSY=\"%s\","
+             "ITS_PB_PART=\"%s\","
              "ITS_MAP_DENM=\"%s\","
-             "ITS_MAP_STALE=%lu,ITS_MAP_LINE=\"%s\";</script>",
+             "ITS_MAP_STALE=%lu,ITS_MAP_LINE=\"%s\","
+             "ITS_MAP_KURS=\"%s\",ITS_MAP_ZIEL=\"%s\","
+             "ITS_MAP_LATE=\"%s\",ITS_MAP_EARLY=\"%s\",ITS_MAP_ONTIME=\"%s\";</script>",
              T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE),
              T(S_MAP_LAYER_DARK), T(S_MAP_LAYER_LIGHT),
              T(S_MAP_LAYER_TRACKS), T(S_MAP_LAYER_TRACKS_P),
              T(S_MAP_TRACK_PTS), (unsigned long)trkdays,
              T(S_MAP_SEEN_BY), peerjs, selfname,
              T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR), T(S_PLAYBACK_BUSY),
+             T(S_PLAYBACK_PARTIAL),
              T(S_MAP_DENM),
-             (unsigned long)stale, T(S_MAP_LINE));
+             (unsigned long)stale, T(S_MAP_LINE),
+             T(S_MAP_COURSE), T(S_MAP_DEST),
+             T(S_MAP_LATE), T(S_MAP_EARLY), T(S_MAP_ONTIME));
     httpd_resp_send_chunk(req, labels, HTTPD_RESP_USE_STRLEN);
 
     /* Labels for the CAM detail in the popup. Emitted as one JS object rather
@@ -2279,7 +2488,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         char ptsuffix[24] = "";
         if (e->pt_line)
             snprintf(ptsuffix, sizeof(ptsuffix), ",\"pl\":%u", (unsigned)e->pt_line);
-        char camsuffix[256] = "";
+        char camsuffix[384] = "";   /* worst case with pk/pz/pd + 8-point path ~270 */
         cam_json_extra(e, camsuffix, sizeof(camsuffix));
         /* 320 was already close with the msgtype and clock inline; the CAM
          * detail adds up to ~40 more. */
@@ -2419,8 +2628,14 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "return o.length?'<br>'+o.join(', '):'';}"
         "function popupHtml(m){var h='<b>'+(m.y||'?')+'</b><br>'+(m.t||'-')+' &middot; '"
         "+(m.r||'-')+' &middot; '+(m.l||'-')+' B<br>#'+m.i;"
+        "if(m.sm&&m.sm!=='-')h+='<br><code>'+htxt(m.sm)+'</code>';"
         "if(m.s!==undefined)h+='<br>'+(m.s*0.036).toFixed(1)+' km/h';"
         "if(m.pl)h+='<br><b>'+ITS_MAP_LINE+' '+m.pl+'</b>';"
+        "if(m.pk)h+=' &middot; '+ITS_MAP_KURS+' '+m.pk;"
+        "if(m.pz)h+=' &middot; '+ITS_MAP_ZIEL+' '+m.pz;"
+        /* pd is the schedule deviation: >0 late, <0 early, 0 on time. */
+        "if(m.pd!==undefined)h+='<br>'+(m.pd>0?m.pd+' '+ITS_MAP_LATE:"
+        "(m.pd<0?(-m.pd)+' '+ITS_MAP_EARLY:ITS_MAP_ONTIME));"
         "if(m.vl&&m.vw)h+='<br>'+(m.vl/10).toFixed(1)+' \\u00d7 '+(m.vw/10).toFixed(1)+' m';"
         /* Heading: degrees plus the compass point, since "214 deg" alone
          * means little at a glance. 3600 tenths = full circle. */
@@ -2464,7 +2679,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         /* Remember the last value seen per station -- not every CAM carries every
          * field, and the popup used to blink them in and out. */
         "var mem=VMEM[key]||(VMEM[key]={});"
-        "['pl','vr','ac','el','hd','vl','vw','dt'].forEach(function(f){"
+        "['pl','pk','pz','pd','vr','ac','el','hd','vl','vw','dt'].forEach(function(f){"
         "if(m[f]!==undefined)mem[f]=m[f]; else if(mem[f]!==undefined)m[f]=mem[f];});"
         /* Which receivers heard this station, as a timestamped set -- a single field
          * would be overwritten by whichever update landed last. */
@@ -2548,10 +2763,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "paintLanes();}).catch(function(){});}"
         "loadLanes();setInterval(loadLanes,120000);"
         "window.addEventListener('pagehide',function(){closing=true;if(ws)ws.close();});"
-        /* Playback: /map/playback returns the same {t,i,a,o,y} shape (plus
-         * t=unix seconds) as /ws, so scrubbing just re-derives "current state
-         * per station at time T" from the loaded dataset and feeds it
-         * through the exact same apply(). */
+        /* Playback: {e:[...],p:1?}; entries share the /ws {t,i,a,o,y} shape,
+         * so scrubbing re-derives per-station state and feeds apply(). */
         "var pbData=null,pbTimer=null,pbPlaying=false;"
         "function pbSeek(t){t=+t;document.getElementById('pbslider').value=t;"
         "document.getElementById('pbtime').textContent=new Date(t*1000).toLocaleTimeString();"
@@ -2580,12 +2793,15 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "var msg=document.getElementById('pbmsg');msg.textContent='';"
         "if(!from||!to||to<=from){msg.textContent=ITS_PB_ERROR;return;}"
         "pbBusy(true);"
-        "fetch('/map/playback?from='+from+'&to='+to).then(function(r){"
+        /* Response is {e:[...],p:1?} -- p flags a partly-read period (SD lock
+         * contention), shown instead of silently pretending the range is empty. */
+        "fetch('/map/playback?from='+from+'&to='+to+'&lang='+(location.search.indexOf('lang=en')>=0?'en':'de')).then(function(r){"
         "if(!r.ok)throw new Error('http '+r.status);return r.json();"
         "}).then(function(data){"
         "pbBusy(false);"
-        "pbData=data;"
-        "if(!pbData.length){msg.textContent=ITS_PB_NONE;return;}"
+        "pbData=data.e;"
+        "if(!pbData.length){msg.textContent=data.p?ITS_PB_PART:ITS_PB_NONE;return;}"
+        "if(data.p)msg.textContent=ITS_PB_PART;"
         "liveMode=false;clearInterval(sweepTimer);VMEM={};"
         "for(var k in markers)dropMarker(k);markers={};"
         "var sl=document.getElementById('pbslider');"
@@ -2770,6 +2986,8 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
 /* An RSU repeats an unchanged position ~10x/s; re-emit only on movement (plus
  * an occasional keep-alive) or playback JSON runs to megabytes. */
 #define PB_MAX_STATIONS  96   /* distinct senders tracked; beyond that, no dedup */
+#define PB_BUF_CAP  (256 * 1024)  /* PSRAM collect buffer; larger windows resume in segments */
+#define PB_ENTRY_MAX 576      /* worst-case JSON entry; reserved up front in playback_emit */
 #define PB_MIN_GAP_SEC    1   /* fastest re-emit for a station that IS moving */
 #define PB_KEEPALIVE_SEC 30   /* re-emit an unmoved station this often */
 
@@ -2786,10 +3004,12 @@ typedef struct {
      * -- the same trap tracks_get_handler was already fixed for, and worse
      * here because every frame goes through its_decode_frame(). */
     bool client_gone;
-    /* Entries are accumulated here and flushed in blocks; one chunked write
-     * per entry was itself a large part of the 45+ seconds. */
-    char buf[2048];
-    size_t len;
+    /* Entries collect here, sent only with the SD writer lock RELEASED; a
+     * full buffer stops the walk, the handler resumes at resume_sec. */
+    char *buf;              /* PSRAM, allocated by the handler */
+    size_t cap, len;
+    bool full;
+    uint32_t resume_sec;
     pb_seen_t seen[PB_MAX_STATIONS];
     int n_seen;
     uint32_t emitted, skipped;
@@ -2850,6 +3070,15 @@ static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
     if (ctx->client_gone)
         return false;
 
+    /* Reserve space BEFORE playback_want commits to the seen table -- a
+     * committed-then-dropped frame would be lost as a duplicate on resume. */
+    if (ctx->len + PB_ENTRY_MAX >= ctx->cap)
+    {
+        ctx->full = true;
+        ctx->resume_sec = sec;
+        return false;
+    }
+
     /* A DENM is an event, not a position sample -- never suppress one. */
     if (d->message_id != 1 && !playback_want(ctx, sec, d))
     {
@@ -2868,8 +3097,19 @@ static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
     if (d->veh.valid && d->veh.length_dm && d->veh.width_dm && eo < sizeof(extra))
         eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"vl\":%u,\"vw\":%u",
                        (unsigned)d->veh.length_dm, (unsigned)d->veh.width_dm);
+    if (d->has_src_mac && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo,
+                       ",\"sm\":\"%02x:%02x:%02x:%02x:%02x:%02x\"",
+                       d->src_mac[0], d->src_mac[1], d->src_mac[2],
+                       d->src_mac[3], d->src_mac[4], d->src_mac[5]);
     if (d->pt_line && eo < sizeof(extra))
         eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"pl\":%u", (unsigned)d->pt_line);
+    if (d->pt_telegram && d->pt_course && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"pk\":%u", (unsigned)d->pt_course);
+    if (d->pt_telegram && d->pt_dest && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"pz\":%u", (unsigned)d->pt_dest);
+    if (d->pt_telegram && eo < sizeof(extra))
+        eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"pd\":%d", (int)d->pt_deviation);
     /* Same CAM detail the live feed sends -- replayed markers should look
      * exactly like live ones (this was forgotten once already for the line
      * number and vehicle size, and the replay silently lost them). */
@@ -2908,11 +3148,13 @@ static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
              (long)d->lat_e7, (long)d->lon_e7, d->label, extra);
     if (n < 0)
         return true;
-    if (ctx->len + (size_t)n >= sizeof(ctx->buf))
+    if (ctx->len + (size_t)n >= ctx->cap)
     {
-        playback_flush(ctx);
-        if (ctx->client_gone)
-            return false;
+        /* No flush under the SD writer lock -- stop the walk; the handler
+         * flushes lock-free and resumes from this second. */
+        ctx->full = true;
+        ctx->resume_sec = sec;
+        return false;
     }
     memcpy(ctx->buf + ctx->len, entry, (size_t)n);
     ctx->len += (size_t)n;
@@ -3666,6 +3908,10 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
 
 static esp_err_t playback_get_handler(httpd_req_t *req)
 {
+    /* Runs on the worker: without this, DENM cause texts ("dt") rendered in
+     * whatever language the last /messages/search left in lang_worker. */
+    resolve_language(req);
+
     /* Explicit from/to (unix seconds) rather than "last N minutes from now",
      * so any stored window is reachable -- not just a recent one -- now that
      * retention can span a full day or more. */
@@ -3702,23 +3948,66 @@ static esp_err_t playback_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    char *pbuf = heap_caps_malloc(PB_BUF_CAP, MALLOC_CAP_SPIRAM);
+    if (!pbuf)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
-    /* ~2.5 KB on the httpd task's 16 KB stack; kept off `static` so two
-     * concurrent playback requests can't corrupt each other's state. */
+    httpd_resp_send_chunk(req, "{\"e\":[", HTTPD_RESP_USE_STRLEN);
+    /* ~1.6 KB struct on the worker stack; kept off `static` so an inline-served
+     * request can't corrupt a deferred one's state. */
     playback_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.req = req;
     ctx.first = true;
-    sdpcap_read_positions(from_sec, to_sec, playback_emit, &ctx);
-    playback_flush(&ctx);
-    ESP_LOGI(TAG, "playback %lu..%lu: %lu entries, %lu duplicates dropped%s",
+    ctx.buf = pbuf;
+    ctx.cap = PB_BUF_CAP;
+
+    bool partial = false;
+    uint32_t cursor = from_sec;
+    uint32_t last_full_sec = 0;
+    bool have_full_sec = false;
+    for (;;)
+    {
+        ctx.full = false;
+        bool complete = sdpcap_read_positions(cursor, to_sec, playback_emit, &ctx);
+        playback_flush(&ctx);            /* walk done -- SD lock released, safe to send */
+        if (ctx.client_gone)
+            break;
+        if (!complete)
+        {
+            partial = true;              /* lock timeout or card gone -- reported as "p" */
+            break;
+        }
+        if (!ctx.full)
+            break;
+        /* Forward-progress guard: a pathological second could pin resume_sec
+         * forever and wedge the worker -- full twice in a row: skip, say so. */
+        if (have_full_sec && ctx.resume_sec == last_full_sec)
+        {
+            partial = true;
+            if (ctx.resume_sec >= to_sec)
+                break;
+            cursor = ctx.resume_sec + 1;
+            have_full_sec = false;
+            continue;
+        }
+        last_full_sec = ctx.resume_sec;
+        have_full_sec = true;
+        cursor = ctx.resume_sec;         /* buffer filled at this second -- continue there */
+    }
+    heap_caps_free(pbuf);
+    ESP_LOGI(TAG, "playback %lu..%lu: %lu entries, %lu duplicates dropped%s%s",
              (unsigned long)from_sec, (unsigned long)to_sec,
              (unsigned long)ctx.emitted, (unsigned long)ctx.skipped,
+             partial ? " (partial)" : "",
              ctx.client_gone ? " (client gone, aborted)" : "");
     if (ctx.client_gone)
         return ESP_FAIL;   /* socket is dead; closing the chunked reply would only error again */
-    httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, partial ? "],\"p\":1}" : "]}", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
@@ -4500,9 +4789,15 @@ static esp_err_t poweroff_post_handler(httpd_req_t *req)
     bool ok = (err == ESP_OK);
     ESP_LOGW(TAG, "prepare-for-power-off: unmount %s",
              ok ? "ok" : esp_err_to_name(err));
+    if (!ok)
+        sdcard_allow_auto_remount();  /* power-off didn't happen -- normal operation resumes */
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_sendstr(req, ok ? T(S_POWEROFF_OK) : T(S_POWEROFF_FAIL));
+    /* ESP_ERR_TIMEOUT = a worker-side download still streams from the card
+     * (sdcard_read_begin) -- unmounting would free FATFS under its open FILE. */
+    httpd_resp_sendstr(req, ok ? T(S_POWEROFF_OK)
+                       : err == ESP_ERR_TIMEOUT ? T(S_POWEROFF_DOWNLOAD)
+                                                : T(S_POWEROFF_FAIL));
     return ok ? ESP_OK : ESP_FAIL;
 }
 #endif
@@ -5340,6 +5635,7 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         T(S_TAR_NONE), T(S_TAR_NONE), T(S_SD_DELETE_SEL_CONFIRM));
     httpd_resp_send_chunk(req, top, HTTPD_RESP_USE_STRLEN);
 
+
     /* Own (small) chunk: the path breadcrumb is attacker-controlled (?p=), so
      * it is kept separate from the buffer above and always HTML-escaped. */
     static EXT_RAM_BSS_ATTR char breadcrumb[SD_PATH_MAX * 6 + 256];
@@ -5369,7 +5665,10 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     /* Directory entries */
     char full[SD_PATH_MAX];
     sd_full_path(rel, full, sizeof(full));
-    DIR *dir = opendir(full);
+    /* Counted reader: the DIR handle stays open across client-paced chunk
+     * sends, and a console/MQTT "unmount sd" must not free FATFS under it. */
+    bool rd = sdcard_read_begin();
+    DIR *dir = rd ? opendir(full) : NULL;
     size_t entries = 0;
     if (dir)
     {
@@ -5420,6 +5719,8 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         }
         closedir(dir);
     }
+    if (rd)
+        sdcard_read_end();
 
     if (entries == 0)
     {
@@ -5451,9 +5752,17 @@ static esp_err_t sdcard_download_handler(httpd_req_t *req)
     }
     char full[SD_PATH_MAX];
     sd_full_path(rel, full, sizeof(full));
+    /* Counted reader: without it, a concurrent unmount/format freed the
+     * FATFS under the open FILE (use-after-free in the next fread). */
+    if (!sdcard_read_begin())
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no card");
+        return ESP_FAIL;
+    }
     FILE *f = fopen(full, "rb");
     if (!f)
     {
+        sdcard_read_end();
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
         return ESP_FAIL;
     }
@@ -5473,10 +5782,12 @@ static esp_err_t sdcard_download_handler(httpd_req_t *req)
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK)
         {
             fclose(f);
+            sdcard_read_end();
             return ESP_FAIL;
         }
     }
     fclose(f);
+    sdcard_read_end();
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
@@ -5527,9 +5838,17 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
     if (reldir[0]) snprintf(full, sizeof(full), "%s/%s/%s", sdcard_mount_point(), reldir, name);
     else           snprintf(full, sizeof(full), "%s/%s", sdcard_mount_point(), name);
 
+    /* Counted "reader" (= streaming FS user): the FILE stays open across a
+     * client-paced recv loop; a console/MQTT unmount must not free FATFS. */
+    if (!sdcard_read_begin())
+    {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no card");
+        return ESP_FAIL;
+    }
     FILE *f = fopen(full, "wb");
     if (!f)
     {
+        sdcard_read_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "open failed");
         return ESP_FAIL;
     }
@@ -5552,9 +5871,11 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
     if (!ok)
     {
         remove(full);
+        sdcard_read_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
         return ESP_FAIL;
     }
+    sdcard_read_end();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
@@ -5609,7 +5930,9 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     resolve_language(req);
     if (!check_update_auth(req))
         return send_auth_required(req);
-    if (!sdcard_is_mounted())
+    /* Counted reader for the whole (possibly deep) delete walk -- a console/
+     * MQTT unmount must not free FATFS under sd_rm_tree's open DIR handles. */
+    if (!sdcard_read_begin())
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no card");
         return ESP_FAIL;
@@ -5651,6 +5974,7 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
             sd_full_path(tok, full, sizeof(full));
             if (!sd_rm_tree(full, sizeof(full), 8)) failed++;
         }
+        sdcard_read_end();
         httpd_resp_sendstr(req, failed == 0 ? "OK" : "Error");
         return failed == 0 ? ESP_OK : ESP_FAIL;
     }
@@ -5658,18 +5982,278 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     char rel[SD_PATH_MAX];
     if (!sd_get_relpath(req, rel, sizeof(rel)) || rel[0] == '\0')
     {
+        sdcard_read_end();
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad path");
         return ESP_FAIL;
     }
     char full[SD_PATH_MAX];
     sd_full_path(rel, full, sizeof(full));
-    if (sd_rm_tree(full, sizeof(full), 8))
+    bool removed = sd_rm_tree(full, sizeof(full), 8);
+    sdcard_read_end();
+    if (removed)
     {
         httpd_resp_sendstr(req, "OK");
         return ESP_OK;
     }
     httpd_resp_sendstr(req, "Error");
     return ESP_FAIL;
+}
+
+/* POST /sdcard/upload_rsu?from=&to=&thin= -- re-sends stationary senders
+ * (station type RSU) from the PCAP archive to opentrafficmap. Runs on its own
+ * background task so the web UI stays responsive; frames are only COLLECTED
+ * while the SD writer lock is held and sent afterwards, so the pacing can
+ * never starve the recorders. The whitelist means anything not positively
+ * identified as an RSU -- vehicles included -- is skipped. */
+
+#define RSU_BATCH_BYTES (256 * 1024)
+#define RSU_BATCH_MAX   256
+
+typedef struct {
+    volatile bool running;
+    volatile uint32_t sent;
+    uint32_t thinned, stations;
+    bool pairs_overflow;
+    bool de;                     /* language captured at request time */
+    uint32_t from, to, thin;     /* thin 0 = one frame per station+type, total */
+    char result[256];            /* final line for the status poll */
+} rsu_job_t;
+static rsu_job_t rsu_job;
+
+typedef struct {
+    uint8_t *buf;
+    size_t used, n;
+    struct { uint32_t off; uint16_t len; } items[RSU_BATCH_MAX];
+    bool full;
+    /* Thinning table, persistent across the whole run. */
+    struct { uint32_t station; uint8_t msgid; uint32_t last_sec; } seen[64];
+    size_t n_seen;
+} rsu_batch_t;
+
+/* Runs under the SD writer lock: filter + copy ONLY, no sleeping, no I/O. */
+static bool rsu_collect_cb(uint32_t sec, uint32_t usec, const uint8_t *frame,
+                           size_t frame_len, const its_decoded_t *d, void *vctx)
+{
+    (void)usec;
+    rsu_batch_t *b = (rsu_batch_t *)vctx;
+
+    if (d->station_type != 15 || d->message_id == 0)
+        return true;                    /* not a stationary sender -- skip */
+
+    for (size_t i = 0; i < b->n_seen; i++)
+    {
+        if (b->seen[i].station != d->station_id || b->seen[i].msgid != d->message_id)
+            continue;
+        if (rsu_job.thin == 0 || sec - b->seen[i].last_sec < rsu_job.thin)
+        {
+            rsu_job.thinned++;
+            return true;
+        }
+        b->seen[i].last_sec = sec;
+        goto keep;
+    }
+    if (b->n_seen >= sizeof(b->seen) / sizeof(b->seen[0]))
+    {
+        /* Table full: skip and SAY so, rather than flooding or lying. */
+        rsu_job.pairs_overflow = true;
+        rsu_job.thinned++;
+        return true;
+    }
+    {
+        bool station_known = false;
+        for (size_t i = 0; i < b->n_seen; i++)
+            if (b->seen[i].station == d->station_id) { station_known = true; break; }
+        if (!station_known)
+            rsu_job.stations++;
+    }
+    b->seen[b->n_seen].station = d->station_id;
+    b->seen[b->n_seen].msgid = d->message_id;
+    b->seen[b->n_seen].last_sec = sec;
+    b->n_seen++;
+
+keep:
+    if (b->n >= RSU_BATCH_MAX || b->used + frame_len > RSU_BATCH_BYTES ||
+        frame_len > UINT16_MAX)
+    {
+        b->full = true;                 /* capacity hit -- reported as partial */
+        return false;
+    }
+    memcpy(b->buf + b->used, frame, frame_len);
+    b->items[b->n].off = (uint32_t)b->used;
+    b->items[b->n].len = (uint16_t)frame_len;
+    b->n++;
+    b->used += frame_len;
+    return true;
+}
+
+/* Task context, NO lock held: paced sending with retries and honest errors. */
+static bool rsu_drain_batch(rsu_batch_t *b)
+{
+    for (size_t i = 0; i < b->n; i++)
+    {
+        bool ok = false;
+        for (int attempt = 0; attempt < 3 && !ok; attempt++)
+        {
+            ok = mqtt_replay_frame(b->buf + b->items[i].off, b->items[i].len);
+            if (!ok && !mqtt_connected_state)
+                break;                  /* gone -- retrying won't help */
+            if (!ok)
+                vTaskDelay(pdMS_TO_TICKS(150));
+        }
+        if (!ok)
+        {
+            snprintf(rsu_job.result, sizeof(rsu_job.result), "%s",
+                     mqtt_connected_state
+                         ? (rsu_job.de ? "Fehler: MQTT-Warteschlange dauerhaft voll."
+                                       : "Error: MQTT queue stayed full.")
+                         : (rsu_job.de ? "Fehler: MQTT-Verbindung verloren."
+                                       : "Error: MQTT connection lost."));
+            return false;
+        }
+        rsu_job.sent++;
+        vTaskDelay(pdMS_TO_TICKS(40)); /* pace: live feed keeps priority */
+    }
+    b->n = 0;
+    b->used = 0;
+    return true;
+}
+
+static void rsu_upload_task(void *arg)
+{
+    (void)arg;
+    bool truncated = false, failed = false;
+    uint32_t replay_drop0 = mqtt_replay_dropped();
+
+    rsu_batch_t *b = heap_caps_calloc(1, sizeof(*b), MALLOC_CAP_SPIRAM);
+    uint8_t *buf = b ? heap_caps_malloc(RSU_BATCH_BYTES, MALLOC_CAP_SPIRAM) : NULL;
+    if (!b || !buf)
+    {
+        snprintf(rsu_job.result, sizeof(rsu_job.result), "%s",
+                 rsu_job.de ? "Fehler: kein Speicher." : "Error: out of memory.");
+        goto out;
+    }
+    b->buf = buf;
+
+    /* Hour by hour: each walk covers exactly one file, the batch is drained
+     * BETWEEN walks -- i.e. with the SD lock released. */
+    for (uint32_t h = rsu_job.from - rsu_job.from % 3600;
+         h <= rsu_job.to && !failed; h += 3600)
+    {
+        uint32_t f = h > rsu_job.from ? h : rsu_job.from;
+        uint32_t t = (h + 3599 < rsu_job.to) ? h + 3599 : rsu_job.to;
+        b->full = false;
+        bool complete = sdpcap_read_frames(f, t, rsu_collect_cb, b);
+        if (!rsu_drain_batch(b))
+            failed = true;
+        if (!complete || b->full)
+            truncated = true;
+    }
+
+    if (!failed)
+    {
+        /* "sent" only means queued; wait for OUR frames to leave the shared
+         * queue, then report unpublished ones exactly. */
+        for (int w = 0; mqtt_replay_pending() > 0 && w < 5000; w += 100)
+            vTaskDelay(pdMS_TO_TICKS(100));
+        uint32_t undelivered = (mqtt_replay_dropped() - replay_drop0)
+                             + mqtt_replay_pending();
+        char und[80] = "";
+        if (undelivered)
+            snprintf(und, sizeof(und),
+                     rsu_job.de ? " %lu davon nicht zugestellt (Verbindung)!"
+                                : " %lu of them not delivered (connection)!",
+                     (unsigned long)undelivered);
+
+        snprintf(rsu_job.result, sizeof(rsu_job.result),
+                 rsu_job.de
+                     ? "Fertig: %lu Frames von %lu Station(en) gesendet, %lu ausgedünnt.%s%s%s"
+                     : "Done: %lu frames from %lu station(s) sent, %lu thinned.%s%s%s",
+                 (unsigned long)rsu_job.sent, (unsigned long)rsu_job.stations,
+                 (unsigned long)rsu_job.thinned,
+                 truncated ? (rsu_job.de ? " Zeitraum nur teilweise gelesen!"
+                                         : " Period only partly read!") : "",
+                 rsu_job.pairs_overflow
+                     ? (rsu_job.de ? " Mehr als 64 Sender-Typ-Paare, Rest übersprungen."
+                                   : " More than 64 station-type pairs, rest skipped.") : "",
+                 und);
+    }
+
+out:
+    free(buf);
+    free(b);
+    rsu_job.running = false;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t rsu_upload_post_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    if (rsu_job.running)
+    {
+        httpd_resp_sendstr(req, T(S_RSU_UP_BUSY));
+        return ESP_OK;
+    }
+    if (!mqtt_connected_state)
+    {
+        httpd_resp_sendstr(req, T(S_RSU_UP_NOMQTT));
+        return ESP_OK;
+    }
+
+    time_t now = time(NULL);
+    long from = (long)now - 24 * 3600, to = (long)now, thin = 0;
+    char query[96];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char val[16];
+        if (httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK)
+            from = strtol(val, NULL, 10);
+        if (httpd_query_key_value(query, "to", val, sizeof(val)) == ESP_OK)
+            to = strtol(val, NULL, 10);
+        if (httpd_query_key_value(query, "thin", val, sizeof(val)) == ESP_OK)
+            thin = strtol(val, NULL, 10);
+    }
+    if (to > (long)now) to = (long)now;
+    if (from < 0)       from = 0;
+    if (to <= from)     to = from + 3600;
+    if (to - from > 24L * 3600)         /* hard cap: one day per upload */
+        from = to - 24L * 3600;
+    if (thin < 0) thin = 0;
+    if (thin > 0 && thin < 600) thin = 600;  /* finer thinning starves the SD lock */
+
+    memset(&rsu_job, 0, sizeof(rsu_job));
+    rsu_job.from = (uint32_t)from;
+    rsu_job.to = (uint32_t)to;
+    rsu_job.thin = (uint32_t)thin;
+    rsu_job.de = current_lang == LANG_DE;
+    rsu_job.running = true;
+    if (xTaskCreate(rsu_upload_task, "rsuup", 12288, NULL, 2, NULL) != pdPASS)
+    {
+        rsu_job.running = false;
+        httpd_resp_sendstr(req, "Error");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+/* GET /sdcard/upload_rsu/status -- progress for the page's poll. Read-only. */
+static esp_err_t rsu_upload_status_handler(httpd_req_t *req)
+{
+    char out[320];
+    if (rsu_job.running)
+        snprintf(out, sizeof(out), "{\"run\":1,\"sent\":%lu}",
+                 (unsigned long)rsu_job.sent);
+    else
+        /* result carries only our own fixed texts and numbers -- no quotes,
+         * safe to embed unescaped. */
+        snprintf(out, sizeof(out), "{\"run\":0,\"msg\":\"%s\"}", rsu_job.result);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, out);
 }
 
 static esp_err_t sdcard_format_handler(httpd_req_t *req)
@@ -6125,12 +6709,15 @@ static esp_err_t sdcard_tar_handler(httpd_req_t *req)
 {
     if (!check_update_auth(req))
         return send_auth_required(req);
-    if (!sdcard_is_mounted())
+    /* Counted reader for the whole archive walk -- see sdcard_download_handler. */
+    if (!sdcard_read_begin())
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no card");
         return ESP_FAIL;
     }
-    return tar_download(req, sdcard_mount_point());
+    esp_err_t r = tar_download(req, sdcard_mount_point());
+    sdcard_read_end();
+    return r;
 }
 
 static esp_err_t internal_tar_handler(httpd_req_t *req)
@@ -6139,6 +6726,225 @@ static esp_err_t internal_tar_handler(httpd_req_t *req)
         return send_auth_required(req);
     return tar_download(req, DATA_MOUNT);
 }
+
+/* ==================================================================
+ *  Slow-request worker: long downloads and playback move off the
+ *  single httpd task, so the UI (and any watchdog polling
+ *  /status.json) keeps answering during a multi-MB transfer.
+ * ================================================================== */
+
+typedef struct { httpd_req_t *req; esp_err_t (*fn)(httpd_req_t *); } slow_job_t;
+static QueueHandle_t slow_q;
+
+static void slow_worker_task(void *arg)
+{
+    (void)arg;
+    slow_job_t j;
+    for (;;)
+    {
+        if (xQueueReceive(slow_q, &j, portMAX_DELAY) != pdTRUE)
+            continue;
+        j.fn(j.req);
+        httpd_req_async_handler_complete(j.req);
+    }
+}
+
+/* No worker at boot -> inline (nothing runs beside it). Saturated worker ->
+ * refuse: the handlers share statics (tar_full/tar_hdr, partbuf), a second
+ * inline instance would silently corrupt both streams. */
+static esp_err_t defer_to_worker(httpd_req_t *req, esp_err_t (*fn)(httpd_req_t *))
+{
+    if (!slow_q)
+        return fn(req);
+    httpd_req_t *copy = NULL;
+    if (uxQueueSpacesAvailable(slow_q) == 0 ||
+        httpd_req_async_handler_begin(req, &copy) != ESP_OK)
+    {
+        httpd_resp_set_status(req, "503 Busy");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        httpd_resp_sendstr(req, "Beschäftigt – eine andere Übertragung läuft noch. / "
+                                "Busy – another transfer is still running.");
+        return ESP_OK;
+    }
+    slow_job_t j = { .req = copy, .fn = fn };
+    xQueueSend(slow_q, &j, 0);  /* space checked above; httpd is the only producer */
+    return ESP_OK;
+}
+
+/* ==================================================================
+ *  GET /messages/search -- searches the PCAP archive. RSSI is shown
+ *  as "-": the recording carries the raw frames, not reception meta.
+ * ================================================================== */
+
+#define SRCH_LIMIT 200
+#define SRCH_ROW_MAX 832
+#define SRCH_OUT_CAP (SRCH_LIMIT * SRCH_ROW_MAX)
+
+typedef struct {
+    /* Rows collect here (PSRAM), sent only AFTER the walk -- a send in the
+     * callback ran under the SD writer lock, paced by the client. */
+    char *out;
+    size_t out_len;
+    char q[129];                /* lowercase needle, up to 32 UTF-8 chars decoded */
+    uint32_t shown;
+    bool limit_hit;
+} srch_ctx_t;
+
+static bool srch_cb(uint32_t sec, uint32_t usec, const uint8_t *frame,
+                    size_t frame_len, const its_decoded_t *d, void *vctx)
+{
+    (void)usec; (void)frame; (void)frame_len;
+    srch_ctx_t *c = (srch_ctx_t *)vctx;
+
+    web_msg_entry_t e = { 0 };
+    entry_from_decoded(&e, d);
+    e.seconds = sec;
+    e.length = (uint32_t)frame_len;
+
+    char mac_str[20] = "-";
+    if (e.has_src_mac)
+        snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 e.src_mac[0], e.src_mac[1], e.src_mac[2],
+                 e.src_mac[3], e.src_mac[4], e.src_mac[5]);
+
+    if (c->q[0])
+    {
+        char hay[96];
+        snprintf(hay, sizeof(hay), "%s %s %lu",
+                 e.msgtype, mac_str, (unsigned long)e.station_id);
+        for (char *p = hay; *p; p++)
+            *p = (char)tolower((unsigned char)*p);
+        if (!strstr(hay, c->q))
+            return true;
+    }
+
+    if (c->shown >= SRCH_LIMIT)
+    {
+        c->limit_hit = true;
+        return false;               /* enough -- stop reading the card */
+    }
+
+    char detail[320];
+    msg_detail_text(&e, sec, detail, sizeof(detail));
+
+    char clock[24];
+    struct tm tm_local;
+    time_t t = (time_t)sec;
+    localtime_r(&t, &tm_local);
+    strftime(clock, sizeof(clock), "%d.%m. %H:%M:%S", &tm_local);
+
+    char typeesc[WEB_MSG_TYPE_LEN * 6];
+    html_escape(e.msgtype, typeesc, sizeof(typeesc));
+
+    char row[SRCH_ROW_MAX];
+    int rl = snprintf(row, sizeof(row),
+        "<tr><td>%lu</td><td>%s</td><td>-</td><td>%lu</td>"
+        "<td class='wrapcell'>%s</td><td class='mono'>%s</td><td class='wrapcell'>%s</td></tr>",
+        (unsigned long)++c->shown, clock, (unsigned long)e.length,
+        typeesc, mac_str, detail);
+    if (rl < 0)
+        return true;
+    if ((size_t)rl >= sizeof(row))
+        rl = sizeof(row) - 1;
+    if (c->out_len + (size_t)rl > SRCH_OUT_CAP)
+    {
+        c->limit_hit = true;
+        return false;
+    }
+    memcpy(c->out + c->out_len, row, (size_t)rl);
+    c->out_len += (size_t)rl;
+    return true;
+}
+
+/* Streams an HTML fragment; runs on the slow worker via the wrapper below. */
+static esp_err_t messages_search_stream(httpd_req_t *req)
+{
+    resolve_language(req);
+
+    time_t now = time(NULL);
+    long from = (long)now - 6 * 3600, to = (long)now;
+    srch_ctx_t ctx = { 0 };
+
+    /* Sized for the worst legal input -- too-small buffers made IDF's query
+     * parsers fail SILENTLY and the search ran with defaults instead. */
+    char query[512];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char val[224];
+        if (httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK)
+            from = strtol(val, NULL, 10);
+        if (httpd_query_key_value(query, "to", val, sizeof(val)) == ESP_OK)
+            to = strtol(val, NULL, 10);
+        esp_err_t qe = httpd_query_key_value(query, "q", val, sizeof(val));
+        if (qe == ESP_OK)
+        {
+            url_decode(val);
+            if (strlcpy(ctx.q, val, sizeof(ctx.q)) >= sizeof(ctx.q))
+            {
+                /* Longer than any searched field can be -- a truncated copy
+                 * could half-match, so use a needle that never matches. */
+                ctx.q[0] = '\x01';
+                ctx.q[1] = '\0';
+            }
+            for (char *p = ctx.q; *p; p++)
+                *p = (char)tolower((unsigned char)*p);
+        }
+        else if (qe == ESP_ERR_HTTPD_RESULT_TRUNC)
+        {
+            /* Needle blew past val[] (3-byte UTF-8 = 9 encoded bytes each);
+             * running UNFILTERED would fake matches -- never-match instead. */
+            ctx.q[0] = '\x01';
+            ctx.q[1] = '\0';
+        }
+    }
+    if (to > (long)now) to = (long)now;
+    if (from < 0)       from = 0;
+    if (to <= from)     to = from + 3600;
+    if (to - from > 24L * 3600)
+        from = to - 24L * 3600;
+
+    ctx.out = heap_caps_malloc(SRCH_OUT_CAP, MALLOC_CAP_SPIRAM);
+    if (!ctx.out)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    char head[512];
+    snprintf(head, sizeof(head),
+        "<div class='scroll'><table><thead><tr><th>#</th><th>%s</th><th>%s</th>"
+        "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
+        T(S_COL_TIME), T(S_COL_RSSI), T(S_COL_LENGTH), T(S_COL_TYPE),
+        T(S_COL_SENDER), T(S_COL_PREVIEW));
+    httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+    bool complete = sdpcap_read_frames((uint32_t)from, (uint32_t)to, srch_cb, &ctx);
+
+    /* Rows go out AFTER the walk -- capped at 200, this is at most ~166 KB
+     * and the send no longer runs under the SD writer lock. */
+    if (ctx.out_len)
+        httpd_resp_send_chunk(req, ctx.out, ctx.out_len);
+    heap_caps_free(ctx.out);
+
+    char foot[256];
+    snprintf(foot, sizeof(foot), "</tbody></table></div><p><small>%s%s%s</small></p>",
+        ctx.shown == 0 ? T(S_SRCH_NONE) : "",
+        ctx.limit_hit ? T(S_SRCH_LIMIT) : "",
+        (!complete && !ctx.limit_hit) ? T(S_SRCH_PARTIAL) : "");
+    httpd_resp_send_chunk(req, foot, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static esp_err_t messages_search_async(httpd_req_t *req)  { return defer_to_worker(req, messages_search_stream); }
+
+static esp_err_t sdcard_download_async(httpd_req_t *req)  { return defer_to_worker(req, sdcard_download_handler); }
+static esp_err_t sdcard_tar_async(httpd_req_t *req)       { return defer_to_worker(req, sdcard_tar_handler); }
+static esp_err_t internal_tar_async(httpd_req_t *req)     { return defer_to_worker(req, internal_tar_handler); }
+static esp_err_t internal_download_async(httpd_req_t *req){ return defer_to_worker(req, internal_download_handler); }
+static esp_err_t partimg_download_async(httpd_req_t *req) { return defer_to_worker(req, partimg_download_handler); }
+static esp_err_t playback_get_async(httpd_req_t *req)     { return defer_to_worker(req, playback_get_handler); }
 
 /* ================================================================== */
 /*  /logs  -- view the SD log files inline in the browser             */
@@ -6251,9 +7057,14 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
         frames ? "frames" : "system", lc, T(S_LOGS_REFRESH));
     httpd_resp_send_chunk(req, nav, HTTPD_RESP_USE_STRLEN);
 
-    FILE *f = fopen(path, "rb");
+    /* Counted reader -- the tail stream sends many chunks with the FILE open;
+     * see sdcard_download_handler. */
+    bool rd = sdcard_read_begin();
+    FILE *f = rd ? fopen(path, "rb") : NULL;
     if (!f)
     {
+        if (rd)
+            sdcard_read_end();
         char msg[128];
         snprintf(msg, sizeof(msg), "<p>%s</p>", T(S_LOGS_NONE));
         httpd_resp_send_chunk(req, msg, HTTPD_RESP_USE_STRLEN);
@@ -6275,6 +7086,7 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
 
     stream_tail_escaped(req, f, start);
     fclose(f);
+    sdcard_read_end();
 
     httpd_resp_send_chunk(req, "</pre>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -6319,7 +7131,7 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 46; /* 41 routes today, plus a little headroom */
+    config.max_uri_handlers = 50; /* 44 routes today, plus headroom */
     /* /messages and /map each hold a /ws socket open for as long as the tab
      * is open -- 8 proved too tight once /map existed (accept() failures as
      * dead WS sessions piled up, see the reaping in ws_broadcast_work). */
@@ -6384,25 +7196,41 @@ void webserver_init(void)
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_get_handler, .is_websocket = true },
 #endif
 #if CONFIG_ENABLE_SD
-        { .uri = "/map/playback",    .method = HTTP_GET,  .handler = playback_get_handler },
+        { .uri = "/map/playback",    .method = HTTP_GET,  .handler = playback_get_async },
         { .uri = "/tracks.json",     .method = HTTP_GET,  .handler = tracks_get_handler },
         { .uri = "/markers.json",    .method = HTTP_GET,  .handler = markers_json_handler },
         { .uri = "/sdcard",          .method = HTTP_GET,  .handler = sdcard_get_handler },
-        { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_handler },
+        { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_async },
         { .uri = "/sdcard/upload",   .method = HTTP_POST, .handler = sdcard_upload_handler },
         { .uri = "/sdcard/delete",   .method = HTTP_POST, .handler = sdcard_delete_handler },
         { .uri = "/sdcard/format",   .method = HTTP_POST, .handler = sdcard_format_handler },
+        { .uri = "/sdcard/upload_rsu", .method = HTTP_POST, .handler = rsu_upload_post_handler },
+        { .uri = "/sdcard/upload_rsu/status", .method = HTTP_GET, .handler = rsu_upload_status_handler },
+        { .uri = "/messages/search", .method = HTTP_GET, .handler = messages_search_async },
         { .uri = "/sdcard/mount",    .method = HTTP_POST, .handler = sdcard_mount_handler },
         { .uri = "/fs",              .method = HTTP_GET,  .handler = internal_get_handler },
-        { .uri = "/fs/download",     .method = HTTP_GET,  .handler = internal_download_handler },
-        { .uri = "/fs/part",         .method = HTTP_GET,  .handler = partimg_download_handler },
-        { .uri = "/fs/tar",          .method = HTTP_GET,  .handler = internal_tar_handler },
-        { .uri = "/sdcard/tar",      .method = HTTP_GET,  .handler = sdcard_tar_handler },
+        { .uri = "/fs/download",     .method = HTTP_GET,  .handler = internal_download_async },
+        { .uri = "/fs/part",         .method = HTTP_GET,  .handler = partimg_download_async },
+        { .uri = "/fs/tar",          .method = HTTP_GET,  .handler = internal_tar_async },
+        { .uri = "/sdcard/tar",      .method = HTTP_GET,  .handler = sdcard_tar_async },
         { .uri = "/logs",            .method = HTTP_GET,  .handler = logs_get_handler },
 #endif
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++)
         httpd_register_uri_handler(server, &uris[i]);
+
+#if CONFIG_ENABLE_SD
+    /* One worker is deliberate: transfers serialise among themselves (the SD
+     * is a serial device anyway) while the httpd task stays responsive. */
+    slow_q = xQueueCreate(2, sizeof(slow_job_t));
+    if (!slow_q ||
+        xTaskCreate(slow_worker_task, "httpslow", 12288, NULL, 4, &slow_worker_handle) != pdPASS)
+    {
+        ESP_LOGW(TAG, "slow-request worker unavailable, downloads serve inline");
+        if (slow_q) { vQueueDelete(slow_q); slow_q = NULL; }
+        slow_worker_handle = NULL;
+    }
+#endif
 
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
 }

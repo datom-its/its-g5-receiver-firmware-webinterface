@@ -325,29 +325,40 @@ static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxca
     return false;
 }
 
-void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
+/* Shared walk behind both public readers: exactly one of pos_cb/frame_cb is
+ * set (frame_cb sees every frame, pos_cb only those with a position). */
+static bool sdpcap_walk(uint32_t from_sec, uint32_t to_sec,
+                        sdpcap_position_cb_t pos_cb, sdpcap_frame_cb_t frame_cb,
+                        void *ctx)
 {
-    /* Same lock as the writer: without it the prune sweep can delete (and the
-     * writer can rotate) a file this walk has open. Bounded -- this runs on
-     * the single httpd task, which must not freeze on a stuck writer. */
-    if (!cb || !sdcard_io_begin_timeout(2000))
-        return;
+    if (!pos_cb && !frame_cb)
+        return false;
 
     bool aborted = false;
     time_t bucket = (time_t)from_sec - ((time_t)from_sec % 3600);
     for (; bucket <= (time_t)to_sec && !aborted; bucket += 3600)
     {
+        /* Writer lock held per hour file, not across the whole walk: a long
+         * range reads hundreds of MB, and keeping the writers out that long
+         * would overflow the PCAP ring. Between files they get to flush. */
+        if (!sdcard_io_begin_timeout(2000))
+            return false;   /* couldn't read the rest -- caller must not claim it did */
+
         char path[96];
         sdpcap_current_path(path, sizeof(path), bucket);
 
         FILE *f = fopen(path, "rb");
         if (!f)
+        {
+            sdcard_io_end();
             continue;  /* no capture stored for this hour -- fine, just skip it */
+        }
 
         pcap_global_hdr_t gh;
         if (fread(&gh, sizeof(gh), 1, f) != 1 || gh.magic != 0xa1b2c3d4)
         {
             fclose(f);
+            sdcard_io_end();
             continue;
         }
 
@@ -369,15 +380,31 @@ void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_c
 
             its_decoded_t d;
             its_decode_frame(buf, rh.caplen, &d);
-            if (d.has_position && !cb(rh.sec, rh.usec, &d, ctx))
+            bool keep = true;
+            if (frame_cb)
+                keep = frame_cb(rh.sec, rh.usec, buf, rh.caplen, &d, ctx);
+            else if (d.has_position)
+                keep = pos_cb(rh.sec, rh.usec, &d, ctx);
+            if (!keep)
             {
                 aborted = true;   /* consumer gave up (e.g. client hung up) */
                 break;
             }
         }
         fclose(f);
+        sdcard_io_end();
     }
-    sdcard_io_end();
+    return true;
+}
+
+bool sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
+{
+    return sdpcap_walk(from_sec, to_sec, cb, NULL, ctx);
+}
+
+bool sdpcap_read_frames(uint32_t from_sec, uint32_t to_sec, sdpcap_frame_cb_t cb, void *ctx)
+{
+    return sdpcap_walk(from_sec, to_sec, NULL, cb, ctx);
 }
 
 /* Flushes the ring to `path` in 4 KB chunks. `limit` caps the drain (0 = all):
@@ -641,9 +668,15 @@ void sdpcap_init(void)
 void sdpcap_init(void) {}
 void sdpcap_handle_packet(sniffer_packet_info_t *packet) { (void)packet; }
 size_t sdpcap_flush_now(void) { return 0; }
-void sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
+bool sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
     (void)from_sec; (void)to_sec; (void)cb; (void)ctx;
+    return true;
+}
+bool sdpcap_read_frames(uint32_t from_sec, uint32_t to_sec, sdpcap_frame_cb_t cb, void *ctx)
+{
+    (void)from_sec; (void)to_sec; (void)cb; (void)ctx;
+    return true;
 }
 
 #endif

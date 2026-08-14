@@ -43,6 +43,12 @@ void sdcard_io_end(void);
  * (above all flush-before-restart). False = lock NOT held. */
 bool sdcard_io_begin_timeout(uint32_t timeout_ms);
 
+/* Counted streaming FS users (web transfers) -- no lock held, but unmount/
+ * format refuse (ESP_ERR_TIMEOUT) while the count is nonzero. begin false =
+ * card unmounted or an unmount/format is pending. */
+bool sdcard_read_begin(void);
+void sdcard_read_end(void);
+
 /* Total and free bytes of the mounted filesystem. */
 esp_err_t sdcard_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 

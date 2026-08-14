@@ -70,11 +70,16 @@ static esp_timer_handle_t stats_timer_handle;
 typedef struct {
     uint8_t *payload;      /* heap copy, freed by the tx worker */
     int      length;
+    bool     replay;       /* from mqtt_replay_frame -- tracked for honest accounting */
 } mqtt_tx_item_t;
 
 static QueueHandle_t cmd_queue;
 static QueueHandle_t tx_queue;
 static uint32_t tx_dropped;
+/* Replay accounting: the shared queue also carries the live feed, so a plain
+ * queue count cannot tell whether the RSU re-send's frames were published. */
+static uint32_t replay_pending;
+static uint32_t replay_dropped_total;
 
 static void mqtt_set_connected(bool new_connected)
 {
@@ -243,11 +248,18 @@ static void mqtt_tx_task(void *)
     {
         if (xQueueReceive(tx_queue, &item, portMAX_DELAY) != pdTRUE)
             continue;
+        bool published = false;
         if (client && connected)
-            esp_mqtt_client_publish(client, packet_topic,
+            published = esp_mqtt_client_publish(client, packet_topic,
                                     reinterpret_cast<const char *>(item.payload),
-                                    item.length, 0, 0);
+                                    item.length, 0, 0) >= 0;
         free(item.payload);
+        if (item.replay)
+        {
+            if (!published)
+                __atomic_add_fetch(&replay_dropped_total, 1, __ATOMIC_RELAXED);
+            __atomic_sub_fetch(&replay_pending, 1, __ATOMIC_RELAXED);
+        }
     }
 }
 
@@ -389,6 +401,7 @@ extern "C" void mqtt_handle_packet(sniffer_packet_info_t *packet)
      * capture and the event log). */
     mqtt_tx_item_t item;
     item.length = packet->length;
+    item.replay = false;
     item.payload = static_cast<uint8_t *>(malloc(packet->length));
     if (!item.payload)
         return;
@@ -401,6 +414,43 @@ extern "C" void mqtt_handle_packet(sniffer_packet_info_t *packet)
             ESP_LOGW(TAG, "MQTT publish queue full, %lu frame(s) dropped so far",
                      (unsigned long)tx_dropped);
     }
+}
+
+extern "C" bool mqtt_replay_frame(const uint8_t *data, size_t length)
+{
+    if (!client || !connected || !tx_queue || !data || length == 0)
+        return false;
+
+    mqtt_tx_item_t item;
+    item.length = (int)length;
+    item.replay = true;
+    item.payload = static_cast<uint8_t *>(malloc(length));
+    if (!item.payload)
+        return false;
+    memcpy(item.payload, data, length);
+
+    /* Counted BEFORE the send: once queued, only the tx worker decrements. */
+    __atomic_add_fetch(&replay_pending, 1, __ATOMIC_RELAXED);
+
+    /* Unlike the live path this may wait: the caller paces itself and wants
+     * to know about failure rather than lose frames silently. */
+    if (xQueueSend(tx_queue, &item, pdMS_TO_TICKS(500)) != pdTRUE)
+    {
+        __atomic_sub_fetch(&replay_pending, 1, __ATOMIC_RELAXED);
+        free(item.payload);
+        return false;
+    }
+    return true;
+}
+
+extern "C" uint32_t mqtt_replay_pending(void)
+{
+    return __atomic_load_n(&replay_pending, __ATOMIC_RELAXED);
+}
+
+extern "C" uint32_t mqtt_replay_dropped(void)
+{
+    return __atomic_load_n(&replay_dropped_total, __ATOMIC_RELAXED);
 }
 
 extern "C" void mqtt_init(void)
