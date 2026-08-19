@@ -18,12 +18,15 @@ typedef struct {
     uint8_t  n;                          /* signal groups populated */
     uint8_t  sg[ITS_SPAT_MAX_SG];
     uint8_t  phase[ITS_SPAT_MAX_SG];
-    /* Unix second at which the current phase is expected to end (0 = unknown).
-     * Absolute, not a countdown, so it stays correct between the sparse
-     * messages that actually carry timing; carried forward while the phase
-     * for that group is unchanged, cleared when it flips. */
+    /* Unix second the current phase is expected to end (0 = unknown). Absolute,
+     * not a countdown; carried forward until that group's phase flips. */
     uint32_t change_at[ITS_SPAT_MAX_SG];
-    uint32_t last_seen;                  /* unix seconds of last update */
+    /* Last time ANYTHING was heard, SPATEM or MAPEM: an RSU whose SPATEM we
+     * cannot decode is still alive and must not be evicted first. */
+    uint32_t last_seen;
+    /* Last time PHASES were decoded -- the age beside the phase dots must use
+     * this; last_seen there made stale phases read as fresh. 0 = never. */
+    uint32_t phase_seen;
     uint32_t station_id;                 /* ItsPduHeader.stationId (map-marker key) */
     char     name[ITS_MAP_NAME_LEN];     /* from MAPEM, "" until one arrives */
     uint16_t lane_width_cm;              /* from MAPEM, 0 = not sent */
@@ -38,17 +41,41 @@ typedef struct {
     int32_t  lat_e7, lon_e7;             /* RSU position (0 if unknown) */
 } spatem_intersection_t;
 
+/* Measured phase durations per signal group -- the controller never states them.
+ * Kept out of the cache entry: display data, four internal-RAM copies cost ~28 KB. */
+typedef struct {
+    uint32_t secs[ITS_SPAT_MAX_SG][3];   /* 0 = green, 1 = amber, 2 = red */
+    uint32_t cnt[ITS_SPAT_MAX_SG][3];    /* never scaled: halving it made the
+                                          * shown observation count a lie */
+    uint32_t max[ITS_SPAT_MAX_SG][3];    /* seconds; 16 bit overflowed at a
+                                          * light resting in one phase */
+    /* Start of the running phase on the MONOTONIC clock (uptime seconds), not
+     * wall clock: an NTP step must not lengthen or shorten a measured phase. */
+    uint32_t since[ITS_SPAT_MAX_SG];
+    /* Bit r: row r's phase start is KNOWN (flip watched without a gap); after a
+     * gap it must not be counted. ITS_SPAT_MAX_SG is 32, exactly the width. */
+    uint32_t armed;
+    /* Rows keyed by SIGNAL GROUP ID, never by position in the message: by
+     * position, an omitted group lost its history and a doubled one counted twice. */
+    uint8_t  sg[ITS_SPAT_MAX_SG];
+    uint8_t  n_rows;
+    uint8_t  phase[ITS_SPAT_MAX_SG];      /* eventState when last seen */
+    uint32_t last_mono[ITS_SPAT_MAX_SG];  /* monotonic time of that sighting */
+} spatem_phases_t;
+
+/* Copies the phase tallies for one cached intersection (by region+id) under
+ * the module lock. False = that intersection is not cached. */
+bool spatem_phases(uint16_t region, uint16_t id, spatem_phases_t *out);
+
 void spatem_init(void);
 
-/* Hot path: fold a decoded SPATEM snapshot into the cache (find-or-insert by
- * region+id, most-recently-seen evicts the oldest slot when full). No-op if
- * `s` is invalid. Cheap; safe to call from the sniffer/web packet path. */
+/* Hot path: fold a decoded SPATEM into the cache (find-or-insert by region+id).
+ * No-op if `s` is invalid; safe from the sniffer/web packet path. */
 void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
                  bool has_pos, int32_t lat_e7, int32_t lon_e7);
 
-/* Attach a MAPEM's intersection name and its signal-group-to-movement map to
- * the matching cache entry (same region+id key as the SPATEM phases). No-op
- * if `m` is invalid; creates an entry if the phases haven't been seen yet. */
+/* Attach a MAPEM's name and group-to-movement map to the region+id entry;
+ * creates one if the phases have not been seen yet. */
 void spatem_note_name(const its_map_t *m, uint32_t seconds);
 
 /* Looks up what signal group `sg` of the given intersection controls.
@@ -60,14 +87,15 @@ bool spatem_movement(const spatem_intersection_t *e, uint8_t sg,
  * Returns the count written (<= max). */
 int spatem_snapshot(spatem_intersection_t *out, int max);
 
-/* Decodes and caches a MAPEM's lane geometry, but only the first time an
- * intersection (or a new revision of it) is seen -- the layout is identical
- * in every message, so re-decoding ~2x per second would be pure waste. The
- * ~5.5 KB per intersection lives in PSRAM, allocated on first use. */
+/* Decodes a MAPEM's lane geometry only on first sight of an intersection or of
+ * a new revision -- the layout repeats in every message. ~5.5 KB each, in PSRAM. */
 void spatem_note_geometry(const uint8_t *frame, size_t len, const its_map_t *m);
 
 /* Cached geometry or NULL. Re-decoded IN PLACE on a new revision -- hold
  * spatem_geometry_lock() while using the pointer, unlock on every path. */
+/* Bounded variant for the packet path: it runs with msg_ring_mutex held, so
+ * waiting forever here would stall reception behind any reader. */
+bool spatem_geometry_lock_timeout(uint32_t ms);
 void spatem_geometry_lock(void);
 void spatem_geometry_unlock(void);
 const its_map_geom_t *spatem_geometry(uint16_t region, uint16_t id);

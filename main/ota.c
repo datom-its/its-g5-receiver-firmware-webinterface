@@ -14,14 +14,12 @@
 #include "esp_timer.h"
 #include "argtable3/argtable3.h"
 
+#include "ota.h"
 #include "sysmon.h"
 
-/* 8 KB, not 3 KB: this task runs esp_https_ota(), whose TLS handshake and
- * certificate-bundle verification alone need more than 3 KB of stack -- the
- * old size risked a stack-canary panic mid-update, i.e. the remote update
- * path failing exactly when it is least convenient (unattended device). */
+/* 8 KB, not 3 KB: the TLS handshake and certificate-bundle check inside
+ * esp_https_ota() alone overflow a 3 KB stack. */
 #define OTA_TASK_STACK_SIZE 8192
-#define OTA_TASK_PRIORITY 20
 
 static const char TAG[] = "OTA";
 
@@ -152,6 +150,9 @@ static int ota_cmd(int argc, char **argv)
 
     if (ota_args.rollback->count)
     {
+        /* Reboots, so flush first like the automatic rollback path does.
+         * Runs on the console task, whose stack is sized for it. */
+        sysmon_flush_persistent();
         esp_err_t res = esp_ota_mark_app_invalid_rollback_and_reboot();
         if (res != ESP_OK)
         {
@@ -191,8 +192,7 @@ static int ota_cmd(int argc, char **argv)
             return 1;
         }
 
-        /* Console-typed URL into a fixed buffer: bound it. (Upstream used
-         * strcpy; a >1 KB paste would have overflowed.) */
+        /* Console-typed URL into a fixed buffer: keep it bounded. */
         snprintf(https_url, sizeof(https_url), "%s", ota_args.url->sval[0]);
         reboot_after_update = ota_args.reboot->count;
 
@@ -275,7 +275,7 @@ void register_ota_cmd(void)
     ota_args.reboot = arg_lit0("r", NULL, "reboot into new app after update");
     ota_args.confirm = arg_lit0("C", NULL, "confirm currently running app partition");
     ota_args.rollback = arg_lit0("R", NULL, "rollback to old app and reboot");
-    ota_args.switch_part = arg_lit0("S", NULL, "switch to other app partition and reboot");
+    ota_args.switch_part = arg_lit0("S", NULL, "boot the other app partition on the next restart");
     ota_args.info = arg_lit0("i", NULL, "print partition info");
     ota_args.end = arg_end(1);
     const esp_console_cmd_t cmd = {
@@ -288,11 +288,39 @@ void register_ota_cmd(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
 }
 
+/* Own task, NOT the timer callback: sysmon_flush_persistent() far outgrows the
+ * small stack the esp_timer dispatch task shares with every other timer user. */
+static void rollback_task(void *)
+{
+    sysmon_flush_persistent();
+    /* Re-check after the flush: it takes seconds, and a confirm arriving in
+     * that window marks the app valid -- rolling back anyway would discard it. */
+    if (ota_is_pending_verify())
+    {
+        esp_err_t res = esp_ota_mark_app_invalid_rollback_and_reboot();
+        if (res != ESP_OK)
+            ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s", esp_err_to_name(res));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "App no longer pending verification, rollback cancelled");
+    }
+    vTaskDelete(NULL);   /* only reached if the rollback was cancelled or failed */
+}
+
 static void invalidate_and_reboot(void *)
 {
-    esp_err_t res = esp_ota_mark_app_invalid_rollback_and_reboot();
-    if (res != ESP_OK)
-        ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s", esp_err_to_name(res));
+    /* Hand off to a task that flushes first: rolling back reboots, and without
+     * the flush the buffered statistics and capture go out the window. */
+    if (xTaskCreate(rollback_task, "otarb", 8192, NULL, 5, NULL) != pdPASS)
+    {
+        ESP_LOGE(TAG, "cannot start rollback task, rolling back unflushed");
+        esp_err_t res = esp_ota_mark_app_invalid_rollback_and_reboot();
+        /* Timer deliberately not re-armed: both failure causes (no suitable
+         * app to roll back to, or running from factory) are permanent. */
+        if (res != ESP_OK)
+            ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s", esp_err_to_name(res));
+    }
 }
 
 static void init_invalidate_and_reboot_timer(void)

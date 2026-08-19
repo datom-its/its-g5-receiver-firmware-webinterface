@@ -8,6 +8,8 @@ idf_component_register(
         "events.c"
         "events_log.c"
        "tracklog.c"
+        "inventory.c"
+        "ptlog.c"
         "its_decode.c"
         "led.c"
         "mqtt.cpp"

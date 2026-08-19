@@ -18,9 +18,8 @@ esp_err_t sdcard_mount(void);
 /* Unmount the SD card. */
 esp_err_t sdcard_unmount(void);
 
-/* Stops the system monitor's 30 s auto-remount from undoing a deliberate
- * unmount (/poweroff) before the plug is actually pulled. Cleared by a manual
- * mount and by a restart. */
+/* Stops the system monitor's auto-remount from undoing a deliberate unmount
+ * (/poweroff). Cleared by a manual mount and by a restart. */
 void sdcard_inhibit_auto_remount(void);
 void sdcard_allow_auto_remount(void);
 bool sdcard_auto_remount_inhibited(void);
@@ -43,9 +42,21 @@ void sdcard_io_end(void);
  * (above all flush-before-restart). False = lock NOT held. */
 bool sdcard_io_begin_timeout(uint32_t timeout_ms);
 
-/* Counted streaming FS users (web transfers) -- no lock held, but unmount/
- * format refuse (ESP_ERR_TIMEOUT) while the count is nonzero. begin false =
- * card unmounted or an unmount/format is pending. */
+/* Consecutive failed lock attempts, and the age of the hold in progress (not a
+ * maximum). Both read 0 during a long op; sysmon tells wedged from busy. */
+uint32_t sdcard_io_fail_streak(void);
+uint32_t sdcard_io_held_ms(void);
+
+/* Marks a legitimately long hold (archive walk, mount, format) so the stall
+ * watchdog does not mistake it for a wedged writer. Must be paired. */
+void sdcard_io_long_begin(void);
+void sdcard_io_long_end(void);
+
+/* Streaming readers (web transfers) holding a file open; they run WITHOUT the
+ * writer lock, so unmount/format AND anything that UNLINKS must consult this --
+ * FATFS is built with FS_LOCK=0 and will not refuse. begin false = unavailable. */
+int sdcard_read_active(void);
+
 bool sdcard_read_begin(void);
 void sdcard_read_end(void);
 

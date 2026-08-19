@@ -20,10 +20,8 @@ static uint32_t rd_u32be(const uint8_t *p)
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
-/* Reads nbits (1..32) at absolute bit offset bitoff, MSB-first (UPER
- * bit-packing) -- the only bit-level reader needed, since everything else in
- * this file is fixed-shape byte-aligned binary. Returns false if the read
- * would run past len*8 or nbits is out of range. */
+/* Reads nbits (1..32) at an absolute bit offset, MSB-first (UPER bit packing).
+ * False on overrun or an out-of-range width. */
 static bool read_bits_msb(const uint8_t *frame, size_t len, size_t bitoff,
                            unsigned nbits, uint32_t *out)
 {
@@ -81,10 +79,8 @@ static const char *lookup_msgid_name(uint8_t id)
     return NULL;
 }
 
-/* GeoNetworking Common Header "header type" -> extended header length (ETSI
- * EN 302 636-4-1). GeoBroadcast/-Anycast carry a leading 4-byte sequence-
- * number+reserved field before the position vector -- easy to miss, this
- * was wrong at 40 instead of 44 once already. -1 = not handled here. */
+/* GeoNetworking Common Header "header type" -> extended header length (ETSI EN
+ * 302 636-4-1). -1 = not handled here. Easy to get wrong, see the cases below. */
 static int gn_ext_header_len(uint8_t header_type)
 {
     switch (header_type)
@@ -197,7 +193,7 @@ static bool read_oer_length(const uint8_t *frame, size_t len, size_t off,
 }
 
 /* SPATEM (SAE J2735 SPAT) UPER decode: stateful MSB-first bit cursor, `err`
- * latches on overrun. Widths validated against real traffic -- see reference-its-decode. */
+ * latches on overrun. */
 typedef struct { const uint8_t *b; size_t nbits, pos; bool err; } spat_bitr_t;
 
 static uint32_t sb(spat_bitr_t *r, unsigned n)
@@ -280,10 +276,8 @@ static void parse_spatem(const uint8_t *frame, size_t len, size_t start,
     /* IntersectionState */
     sb(&r, 1);                    /* ext */
     uint32_t opt = sb(&r, 6);     /* name,moy,timeStamp,enabledLanes,maneuverAssist,regional */
-    /* Bail out on an IntersectionState name for the same reason the SPAT-level
-     * name does above: its variable-length string would be walked as the
-     * region bit / id / revision / status that follow, and the garbage was
-     * still being committed as a real intersection. */
+    /* Bail out like the SPAT-level name above: the variable-length string would
+     * otherwise be walked as the region/id/revision/status that follow. */
     if ((opt >> 5) & 1) return;   /* name DescriptiveName (not seen) */
     bool has_moy = (opt >> 4) & 1, has_ts = (opt >> 3) & 1, has_enabled = (opt >> 2) & 1;
 
@@ -366,8 +360,7 @@ static void parse_spatem(const uint8_t *frame, size_t len, size_t start,
 
 /* --- MAPEM (SAE J2735 MapData) stage-1 decode ----------------------------
  * Walks only as far as the first IntersectionGeometry's name + id, which sit
- * before the (much larger) lane geometry. Bit layout verified field-by-field
- * against real captured MAPEM -- see reference-its-decode in project memory. */
+ * before the (much larger) lane geometry. */
 static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
                         its_map_t *out, its_map_geom_t *geom)
 {
@@ -426,7 +419,7 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     out->valid = true;
 
     /* Lane geometry -- optional enrichment: any unseen construct bails out with
-     * n_sg 0, keeping name/id. Widths validated, see reference-its-decode. */
+     * n_sg 0, keeping name/id. */
     out->revision = (uint8_t)sb(&r, 7);
     /* refPoint Position3D: 3 preamble bits (ext + elevation + regional),
      * then lat/long as UPER-biased integers (we don't need their values). */
@@ -438,9 +431,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     if (has_elev) sb(&r, 16);
     if (ref_regional) return;
 
-    /* Metres per 1e-7 degree, for turning the cm node offsets into absolute
-     * positions. Longitude shrinks with latitude; computed once per MAPEM,
-     * which only happens on a revision change, so the float cost is moot. */
+    /* Metres per 1e-7 degree, to turn the cm node offsets into absolute
+     * positions; longitude shrinks with latitude. */
     double lat_scale = 1e7 / 111320.0;
     double lon_scale = 1e7 / (111320.0 * cos((double)ref_lat / 1e7 * M_PI / 180.0));
     if (geom)
@@ -454,9 +446,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     if (has_lw) out->lane_width_cm = (uint16_t)sb(&r, 15);   /* LaneWidth, cm */
     if (has_sl)
     {
-        /* RegulatorySpeedLimit: what kind of limit, then the value in
-         * 0.02 m/s steps. Only the plain vehicle max/min are kept -- the
-         * school-zone and truck variants would need their own UI. */
+        /* RegulatorySpeedLimit: kind of limit, then the value in 0.02 m/s steps.
+         * Only the plain vehicle max/min are kept; other variants need their own UI. */
         uint32_t n = sb(&r, 4) + 1;
         for (uint32_t i = 0; i < n && !r.err; i++)
         {
@@ -564,9 +555,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
             bool has_man = sb(&r, 1);
             sb(&r, 8);                    /* connecting lane id */
             uint32_t man = has_man ? sb(&r, 12) : 0;
-            /* IntersectionReferenceID = presence bit + optional 16-bit region
-             * + 16-bit id, so 17 or 33 bits -- never a flat 32. Same shape as
-             * the two places above that already get this right. */
+            /* IntersectionReferenceID = presence bit + optional 16-bit region +
+             * 16-bit id, so 17 or 33 bits -- never a flat 32. */
             if ((copt >> 3) & 1) { if (sb(&r, 1)) sb(&r, 16); sb(&r, 16); }
             uint32_t sg = ((copt >> 2) & 1) ? sb(&r, 8) : 0xFFFF;
             if ((copt >> 1) & 1) sb(&r, 8);   /* userClass -- easy to miss */
@@ -603,10 +593,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     }
 }
 
-/* DENM cause walk, widths cross-checked against tshark. Only cause 1 is
- * field-confirmed, so callers label unknown codes "warning, code N". */
-/* DENM cause/sub-cause (TS 103 831/CDD, tshark-verified). DenmPayload has NO
- * extension marker -- don't add one; the CHOICE index doubles as the classic cause code. */
+/* DENM cause/sub-cause (TS 103 831/CDD). DenmPayload has NO extension marker --
+ * don't add one; the CHOICE index doubles as the classic cause code. */
 static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
                              its_decoded_t *d)
 {
@@ -626,10 +614,8 @@ static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
     sb(&r, 42); sb(&r, 42);             /* detectionTime, referenceTime */
     if ((mopt >> 4) & 1) sb(&r, 1);     /* termination */
 
-    /* eventPosition: where the hazard IS, which is not where the sender is --
-     * an RSU warns about a jam some way down the road. Same UPER-biased
-     * encoding as CAM's referencePosition. The sentinels (900000001 /
-     * 1800000001 = unavailable) must not become a marker at sea. */
+    /* eventPosition: where the hazard IS, not where the sender is. UPER-biased
+     * like CAM's referencePosition; the unavailable sentinels must be rejected. */
     uint32_t elat = sb(&r, 31), elon = sb(&r, 32);
     if (!r.err && elat != 1800000001u && elon != 3600000001u)
     {
@@ -787,12 +773,8 @@ static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
     if (nbytes > 20 || r.err)
         return false;
 
-    /* VDV R09.16 telegram, 9 bytes, all numbers BCD:
-     *   0: Modus(4)=9 TY(4)      1: ZV(1) ZW(3) TL(4)      2-3: MP(16)
-     *   4: PR(2) HA(2) LN1(4)    5: LN2(4) LN3(4)          6: KN(2 digits)
-     *   7: ZN1(4) ZN2(4)         8: ZN3(4) ZL(4)
-     * Byte 4 was previously required to be 0x00, which silently dropped every
-     * three-digit line and every vehicle signalling priority or a request. */
+    /* VDV R09.16, 9 bytes, numbers in BCD: 0 Modus(4)|TY(4), 1 ZV(1)|ZW(3)|TL(4),
+     * 2-3 MP(16), 4 PR(2)|HA(2)|LN1(4), 5 LN2|LN3, 6 KN, 7 ZN1|ZN2, 8 ZN3|ZL(3). */
     if (nbytes < 9)
         return true;
     uint8_t b[9];
@@ -836,9 +818,8 @@ static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
     if (len < off + 6) return false;
     /* frame[off]   = Ieee1609Dot2Data.protocolVersion (not checked) */
     uint8_t content_tag = frame[off + 1];
-    /* frame[off+2] = hashId (not checked, doesn't affect layout) */
-    /* frame[off+3] = payload choice-tag (not checked, fixed 1 byte either way) */
-    /* frame[off+4] = payload.data.protocolVersion (not checked) */
+    /* frame[off+2..+4] = hashId, payload choice-tag, payload.data.protocolVersion:
+     * unchecked, but each a fixed single byte, so the offsets below still hold. */
     uint8_t inner_tag = frame[off + 5];
     if (content_tag != 0x81 || inner_tag != 0x80)
         return false;
@@ -855,10 +836,9 @@ static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
     return true;
 }
 
-/* Walks the GN/secured/BTP layers exactly like its_decode_frame does, but
- * only far enough to reach a MAPEM body, then decodes its lane geometry.
- * Kept separate so the kilobyte-sized result never lands on the packet
- * path's stack; call it rarely (once per intersection revision). */
+/* Like its_decode_frame, but walks only far enough to reach a MAPEM body and
+ * decode its lane geometry. Separate so the kilobyte-sized result stays off the
+ * packet path's stack; call it rarely (once per intersection revision). */
 bool its_decode_map_geometry(const uint8_t *frame, size_t len, its_map_geom_t *out)
 {
     if (!out) return false;
@@ -979,9 +959,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
         snprintf(label, sizeof(label), "?"); /* not "Common Header follows" */
     }
 
-    /* Built in two bounded steps rather than one "%s %s": the label buffer is
-     * as large as the output, so a single format is provably truncatable and
-     * -Werror=format-truncation rejects it. */
+    /* Two bounded steps, not one "%s %s": the label buffer is as large as the
+     * output, so a single format is truncatable and -Werror rejects it. */
     size_t lo = 0;
     if (station)
     {
@@ -990,10 +969,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     }
     snprintf(out + lo, out_size - lo, "%s", label);
 
-    /* ItsPduHeader.stationId is present for every facility message (not just
-     * CAM), right after protocolVersion+messageId -- read it once here so
-     * both the GN-layer position fallback below and the CAM-specific
-     * position further down can use it as the map marker's tracking key. */
+    /* ItsPduHeader.stationId exists for EVERY facility message, not just CAM;
+     * both position paths below use it as the map marker's tracking key. */
     bool have_sid = pdu_off != SIZE_MAX && pdu_len >= pdu_off + 6;
     uint32_t sid = have_sid ? rd_u32be(frame + pdu_off + 2) : 0;
 
@@ -1004,9 +981,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     if (pdu_off != SIZE_MAX && pdu_len >= pdu_off + 2)
         r->message_id = frame[pdu_off + 1];
 
-    /* SPATEM (messageId 4): decode traffic-light phases. The SPAT message
-     * begins right after the 6-byte ItsPduHeader (protocolVersion+messageId+
-     * stationId), i.e. bit (pdu_off+6)*8; parse_spatem walks it from there. */
+    /* SPATEM (messageId 4): traffic-light phases. Every facility body starts
+     * right after the 6-byte ItsPduHeader, hence bit (pdu_off+6)*8. */
     if (pdu_off != SIZE_MAX && pdu_len >= pdu_off + 6 &&
         frame[pdu_off + 1] == 4)
         parse_spatem(frame, pdu_len, (pdu_off + 6) * 8, &r->spat);

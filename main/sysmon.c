@@ -20,6 +20,8 @@
 #include "stats.h"
 #include "events_log.h"
 #include "tracklog.h"
+#include "inventory.h"
+#include "ptlog.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
 #include "sdlog.h"
@@ -31,13 +33,29 @@ static const char TAG[] = "SYSMON";
 void sysmon_flush_persistent(void)
 {
 #if CONFIG_ENABLE_SD
-    size_t pcap_bytes = sdpcap_flush_now();
-    sdlog_flush_now();
+    /* Twice on purpose: the first call only pays an owed hour-boundary debt,
+     * the second drains what the ring holds for the current hour. */
+    /* The count is bytes that left the RING, not bytes on the card -- ask `ok`. */
+    bool pcap_ok1 = true, pcap_ok2 = true;
+    size_t pcap_bytes = sdpcap_flush_now(&pcap_ok1);
+    pcap_bytes += sdpcap_flush_now(&pcap_ok2);
     tracklog_tick();      /* both drain their queue to the card and return */
     events_tick();
-    if (pcap_bytes)
-        ESP_LOGI(TAG, "flushed %u buffered pcap bytes before restart",
-                 (unsigned)pcap_bytes);
+    /* These three keep state in RAM between their periodic writes; without this
+     * a planned restart loses the running hour, open passages and the sender table. */
+    tstat_flush_now();
+    ptlog_flush_now();
+    inventory_flush_now();
+    /* Either call, not just the second: while a boundary debt is owed, a failed
+     * first call is NOT made good by a successful second one. */
+    if (!pcap_ok1 || !pcap_ok2)
+        ESP_LOGE(TAG, "pcap flush failed -- %u bytes still buffered",
+                 (unsigned)sdpcap_buffered());
+    else if (pcap_bytes)
+        ESP_LOGI(TAG, "flushed %u buffered pcap bytes", (unsigned)pcap_bytes);
+    /* Last, not first: the log ring is RAM-only and the caller restarts or
+     * unmounts, so the failure lines emitted above reach the card only here. */
+    sdlog_flush_now();
 #endif
 }
 
@@ -45,19 +63,22 @@ void sysmon_flush_persistent(void)
  * time and converted to tick counts against this. */
 #define SYSMON_INTERVAL_MS   5000
 
-/* (4) Auto-recovery: if the sniffer is running but its heartbeat hasn't moved
- * for this long, a packet handler (MQTT/web/SD) is wedged -> controlled
- * reboot. Generous vs. the ~100 ms heartbeat cadence to avoid false trips. */
+/* (4) Auto-recovery: sniffer running but heartbeat frozen this long means a
+ * packet handler (MQTT/web/SD) is wedged -> controlled reboot. */
 #define SYSMON_HANG_MS       30000
 
-/* (6) Low-heap guard: reboot if free INTERNAL heap stays under the floor for
- * this long. The floor is far below normal (post-PSRAM-offload the low-water
- * mark is ~85 KiB), so this only fires on a genuine leak/exhaustion. */
+/* (6) Low-heap guard: reboot if free INTERNAL heap stays under the floor this
+ * long. The floor sits far below the normal low-water mark -- only a real leak trips it. */
 #define SYSMON_HEAP_FLOOR    (8 * 1024)
 #define SYSMON_LOWHEAP_MS    60000
 
 /* (5) SD auto-remount retry cadence while the card is not mounted. */
 #define SYSMON_SD_RETRY_MS   30000
+
+/* (7) SD writer stall: lock held this long in one piece, or this many failed
+ * acquisitions, is a wedge -- every other SD user just fails silently. */
+#define SYSMON_SD_HELD_MS    60000
+#define SYSMON_SD_FAILS      40
 
 #define MS_TO_TICKS_COUNT(ms) ((ms) / SYSMON_INTERVAL_MS)
 
@@ -77,6 +98,7 @@ static void sysmon_task(void *arg)
     int hb_stall = 0;      /* consecutive intervals with no heartbeat movement */
     int lowheap = 0;       /* consecutive intervals under the heap floor */
     int sd_wait = 0;       /* intervals since the last SD remount attempt */
+    int sd_stall = 0;      /* consecutive intervals with a wedged SD writer */
 
     for (;;)
     {
@@ -89,6 +111,9 @@ static void sysmon_task(void *arg)
         /* Warning-event log: flush any queued DENM events to SD. */
         events_tick();
         tracklog_tick();
+        /* Sender inventory: load once the card is up, then persist it. */
+        inventory_tick();
+        ptlog_tick();
 
         /* (4) Sniffer pipeline liveness. */
         if (sniffer_is_running())
@@ -129,6 +154,30 @@ static void sysmon_task(void *arg)
         }
 
 #if CONFIG_ENABLE_SD
+        /* (7) SD writer stall detection. Warn first, reboot only if it does not
+         * clear -- a false reboot costs the buffered recording. */
+        if (sdcard_is_mounted())
+        {
+            uint32_t held = sdcard_io_held_ms();
+            uint32_t fails = sdcard_io_fail_streak();
+            if (held > SYSMON_SD_HELD_MS || fails > SYSMON_SD_FAILS)
+            {
+                if (++sd_stall == 1)
+                    ESP_LOGE(TAG, "SD writer stalled (held %lu ms, %lu failed locks)",
+                             (unsigned long)held, (unsigned long)fails);
+                if (sd_stall >= (int)MS_TO_TICKS_COUNT(SYSMON_SD_HELD_MS))
+                    reboot_after("SD writer wedged");
+            }
+            else
+            {
+                sd_stall = 0;
+            }
+        }
+        else
+        {
+            sd_stall = 0;
+        }
+
         /* (5) SD auto-remount: retry every SYSMON_SD_RETRY_MS while unmounted
          * (e.g. the card wasn't ready at boot, or was briefly removed). */
         if (!sdcard_is_mounted() && !sdcard_auto_remount_inhibited())
@@ -146,6 +195,7 @@ static void sysmon_task(void *arg)
         }
 #else
         (void)sd_wait;
+        (void)sd_stall;
 #endif
     }
 }

@@ -28,6 +28,8 @@
 #include "stats.h"
 #include "events_log.h"
 #include "tracklog.h"
+#include "inventory.h"
+#include "ptlog.h"
 #include "spatem.h"
 #include "spi.h"
 #include "spi_eppp.h"
@@ -109,8 +111,7 @@ int cmd_reboot(int argc, char **argv)
     (void)argv;
 
     /* Write the buffered SD sinks first -- esp_restart() is as abrupt for the
-     * card as cutting power. Bounded internally, so a wedged writer cannot
-     * stop the reboot from happening. */
+     * card as cutting power. Bounded internally, so it cannot block the reboot. */
     sysmon_flush_persistent();
     esp_restart();
 
@@ -148,18 +149,16 @@ void app_main(void)
     initialize_spi();
 
 #if CONFIG_ENABLE_SD
-    /* Auto-mount the SD card (shares the SPI bus just initialised above) so the
-     * web interface can browse it. A missing/unformatted card just logs a
-     * warning; the card can be (re)mounted later from the console. */
+    /* Needs the SPI bus initialised just above. A missing or unformatted card
+     * only warns; it can be (re)mounted later from the console. */
     if (sdcard_mount() != ESP_OK)
         ESP_LOGW(TAG, "SD card not mounted at boot");
 #endif
 
     // Make sure MQTT has registered its event handlers before Ethernet goes up
     mqtt_init();
-    /* Same reason: a static-IP config posts APP_ETHERNET_MGMT_INTERFACE_GOT_IP
-     * synchronously from within initialize_ethernet() below, so the mDNS
-     * trigger must be registered before that call, not later in sysmon_init(). */
+    /* Same reason: a static-IP config posts GOT_IP synchronously from inside
+     * initialize_ethernet() below -- too early for sysmon_init(). */
     sysmon_register_events();
 
     /*--- Initialize Network ---*/
@@ -184,6 +183,8 @@ void app_main(void)
     tstat_init();
     events_init();
     tracklog_init();
+    inventory_init();
+    ptlog_init();
     spatem_init();
 
 #ifdef CONFIG_ENABLE_TEMPERATURE
@@ -205,10 +206,8 @@ void app_main(void)
 
     sniffer_autostart();
 
-    /* Supervisory monitor task (watchdog auto-recovery, SD auto-remount,
-     * low-heap guard). Its mDNS event handler was already registered above
-     * via sysmon_register_events(); started last here since the task itself
-     * has no boot-order sensitivity. */
+    /* Supervisory monitor task (watchdog recovery, SD remount, low-heap guard).
+     * Only the task starts here; its event handlers are registered above. */
     sysmon_init();
 
     // start console REPL

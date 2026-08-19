@@ -9,7 +9,6 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <dirent.h>
 
 #include "freertos/FreeRTOS.h"
@@ -32,28 +31,27 @@ static const char TAG[] = "SDPCAP";
 
 #define PCAP_DIR CONFIG_SNIFFER_MOUNT_POINT "/pcap"
 
-/* Finer than any real flush-interval setting (min 8s) so the size/time/
- * hour-boundary checks fire promptly; a poll tick itself is just a few
- * integer compares, SD is only touched when a check actually trips. */
+/* Finer than the minimum flush interval so size/time/boundary checks fire
+ * promptly; a tick is a few compares, SD is touched only when one trips. */
 #define TASK_POLL_MS       1000
 #define PRUNE_INTERVAL_MS  60000  /* retention sweep cadence, independent of flush cadence */
 
 #define PCAP_BUF_MB_MIN    1
 #define PCAP_BUF_MB_MAX    4
-/* How long the on-demand flush waits for the SD lock before giving up. Long
- * enough to outlast a normal in-flight flush, short enough that a wedged
+/* Long enough to outlast a normal in-flight flush, short enough that a wedged
  * writer cannot stall a restart. */
 #define SDPCAP_FLUSH_LOCK_MS 3000
+/* Per hourly file, and effectively the walk's whole budget: first timeout ends
+ * it. Below the writer's worst hold on purpose -- callers report PARTIAL. */
+#define SDPCAP_WALK_LOCK_MS 10000
 
 #define PCAP_FLUSH_SEC_MIN 8
 #define PCAP_FLUSH_SEC_MAX 3600
 
 #define PCAP_MAX_FRAME 2048  /* generous max realistic 802.11 frame size */
 
-/* pcap on-disk record layout, mirrors what the vendored pcap library
- * (managed_components/espressif__pcap) writes -- built directly here
- * instead of calling into that library per record (see the ring buffer
- * below), so this struct is the single source of truth for both paths. */
+/* Mirrors what the vendored espressif__pcap library writes; records are built
+ * here directly for the bulk ring flush, so both layouts must stay in sync. */
 typedef struct { uint32_t magic; uint16_t vmaj, vmin; int32_t tz; uint32_t sig, snap, net; } pcap_global_hdr_t;
 typedef struct { uint32_t sec, usec, caplen, len; } pcap_rec_hdr_t;
 
@@ -61,8 +59,8 @@ typedef struct { uint32_t sec, usec, caplen, len; } pcap_rec_hdr_t;
 /*  PSRAM ring buffer                                                  */
 /* ================================================================== */
 
-/* Ring of formatted pcap records, flushed in bulk -- few large SD writes
- * instead of many small ones on the bus shared with Ethernet. */
+/* Ring of formatted pcap records, flushed in bulk -- few large SD writes instead
+ * of many small ones on the bus shared with Ethernet. */
 typedef struct {
     uint8_t *buf;
     size_t   size;
@@ -70,6 +68,7 @@ typedef struct {
     size_t   tail;    /* read index  */
     size_t   used;
     SemaphoreHandle_t lock;
+    uint32_t gen;   /* bumped by ring_clear; see ring_discard */
 } pcap_ring_t;
 
 static pcap_ring_t s_ring;
@@ -85,9 +84,8 @@ static bool ring_init(pcap_ring_t *r, size_t size)
     return r->lock != NULL;
 }
 
-/* Drops the whole record (never a partial write) if it doesn't fit or the
- * lock is contended past `wait` -- a torn record would be undetectable to
- * the reader. */
+/* Drops the whole record (never a partial write) if it doesn't fit or the lock
+ * is contended past `wait` -- a torn record is undetectable to the reader. */
 static bool ring_append(pcap_ring_t *r, const void *data, size_t len, TickType_t wait)
 {
     if (len == 0 || len > r->size)
@@ -110,22 +108,38 @@ static bool ring_append(pcap_ring_t *r, const void *data, size_t len, TickType_t
     return true;
 }
 
-/* Copies out up to max bytes (not necessarily a whole number of records --
- * the caller only cares that this matches what it then fwrites). */
-static size_t ring_drain(pcap_ring_t *r, uint8_t *out, size_t max)
+/* Copies out up to max bytes WITHOUT consuming them; split from the consume
+ * step so a failed write leaves the data in the ring for the next attempt. */
+static size_t ring_peek(pcap_ring_t *r, uint8_t *out, size_t max, uint32_t *gen)
 {
     if (xSemaphoreTake(r->lock, portMAX_DELAY) != pdTRUE)
         return 0;
+    if (gen)
+        *gen = r->gen;
     size_t n = r->used < max ? r->used : max;
     size_t first = r->size - r->tail;
     if (first > n) first = n;
     memcpy(out, r->buf + r->tail, first);
     if (n > first)
         memcpy(out + first, r->buf, n - first);
-    r->tail = (r->tail + n) % r->size;
-    r->used -= n;
     xSemaphoreGive(r->lock);
     return n;
+}
+
+/* Drops the n bytes a successful write took. ring_clear() runs OUTSIDE the SD
+ * lock, so the generation -- not the lock -- is what makes this safe. */
+static void ring_discard(pcap_ring_t *r, size_t n, uint32_t gen)
+{
+    if (n == 0 || xSemaphoreTake(r->lock, portMAX_DELAY) != pdTRUE)
+        return;
+    /* Cleared since the peek? Then these bytes are already gone; subtracting
+     * them would wrap `used` and leave the ring permanently "full". */
+    if (r->gen == gen && n <= r->used)
+    {
+        r->tail = (r->tail + n) % r->size;
+        r->used -= n;
+    }
+    xSemaphoreGive(r->lock);
 }
 
 /* Unlocked; a size-threshold heuristic only, so a stale read just means the
@@ -135,11 +149,14 @@ static size_t ring_used(const pcap_ring_t *r)
     return r->used;
 }
 
+/* Bumps the generation so a discard from a peek taken before the clear does
+ * nothing -- otherwise `used -= n` underflows and the ring reads as always full. */
 static void ring_clear(pcap_ring_t *r)
 {
     if (xSemaphoreTake(r->lock, portMAX_DELAY) != pdTRUE)
         return;
     r->head = r->tail = r->used = 0;
+    r->gen++;
     xSemaphoreGive(r->lock);
 }
 
@@ -150,10 +167,32 @@ static void ring_clear(pcap_ring_t *r)
 static volatile bool s_ready;
 static volatile bool cfg_enabled;
 static volatile uint32_t cfg_retain_hours;
+/* Hour bucket the buffered data belongs to (0 = not established yet). File scope
+ * so flush_now writes the same file as the writer task; the clock would not. */
+static volatile time_t s_ring_bucket;
+/* Bytes owed to the PREVIOUS hour's file -- the oldest in the ring, which drains
+ * from the tail. SD lock guards it; the disable branch only ever zeroes it. */
+static volatile size_t s_stale_left;
+
+/* Steps ONE hour at a time, not straight to `now`: what is still in the ring was
+ * captured just after the boundary, so it belongs to the next hour, not later. */
+static void bucket_advance(time_t now_bucket)
+{
+    /* 0 is the "not established" sentinel, not a steppable hour -- otherwise the
+     * one-hour-per-tick rule would crawl up from 1970 after every enable. */
+    if (s_ring_bucket == 0 || ring_used(&s_ring) == 0 ||
+        now_bucket <= s_ring_bucket + 3600)
+        s_ring_bucket = now_bucket;
+    else
+        s_ring_bucket += 3600;
+}
 static volatile uint32_t cfg_max_mb;
 static volatile uint32_t cfg_flush_sec;
 static volatile uint8_t  cfg_filter;
 static uint32_t s_dropped;
+/* Running average of one ring record; the boundary-drop path turns lost bytes
+ * back into a frame count. volatile: written and read from different tasks. */
+static volatile uint32_t s_avg_rec = 300;
 
 /* Buffer size itself is read once at boot in sdpcap_init, not here --
  * the PSRAM block backing it is allocated exactly once. */
@@ -184,24 +223,21 @@ static void config_event_handler(void *arg, esp_event_base_t base, int32_t id, v
         reload_config();
 }
 
-/* Thinning filter: one traffic light is ~85% of the recording (the same SPATEM
- * 10x/s). 0 = keep all, 1 = infra chatter to 1/s per type, 2 = vehicles+warnings only. */
+/* Thinning filter: repetitive infrastructure messages dominate the recording.
+ * 0 = keep all, 1 = infra chatter to 1/s per type, 2 = vehicles+warnings only. */
 static uint32_t s_filtered;
 static uint32_t s_last_kept[256];   /* last second kept, per messageId */
 
 static bool pcap_keep_frame(const uint8_t *frame, size_t len, uint32_t sec)
 {
-    /* Reads the cached value, never NVS: this runs on the receive path for
-     * every frame, about thirty times a second. */
+    /* Cached value, never NVS: this runs on the receive path for every frame. */
     uint8_t mode = cfg_filter;
     if (mode == 0)
         return true;
 
     uint8_t mid = its_peek_message_id(frame, len);
-    /* Only SPATEM (4) and MAPEM (5) are the repetitive infrastructure ones;
-     * anything else -- vehicles, warnings, message types we do not yet know
-     * -- is always kept. Being wrong here means silently losing data, so the
-     * filter names what it drops rather than what it keeps. */
+    /* Only SPATEM (4) and MAPEM (5) are the repetitive infrastructure ones; the
+     * filter names what it drops, so unknown types are kept, never lost. */
     bool infra = (mid == 4 || mid == 5);
     if (!infra)
         return true;
@@ -226,12 +262,9 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet)
         return;
     }
 
-    /* packet->seconds/.microseconds are a radio/PHY counter, not wall-clock
-     * epoch time -- gettimeofday() instead (correct once NTP has synced). */
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-
-    if (!pcap_keep_frame(packet->payload, packet->length, (uint32_t)tv.tv_sec))
+    /* Timestamp comes from the sniffer callback: this runs after the queue, so
+     * asking the clock here would stamp the dequeue, not the reception. */
+    if (!pcap_keep_frame(packet->payload, packet->length, packet->seconds))
     {
         s_filtered++;
         return;
@@ -239,15 +272,19 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet)
 
     static EXT_RAM_BSS_ATTR uint8_t rec[sizeof(pcap_rec_hdr_t) + PCAP_MAX_FRAME];
     pcap_rec_hdr_t hdr = {
-        .sec = (uint32_t)tv.tv_sec,
-        .usec = (uint32_t)tv.tv_usec,
+        .sec = packet->seconds,
+        .usec = packet->microseconds,
         .caplen = packet->length,
         .len = packet->length,
     };
     memcpy(rec, &hdr, sizeof(hdr));
     memcpy(rec + sizeof(hdr), packet->payload, packet->length);
 
-    if (!ring_append(&s_ring, rec, sizeof(hdr) + packet->length, 0))
+    size_t reclen = sizeof(hdr) + packet->length;
+    /* Sliding average (1/16), so it tracks the traffic mix without a counter
+     * that could overflow over weeks of uptime. */
+    s_avg_rec = (s_avg_rec * 15u + (uint32_t)reclen) / 16u;
+    if (!ring_append(&s_ring, rec, reclen, 0))
         s_dropped++;
 }
 
@@ -255,10 +292,8 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet)
 /*  Writer task                                                       */
 /* ================================================================== */
 
-/* Filename uses local time (so a human can find "the file from around
- * 5pm"); bucket rounding stays correct regardless, since only the label
- * changes. DST fall-back can merge two real hours into one filename once a
- * year -- harmless, just a naming quirk. */
+/* Local-time name so a human can find "the file from around 5pm". Do NOT switch
+ * to UTC: it would orphan every file already on the card (DST clash accepted). */
 static void sdpcap_current_path(char *out, size_t out_size, time_t now)
 {
     time_t bucket = now - (now % 3600);
@@ -269,23 +304,19 @@ static void sdpcap_current_path(char *out, size_t out_size, time_t now)
     snprintf(out, out_size, "%s/%s", PCAP_DIR, name);
 }
 
-/* Does this look like a real record header for a file covering `hour`?
- * The timestamp check is what makes resynchronisation reliable: random frame
- * bytes almost never form a plausible second inside this one hour. */
+/* Does this look like a real record header for a file covering `hour`? The
+ * timestamp test is what makes resync reliable: garbage rarely fits the hour. */
 static bool pcap_rec_plausible(const pcap_rec_hdr_t *rh, uint32_t hour, size_t maxcap)
 {
-    /* +5 s slack past the hour: the writer stamps records at enqueue time and
-     * flushes in batches, so the last records of an hour can legitimately sit
-     * just past the boundary -- the real 18:00 file ends on a record at
-     * exactly 19:00:00, which a strict bound rejected and dropped. */
+    /* +5 s slack past the hour: records are stamped at enqueue and flushed in
+     * batches, so an hour's last records legitimately sit past the boundary. */
     return rh->caplen >= 24 && rh->caplen <= maxcap &&
            rh->len >= rh->caplen && rh->len <= maxcap &&
            rh->usec < 1000000u &&
            rh->sec >= hour && rh->sec < hour + 3605u;
 }
 
-/* Resync scan over in-memory 2 KB chunks (per-byte fseek+fread was up to 262k
- * SD accesses on a damaged file); bounded either way. */
+/* Resync scans in-memory 2 KB chunks; per-byte fseek+fread thrashed the card. */
 #define PCAP_RESYNC_MAX 262144   /* 256 KB of garbage before giving up */
 
 static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxcap)
@@ -295,9 +326,8 @@ static bool pcap_resync(FILE *f, pcap_rec_hdr_t *rh, uint32_t hour, size_t maxca
         return false;
     pos -= (long)sizeof(*rh);   /* back to the header that failed */
 
-    /* Static: this runs on the httpd task; the chunk plus header overlap
-     * would be an unnecessary 2 KB of its stack. Only one playback request
-     * runs at a time in practice, and a second would merely rescan. */
+    /* Static: runs on the httpd task, whose stack cannot spare 2 KB. A second
+     * concurrent request would merely rescan, so sharing it is harmless. */
     static uint8_t chunk[2048 + sizeof(pcap_rec_hdr_t)];
 
     long scanned = 0;
@@ -338,11 +368,16 @@ static bool sdpcap_walk(uint32_t from_sec, uint32_t to_sec,
     time_t bucket = (time_t)from_sec - ((time_t)from_sec % 3600);
     for (; bucket <= (time_t)to_sec && !aborted; bucket += 3600)
     {
-        /* Writer lock held per hour file, not across the whole walk: a long
-         * range reads hundreds of MB, and keeping the writers out that long
-         * would overflow the PCAP ring. Between files they get to flush. */
-        if (!sdcard_io_begin_timeout(2000))
+        /* Writer lock held per hour file, not across the whole walk: keeping the
+         * writers out for a long range would overflow the ring. */
+        /* Giving a mutex does not preempt for a LOWER-priority waiter -- without
+         * this yield the httpd walk re-takes the lock before the writer runs. */
+        vTaskDelay(1);
+        if (!sdcard_io_begin_timeout(SDPCAP_WALK_LOCK_MS))
             return false;   /* couldn't read the rest -- caller must not claim it did */
+        /* One hourly file can be hundreds of MB; reading it is slow BY DESIGN
+         * and must not look like a wedged writer to the stall watchdog. */
+        sdcard_io_long_begin();
 
         char path[96];
         sdpcap_current_path(path, sizeof(path), bucket);
@@ -350,6 +385,7 @@ static bool sdpcap_walk(uint32_t from_sec, uint32_t to_sec,
         FILE *f = fopen(path, "rb");
         if (!f)
         {
+            sdcard_io_long_end();
             sdcard_io_end();
             continue;  /* no capture stored for this hour -- fine, just skip it */
         }
@@ -358,6 +394,7 @@ static bool sdpcap_walk(uint32_t from_sec, uint32_t to_sec,
         if (fread(&gh, sizeof(gh), 1, f) != 1 || gh.magic != 0xa1b2c3d4)
         {
             fclose(f);
+            sdcard_io_long_end();
             sdcard_io_end();
             continue;
         }
@@ -392,10 +429,14 @@ static bool sdpcap_walk(uint32_t from_sec, uint32_t to_sec,
             }
         }
         fclose(f);
+        sdcard_io_long_end();
         sdcard_io_end();
     }
     return true;
 }
+
+uint32_t sdpcap_dropped(void)  { return s_dropped; }
+uint32_t sdpcap_filtered(void) { return s_filtered; }
 
 bool sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
@@ -407,13 +448,15 @@ bool sdpcap_read_frames(uint32_t from_sec, uint32_t to_sec, sdpcap_frame_cb_t cb
     return sdpcap_walk(from_sec, to_sec, NULL, cb, ctx);
 }
 
-/* Flushes the ring to `path` in 4 KB chunks. `limit` caps the drain (0 = all):
- * at an hour boundary, records arriving DURING the flush belong to the new hour's file. */
-static void sdpcap_flush_to(const char *path, size_t limit)
+/* `limit` caps the drain (0 = all), so records arriving mid-flush stay for the
+ * next hour. Return = "reached the card", *consumed = "left the ring": differ. */
+static bool sdpcap_flush_to(const char *path, size_t limit, size_t *consumed)
 {
+    if (consumed)
+        *consumed = 0;
     FILE *f = fopen(path, "ab");
     if (!f)
-        return;
+        return false;
 
     struct stat st;
     bool need_header = (stat(path, &st) != 0 || st.st_size == 0);
@@ -428,47 +471,107 @@ static void sdpcap_flush_to(const char *path, size_t limit)
     if (pcap_new_session(&cfg, &h) != ESP_OK)
     {
         fclose(f);  /* session was never created, so it never took ownership of f */
-        return;
+        return false;
     }
     if (need_header && pcap_write_header(h, PCAP_LINK_TYPE_802_11) != ESP_OK)
     {
         pcap_del_session(h);
-        return;
+        return false;
     }
 
     static EXT_RAM_BSS_ATTR uint8_t chunk[4096];
-    size_t n;
+    size_t written = 0, n;
+    bool failed = false;
     size_t remaining = limit ? limit : (size_t)-1;
     while (remaining > 0)
     {
         size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
-        n = ring_drain(&s_ring, chunk, want);
+        uint32_t gen;
+        n = ring_peek(&s_ring, chunk, want, &gen);
         if (n == 0)
             break;
-        if (fwrite(chunk, 1, n, f) != n)
-            break;  /* card struggling/removed: stop hammering it, retry next flush */
-        remaining -= n;
+        size_t put = fwrite(chunk, 1, n, f);
+        /* Discard exactly what LANDED: keeping the whole chunk would duplicate
+         * bytes already on the card, dropping it would lose the rest. */
+        ring_discard(&s_ring, put, gen);
+        remaining -= put;
+        written += put;
+        if (put != n)
+        {
+            failed = true;   /* card struggling/removed: stop hammering it */
+            break;
+        }
     }
-    pcap_del_session(h);  /* closes f (implicit fflush via fclose) */
+    /* A full card only surfaces when the stdio buffer is pushed out, and
+     * pcap_del_session() drops the fclose result -- so fflush here or never. */
+    if (fflush(f) != 0 || ferror(f))
+        failed = true;
+    pcap_del_session(h);  /* closes f */
+    /* Reported even on failure: those bytes are gone from the ring either way,
+     * so a caller tracking a debt must subtract them. */
+    if (consumed)
+        *consumed = written;
+    return !failed;
 }
 
-size_t sdpcap_flush_now(void)
+uint32_t sdpcap_flush_sec(void)
 {
+    return cfg_flush_sec;
+}
+
+size_t sdpcap_buffered(void)
+{
+    return s_ready ? ring_used(&s_ring) : 0;
+}
+
+size_t sdpcap_flush_now(bool *ok)
+{
+    if (ok)
+        *ok = true;              /* nothing buffered is a successful no-op */
     if (!s_ready)
         return 0;
     /* Bounded: this runs on the restart/power-off path, which must not hang
      * if a writer is stuck holding the lock. */
     if (!sdcard_io_begin_timeout(SDPCAP_FLUSH_LOCK_MS))
+    {
+        if (ok && ring_used(&s_ring) > 0)
+            *ok = false;         /* buffered data we could not get to the card */
         return 0;
+    }
 
     size_t pending = ring_used(&s_ring);
     if (pending > 0)
     {
-        time_t now = time(NULL);
+        time_t bucket = s_ring_bucket;
+        if (bucket == 0)
+        {
+            time_t now = time(NULL);
+            bucket = now - (now % 3600);
+        }
         char path[96];
-        sdpcap_current_path(path, sizeof(path), now);
+        sdpcap_current_path(path, sizeof(path), bucket);
         mkdir(PCAP_DIR, 0777);   /* the periodic task may not have run yet */
-        sdpcap_flush_to(path, pending);
+        /* While a boundary flush is owed, the oldest bytes belong to the frozen
+         * bucket and the rest to the current hour -- pay only the debt here. */
+        if (s_stale_left > 0 && s_stale_left < pending)
+            pending = s_stale_left;
+        size_t consumed = 0;
+        bool done = sdpcap_flush_to(path, pending, &consumed);
+        bool was_stale = s_stale_left > 0;
+        if (was_stale)
+            s_stale_left -= consumed < s_stale_left ? consumed : s_stale_left;
+        /* Only "did the write land", NOT "is the ring empty": the sniffer appends
+         * continuously, so every export would otherwise be stamped incomplete. */
+        if (ok)
+            *ok = done;
+        /* Must move the bucket too, or the writer's next tick takes a fresh
+         * boundary snapshot against the old hour and re-attributes the ring. */
+        if (was_stale && s_stale_left == 0)
+        {
+            time_t t = time(NULL);
+            bucket_advance(t - (t % 3600));
+        }
+        pending = consumed;      /* bytes that actually left the ring */
     }
     sdcard_io_end();
     return pending;
@@ -483,7 +586,10 @@ static void sdpcap_prune(void)
     const char *current_name = strrchr(current, '/');
     current_name = current_name ? current_name + 1 : current;
 
+    /* Files are named for the START of their hour, so round the cutoff down --
+     * a mid-hour cutoff deletes the file that still holds wanted minutes. */
     time_t cutoff = time(NULL) - (time_t)cfg_retain_hours * 3600;
+    cutoff -= cutoff % 3600;
     struct tm tm_cutoff;
     localtime_r(&cutoff, &tm_cutoff);  /* must match sdpcap_current_path's local-time naming */
     char cutoff_name[32];
@@ -521,9 +627,8 @@ static void sdpcap_prune(void)
     if (total <= budget)
         return;
 
-    /* Pass 2: still over budget -- delete oldest-first, re-scanning each
-     * round since directory order isn't sorted. O(n^2) but only runs when
-     * over budget, on at most a few hundred files. */
+    /* Pass 2: delete oldest-first, re-scanning each round since directory order
+     * isn't sorted. O(n^2), but only runs while over budget. */
     while (total > budget)
     {
         dir = opendir(PCAP_DIR);
@@ -558,14 +663,30 @@ static void sdpcap_task(void *arg)
     bool dir_ok = false;
     uint32_t prune_elapsed_ms = 0;
     uint32_t since_flush_ms = 0;
-    time_t current_bucket = 0;   /* hour bucket the ring's buffered data belongs to, 0 = not yet established */
+    uint32_t stale_tries = 0;
+#define STALE_MAX_TRIES 60   /* ~1 min at TASK_POLL_MS, then cut the losses */
 
     while (1)
     {
         vTaskDelay(pdMS_TO_TICKS(TASK_POLL_MS));
 
-        /* Held across the whole flush/prune below: an unmount or format
-         * landing mid-fwrite would free the filesystem this task is using. */
+        /* The SD lock below is held across the whole flush/prune: an unmount or
+         * format landing mid-fwrite would free the filesystem this task uses. */
+        /* Must stay BEFORE that lock -- nothing here touches the card, and with
+         * the card gone a disable would otherwise never clear ring or bucket. */
+        if (!cfg_enabled)
+        {
+            /* Mid-run disable drops whatever's buffered rather than flushing
+             * it later under a stale bucket. */
+            ring_clear(&s_ring);
+            s_ring_bucket = 0;
+            s_stale_left = 0;    /* nothing is owed to a bucket that is gone */
+            stale_tries = 0;
+            since_flush_ms = 0;
+            dir_ok = false;      /* re-create the directory when it comes back */
+            continue;
+        }
+
         if (!sdcard_io_begin())
         {
             dir_ok = false;
@@ -577,37 +698,57 @@ static void sdpcap_task(void *arg)
             dir_ok = true;
         }
 
-        if (!cfg_enabled)
-        {
-            /* Mid-run disable drops whatever's buffered rather than
-             * flushing it later with a stale timestamp bucket. */
-            ring_clear(&s_ring);
-            current_bucket = 0;
-            since_flush_ms = 0;
-            sdcard_io_end();
-            continue;
-        }
-
         time_t now = time(NULL);
         time_t bucket_now = now - (now % 3600);
 
         /* Hour boundary: flush to the OLD bucket first so every record lands in the
          * file matching its own hour (playback's bucket lookup relies on it). */
-        if (current_bucket != 0 && bucket_now != current_bucket)
+        /* ONE-SHOT via s_stale_left == 0, or it re-fires every tick and stalls the
+         * flush; s_ring_bucket != 0 keeps it from firing on the NTP step. */
+        if (s_ring_bucket != 0 && bucket_now != s_ring_bucket && s_stale_left == 0)
         {
-            size_t pending = ring_used(&s_ring);
-            if (pending > 0)
-            {
-                char old_path[96];
-                sdpcap_current_path(old_path, sizeof(old_path), current_bucket);
-                /* Capped at what is buffered RIGHT NOW: anything the sniffer
-                 * appends while this write runs already belongs to the new
-                 * hour and is left for the next flush. */
-                sdpcap_flush_to(old_path, pending);
-            }
+            /* Buffered now = the old hour. Do NOT re-add a "starved too long, drop
+             * the ring" guard -- ring_append rejects when full, never overwrites. */
+            s_stale_left = ring_used(&s_ring);
+            stale_tries = 0;
             since_flush_ms = 0;
         }
-        current_bucket = bucket_now;
+        /* Clamp BEFORE the test: flush_now drains the same ring, so the debt can
+         * outlive its bytes -- and limit 0 means UNLIMITED, not "nothing". */
+        {
+            size_t have = ring_used(&s_ring);
+            if (s_stale_left > have)
+                s_stale_left = have;
+        }
+        if (s_stale_left > 0)
+        {
+            char old_path[96];
+            sdpcap_current_path(old_path, sizeof(old_path), s_ring_bucket);
+            size_t put = 0;
+            bool landed = sdpcap_flush_to(old_path, s_stale_left, &put);
+            s_stale_left -= put < s_stale_left ? put : s_stale_left;
+            /* Debt paid yet the write failed (typically a full card): nothing is
+             * left to retry, so this is the one loss that would go unreported. */
+            if (!landed && s_stale_left == 0)
+                ESP_LOGW(TAG, "hour boundary: %u bytes left the ring but %s reports a failed write",
+                         (unsigned)put, old_path);
+            if (s_stale_left > 0 && ++stale_tries >= STALE_MAX_TRIES)
+            {
+                /* Drop rather than prepend to the NEXT hour's file: a stale block
+                 * outgrows PCAP_RESYNC_MAX and would cost that whole hour. */
+                ESP_LOGE(TAG, "hour boundary: dropping %u buffered bytes that never reached %s",
+                         (unsigned)s_stale_left, old_path);
+                /* Largest loss this module can take, so it belongs in the /system
+                 * losses counter; bytes converted via the measured record size. */
+                s_dropped += (uint32_t)(s_stale_left / s_avg_rec) + 1u;
+                /* Under the SD lock and with no peek outstanding, so the
+                 * generation cannot have moved -- read it and pass it on. */
+                ring_discard(&s_ring, s_stale_left, s_ring.gen);
+                s_stale_left = 0;
+            }
+        }
+        if (s_stale_left == 0)
+            bucket_advance(bucket_now);
 
         since_flush_ms += TASK_POLL_MS;
 
@@ -615,19 +756,34 @@ static void sdpcap_task(void *arg)
         bool due_to_size = ring_used(&s_ring) >= buf_threshold;
         bool due_to_time = since_flush_ms >= cfg_flush_sec * 1000UL;
 
-        if (ring_used(&s_ring) > 0 && (due_to_size || due_to_time))
+        /* Not while the previous hour is owed: the ring drains from the tail, so
+         * those same bytes would land in the current hour's file. */
+        size_t due_now = ring_used(&s_ring);
+        if (s_stale_left == 0 && due_now > 0 && (due_to_size || due_to_time))
         {
             char path[96];
-            sdpcap_current_path(path, sizeof(path), now);
-            sdpcap_flush_to(path, 0);   /* mid-hour: everything belongs here */
+            /* The bucket, not the clock -- where they disagree the bucket wins. */
+            sdpcap_current_path(path, sizeof(path), s_ring_bucket);
+            /* Capped at what is buffered RIGHT NOW: with limit 0 the drain also
+             * swallows records appended during it, into the wrong hour's file. */
+            size_t put = 0;
+            if (!sdpcap_flush_to(path, due_now, &put))
+                ESP_LOGW(TAG, "mid-hour flush failed after %u of %u bytes",
+                         (unsigned)put, (unsigned)due_now);
             since_flush_ms = 0;
         }
 
         prune_elapsed_ms += TASK_POLL_MS;
-        if (prune_elapsed_ms >= PRUNE_INTERVAL_MS)
+        /* Same reader interlock as tracklog/stats: an unlink mid-stream truncates
+         * a /sdcard download. Does NOT cover sdpcap_walk (writer lock instead). */
+        if (prune_elapsed_ms >= PRUNE_INTERVAL_MS && sdcard_read_active() == 0)
         {
             prune_elapsed_ms = 0;
+            /* A full-window sweep can run for minutes, and the stall watchdog
+             * would read that as a wedged writer and REBOOT. */
+            sdcard_io_long_begin();
             sdpcap_prune();
+            sdcard_io_long_end();
         }
         sdcard_io_end();
     }
@@ -667,7 +823,12 @@ void sdpcap_init(void)
 
 void sdpcap_init(void) {}
 void sdpcap_handle_packet(sniffer_packet_info_t *packet) { (void)packet; }
-size_t sdpcap_flush_now(void) { return 0; }
+size_t sdpcap_buffered(void) { return 0; }
+uint32_t sdpcap_flush_sec(void) { return 0; }
+size_t sdpcap_flush_now(bool *ok) { if (ok) *ok = true; return 0; }
+uint32_t sdpcap_dropped(void)  { return 0; }
+uint32_t sdpcap_filtered(void) { return 0; }
+
 bool sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx)
 {
     (void)from_sec; (void)to_sec; (void)cb; (void)ctx;

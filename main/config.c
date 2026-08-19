@@ -60,7 +60,6 @@ static esp_err_t config_get_broadcast_only(uint8_t *broadcast_only);
 static esp_err_t config_get_led_brightness(uint8_t *led_brightness);
 static esp_err_t config_get_led_override_color(uint32_t *led_override_color);
 static esp_err_t config_get_log_sys(uint8_t *out);
-static esp_err_t config_get_log_frames(uint8_t *out);
 static esp_err_t config_get_log_max_mb(uint32_t *out);
 static esp_err_t config_get_refresh_sec(uint32_t *out);
 static esp_err_t config_get_ntp_server(char *out, size_t *size);
@@ -91,12 +90,10 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_BROADCAST_ONLY]     = { "broadcastonly", NVS_TYPE_U8,  0,                           config_get_broadcast_only,     NULL },
     [CONFIG_INDEX_LED_BRIGHTNESS]     = { "ledbrightness", NVS_TYPE_U8,  0,                           config_get_led_brightness,     NULL },
     [CONFIG_INDEX_LED_OVERRIDE_COLOR] = { "ledoverride",   NVS_TYPE_U32, 0,                           config_get_led_override_color, NULL },
-    /* buffer_size doubles as the max accepted RAW password length (65) --
-     * the actual NVS value is always a fixed 64-char hash, see
-     * config_set_web_password. */
+    /* buffer_size doubles as the max accepted RAW password length; the stored
+     * value is always a fixed 64-char hash (see config_set_web_password). */
     [CONFIG_INDEX_WEB_PASSWORD]       = { "webpasswd",     NVS_TYPE_STR, CONFIG_WEB_PASSWORD_BUFFER_SIZE, NULL,      config_set_web_password },
     [CONFIG_INDEX_LOG_SYS]            = { "logsys",        NVS_TYPE_U8,  0,                           config_get_log_sys,            NULL },
-    [CONFIG_INDEX_LOG_FRAMES]         = { "logframes",     NVS_TYPE_U8,  0,                           config_get_log_frames,         NULL },
     [CONFIG_INDEX_LOG_MAX_MB]         = { "logmaxmb",      NVS_TYPE_U32, 0,                           config_get_log_max_mb,         NULL },
     [CONFIG_INDEX_REFRESH_SEC]        = { "refreshsec",    NVS_TYPE_U32, 0,                           config_get_refresh_sec,        NULL },
     [CONFIG_INDEX_NTP_SERVER]         = { "ntpserver",     NVS_TYPE_STR, CONFIG_NTP_SERVER_BUFFER_SIZE, config_get_ntp_server,        NULL },
@@ -310,19 +307,6 @@ static esp_err_t config_get_log_sys(uint8_t *out_val)
     return ESP_OK;
 }
 
-static esp_err_t config_get_log_frames(uint8_t *out_val)
-{
-    uint8_t out;
-    esp_err_t res = nvs_get_u8(handle, "logframes", &out);
-    if (res != ESP_OK)
-    {
-        if (res != ESP_ERR_NVS_NOT_FOUND)
-            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
-        out = 0;  /* default: off */
-    }
-    *out_val = !!out;
-    return ESP_OK;
-}
 
 static esp_err_t config_get_log_max_mb(uint32_t *out_val)
 {
@@ -336,6 +320,10 @@ static esp_err_t config_get_log_max_mb(uint32_t *out_val)
     }
     if (out == 0)
         out = 50;
+    /* Clamp DOWN to what sdlog enforces and the form offers: a larger stored
+     * value would be shown, sent back unchanged and rejected on every save. */
+    if (out > 512)
+        out = 512;
     *out_val = out;
     return ESP_OK;
 }
@@ -540,10 +528,8 @@ static esp_err_t config_get_event_retain_days(uint32_t *out_val)
     return ESP_OK;
 }
 
-/* Salted with the device's own MAC (no extra NVS storage needed) so a
- * leaked hash can't be checked against a generic rainbow table. Public via
- * config.h so webserver.c's auth check can hash an attempted password the
- * identical way. */
+/* Salted with the device's own MAC so a leaked hash is useless against a
+ * generic rainbow table. Public so webserver.c can hash attempts identically. */
 void config_hash_web_password(const char *raw, char out_hex[65])
 {
     uint8_t mac[6];
@@ -568,10 +554,8 @@ void config_hash_web_password(const char *raw, char out_hex[65])
     out_hex[64] = '\0';
 }
 
-/* Custom setter (not the generic nvs_set_str passthrough) so every caller --
- * the web UI and the `config_set webpasswd` console command alike -- stores
- * a hash, never the raw password. Empty stays empty (disables protection,
- * check_update_auth's existing sentinel). */
+/* Custom setter, not the generic nvs_set_str passthrough, so every caller stores
+ * a hash and never the raw password. Empty stays empty and disables protection. */
 static esp_err_t config_set_web_password(const char *value)
 {
     if (value[0] == '\0')
@@ -598,6 +582,15 @@ esp_err_t config_get_u8(config_index_t index, uint8_t *out)
         return nvs_get_u8(handle, key->name, out);
 }
 
+/* Currently a no-op in the IDF, but the API contract makes a write durable only
+ * once committed -- do not drop it, a write cache may land at any time. */
+static void config_commit(void)
+{
+    esp_err_t err = nvs_commit(handle);
+    if (err != ESP_OK)
+        ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+}
+
 esp_err_t config_set_u8(config_index_t index, uint8_t value)
 {
     const config_key_t *key = &config_keys[index];
@@ -616,6 +609,7 @@ esp_err_t config_set_u8(config_index_t index, uint8_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -658,6 +652,7 @@ esp_err_t config_set_u16(config_index_t index, uint16_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -700,6 +695,7 @@ esp_err_t config_set_u32(config_index_t index, uint32_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -742,6 +738,7 @@ esp_err_t config_set_u64(config_index_t index, uint64_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -784,6 +781,7 @@ esp_err_t config_set_i8(config_index_t index, int8_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -826,6 +824,7 @@ esp_err_t config_set_i16(config_index_t index, int16_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -868,6 +867,7 @@ esp_err_t config_set_i32(config_index_t index, int32_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -910,6 +910,7 @@ esp_err_t config_set_i64(config_index_t index, int64_t value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -955,6 +956,7 @@ esp_err_t config_set_str(config_index_t index, const char *value)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -1000,6 +1002,7 @@ esp_err_t config_set_blob(config_index_t index, const uint8_t *val, size_t size)
 
     if (result == ESP_OK)
     {
+        config_commit();
         esp_err_t post_result = esp_event_post(CONFIG_EVENT_BASE, (int32_t)index, NULL, 0, 0);
         if (post_result != ESP_OK)
             ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_result));
@@ -1391,13 +1394,21 @@ static int cmd_config_clear(int argc, char **argv)
     int ret = 0;
     for (int i = 0; i < config_clear_args.key->count; i++)
     {
-        int res = nvs_erase_key(handle, config_clear_args.key->sval[i]);
+        const char *name = config_clear_args.key->sval[i];
+        int res = nvs_erase_key(handle, name);
         if (res != ESP_OK && res != ESP_ERR_NVS_NOT_FOUND)
         {
             ESP_LOGE(TAG, "nvs_erase_key failed: %s", esp_err_to_name(res));
             ret = 1;
+            continue;
         }
+        /* Announce it like every setter does -- modules cache their settings
+         * and refresh only on this event. */
+        const config_key_t *key = config_key_find(name);
+        if (key)
+            esp_event_post(CONFIG_EVENT_BASE, (int32_t)(key - config_keys), NULL, 0, 0);
     }
+    config_commit();
 
     return ret;
 }

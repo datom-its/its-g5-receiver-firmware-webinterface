@@ -21,6 +21,9 @@ bool mqtt_replay_frame(const uint8_t *data, size_t length);
  * shared with the live feed, so only these counters track the re-send. */
 uint32_t mqtt_replay_pending(void);
 
+/* Live-feed frames dropped because the publish queue was full, since boot. */
+uint32_t mqtt_tx_dropped(void);
+
 /* Total replay frames discarded unpublished (connection down at dequeue).
  * Cumulative -- callers diff against a sample taken at their start. */
 uint32_t mqtt_replay_dropped(void);

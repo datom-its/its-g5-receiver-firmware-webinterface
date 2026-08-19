@@ -44,12 +44,13 @@ typedef struct {
 } wlan_filter_table_t;
 
 static bool is_running;
-/* Serialises sniffer_start()/sniffer_stop() against each other -- both the
- * console REPL task and the web UI (httpd task, /sniffer POST) can call
- * them, and the bare is_running check alone isn't atomic across tasks. */
+/* Serialises sniffer_start()/sniffer_stop(): console REPL and httpd task can
+ * both call them, and the bare is_running check isn't atomic across tasks. */
 static SemaphoreHandle_t ctl_lock;
 static bool write_pcap;
 static sniffer_intf_t interf;
+/* Defined here, above queue_packet(), which is where it is counted. */
+static uint32_t s_queue_dropped;
 static uint32_t interf_num;
 static uint32_t channel;
 static uint32_t filter;
@@ -69,17 +70,19 @@ static void queue_packet(void *recv_packet, sniffer_packet_info_t *packet_info)
         memcpy(packet_to_queue, recv_packet, packet_info->length);
         packet_info->payload = packet_to_queue;
         if (work_queue) {
-            /* Runs in the WiFi driver's task: never block on a full queue -- drop with
-             * a counter (a 100 ms wait stalled reception, per-frame logs flooded the SD). */
-            static uint32_t dropped;
+            /* Runs in the WiFi driver's task: never block on a full queue -- drop and
+             * count instead (blocking stalls RX, per-frame logs flood the SD). */
+
             if (xQueueSend(work_queue, packet_info, 0) != pdTRUE) {
                 free(packet_info->payload);
-                if ((++dropped % 1000) == 1)
+                if ((++s_queue_dropped % 1000) == 1)
                     ESP_LOGW(TAG, "sniffer work queue full, %lu frame(s) dropped so far",
-                             (unsigned long)dropped);
+                             (unsigned long)s_queue_dropped);
             }
         }
     } else {
+        /* Counted too, otherwise the losses page understates. */
+        s_queue_dropped++;
         ESP_LOGE(TAG, "No enough memory for promiscuous packet");
     }
 }
@@ -88,8 +91,8 @@ static void wifi_sniffer_cb(void *recv_buf, wifi_promiscuous_pkt_type_t type)
 {
     sniffer_packet_info_t packet_info;
     wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)recv_buf;
-    /* Wall-clock, not rx_ctrl.timestamp: that PHY counter wraps every ~71 min
-     * and made console-path PCAP timestamps jump backwards. */
+    /* Wall-clock, not rx_ctrl.timestamp: that PHY counter wraps and makes
+     * PCAP timestamps jump backwards. */
     struct timeval tv;
     gettimeofday(&tv, NULL);
     packet_info.seconds = (uint32_t)tv.tv_sec;
@@ -136,6 +139,11 @@ static esp_err_t eth_sniffer_cb(esp_eth_handle_t eth_handle, uint8_t *buffer, ui
 
 static volatile uint32_t sniffer_heartbeat;
 
+uint32_t sniffer_dropped(void)
+{
+    return s_queue_dropped;
+}
+
 uint32_t sniffer_get_heartbeat(void)
 {
     return sniffer_heartbeat;
@@ -146,9 +154,8 @@ static void sniffer_task(void *)
     sniffer_packet_info_t packet_info;
 
     while (is_running) {
-        /* Bump the heartbeat every iteration (even on the queue-receive
-         * timeout, i.e. when idle) so the system monitor can tell "alive but
-         * quiet" from "wedged in a packet handler". */
+        /* Bumped every iteration, idle timeout included, so the monitor can
+         * tell "alive but quiet" from "wedged in a packet handler". */
         sniffer_heartbeat++;
         /* receive packet info from queue */
         if (xQueueReceive(work_queue, &packet_info, pdMS_TO_TICKS(SNIFFER_PROCESS_PACKET_TIMEOUT_MS)) != pdTRUE) {
@@ -161,7 +168,6 @@ static void sniffer_task(void *)
 
         mqtt_handle_packet(&packet_info);
         webserver_handle_packet(&packet_info);
-        sdlog_handle_packet(&packet_info);
         sdpcap_handle_packet(&packet_info);
 
         esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_RECEIVED_PACKET, NULL, 0, 0);
@@ -324,7 +330,9 @@ esp_err_t sniffer_reg_eth_intf(esp_eth_handle_t eth_handle)
 {
     esp_err_t ret = ESP_OK;
     int32_t i = 0;
-    while ((eth_handles[i] != NULL) && (i < SNIFFER_MAX_ETH_INTFS)) {
+    /* Bound check first: the reverse order reads one past the end of
+     * eth_handles[] when all slots are taken. */
+    while ((i < SNIFFER_MAX_ETH_INTFS) && (eth_handles[i] != NULL)) {
         i++;
     }
     ESP_GOTO_ON_FALSE(i < SNIFFER_MAX_ETH_INTFS, ESP_FAIL, err, TAG, "maximum num. of eth interfaces registered");

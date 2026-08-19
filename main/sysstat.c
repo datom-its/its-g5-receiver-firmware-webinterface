@@ -22,9 +22,8 @@ static bool s_crash_pending;
 /* Last max-uptime value actually written to NVS, to throttle flash writes. */
 static uint32_t s_max_uptime_nvs;
 
-/* Panic/watchdog/brownout = an unexpected hard down. A clean reboot, flash
- * or the sysmon auto-recovery (which calls esp_restart -> ESP_RST_SW) is
- * deliberately NOT counted as a crash. */
+/* Only unexpected hard downs count -- a clean reboot, a flash or the sysmon
+ * auto-recovery (esp_restart -> ESP_RST_SW) is deliberately not a crash. */
 static bool reason_is_crash(esp_reset_reason_t r)
 {
     switch (r)
@@ -119,9 +118,8 @@ int64_t  sysstat_last_crash_time(void) { return s_last_crash; }
 
 void sysstat_reset(void)
 {
-    /* Counting restarts from now: the current session hasn't rebooted or
-     * crashed since the reset, so all zero. max_uptime re-grows from this
-     * run via the next sysstat_tick. */
+    /* Counting restarts from now; max_uptime re-grows from the running
+     * session at the next sysstat_tick. */
     s_boots = 0;
     s_crashes = 0;
     s_max_uptime = 0;
