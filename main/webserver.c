@@ -135,6 +135,7 @@ typedef enum {
     S_PEERS, S_PEERS_HINT, S_MAP_SEEN_BY, S_UNSAVED,
     S_TRACKS_ENABLE, S_TRACKS_DAYS, S_TRACKS_HINT,
     S_ETH_LEDS, S_ETH_LEDS_HINT,
+    S_BT_ENABLE, S_BT_HINT,
     S_PCAP_FILTER, S_PCAP_FILT_ALL, S_PCAP_FILT_THIN, S_PCAP_FILT_VEH, S_PCAP_FILT_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL, S_UPD_CHOOSE_FILE,
     S_UPD_NOT_CONFIRMED,
@@ -151,7 +152,7 @@ typedef enum {
     S_PEER_TITLE, S_PEER_NODE, S_PEER_RATE, S_PEER_UPTIME, S_PEER_MQTT,
     S_PEER_OFFLINE, S_PEER_OLDFW,
     S_LOSS_TITLE, S_LOSS_SNIFFER, S_LOSS_MQTT, S_LOSS_PCAP, S_LOSS_THINNED,
-    S_LOSS_HINT,
+    S_LOSS_HINT, S_LOSS_BT_PAUSED,
     S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
     S_SYS_IDF, S_SYS_RESET, S_SYS_FLASH, S_SYS_RAM_INT, S_SYS_RAM_PSRAM,
     S_SYS_TRIPLE, S_SYS_TASKS, S_SYS_COL_STATE, S_SYS_COL_PRIO, S_SYS_COL_CPU,
@@ -447,6 +448,17 @@ static const char *STR[S_COUNT][2] = {
                           "The two LEDs on the network socket show link and traffic. Switching "
                           "them off does not affect operation, it only makes the link state "
                           "unreadable on the device. Applies at once." },
+    [S_BT_ENABLE]       = { "Bluetooth",                 "Bluetooth" },
+    /* The two percentages are duty cycles -- recompute from s_cycle_ms and the
+     * slicing constants in bt_stream.c. Loss starts at BT on, not at connect. */
+    [S_BT_HINT]         = { "Wirkt erst nach einem Neustart. BLE teilt sich das Funkteil mit dem "
+                            "5,9-GHz-Empfang: ab dem Einschalten gehen rund 25&nbsp;% der Frames "
+                            "verloren, w&auml;hrend ein Handy verbunden ist rund 48&nbsp;%. Die "
+                            "Aufzeichnung auf SD und MQTT l&auml;uft weiter, nur mit L&uuml;cken.",
+                            "Takes effect only after a restart. BLE shares the radio with the "
+                            "5.9 GHz reception: from the moment it is on about 25&nbsp;% of frames "
+                            "are lost, and about 48&nbsp;% while a phone is connected. Recording "
+                            "to SD and MQTT keeps running, just with gaps." },
     [S_UPD_INTRO]   = { "Firmware-Datei (.bin) w&auml;hlen und hochladen. Das Ger&auml;t "
                         "flasht sie auf die inaktive OTA-Partition und startet neu. Danach im "
                         "Status best&auml;tigen, sonst wird zur&uuml;ckgerollt.",
@@ -592,12 +604,19 @@ static const char *STR[S_COUNT][2] = {
     [S_LOSS_PCAP]       = { "Aufzeichnung verloren (gesch&auml;tzt)",
                             "Recording lost (estimated)" },
     [S_LOSS_THINNED]    = { "Bewusst ausged&uuml;nnt",  "Thinned on purpose" },
-    [S_LOSS_HINT]       = { "Die Werte z&auml;hlen Frames seit dem Einschalten; bei der Aufzeichnung "
+    /* Sits in the loss table but is a duration, not a count -- said in the row
+     * label AND in the hint, because the table around it counts frames. */
+    [S_LOSS_BT_PAUSED]  = { "Empfang pausiert (Dauer)", "Reception paused (duration)" },
+    [S_LOSS_HINT]       = { "Die Werte z&auml;hlen Frames seit dem Einschalten, nur die Pausenzeile "
+                            "ist eine Dauer (Empfang angehalten, w&auml;hrend Bluetooth funkte); "
+                            "bei der Aufzeichnung "
                             "ist der Wert gesch&auml;tzt, weil dort ganze Puffer auf einmal verworfen "
                             "werden. Ausged&uuml;nnte sind "
                             "kein Fehler, sondern die eingestellte Filterung. Steigen die &uuml;brigen, "
                             "kommt das Ger&auml;t nicht nach &ndash; SD-Karte, Netzwerk oder Speicher.",
-                            "The values count frames since power-on; the recording row is an estimate, "
+                            "The values count frames since power-on, only the pause row is a duration "
+                            "(reception halted while Bluetooth was on air); "
+                            "the recording row is an estimate, "
                             "because whole buffers are discarded there at once. "
                             "Thinned ones are not an error but "
                             "the configured filtering. If the others keep rising, the device is not "
@@ -4963,6 +4982,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u32(CONFIG_INDEX_MAP_STALE_SEC, &map_stale_sec);
     char peers_esc[CONFIG_PEERS_BUFFER_SIZE * 6];
     settings_get_str(CONFIG_INDEX_PEERS, peers_esc, sizeof(peers_esc));
+    uint8_t bt_en = 0;
+    config_get_u8(CONFIG_INDEX_BT_ENABLE, &bt_en);
 
     /* Whether a web password is currently set. We never echo the password
      * itself back into the page, only whether one exists. */
@@ -5048,7 +5069,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
      * httpd task's stack. */
 
     /* --- General: identity, sniffer filtering, LED, UI refresh --- */
-    static EXT_RAM_BSS_ATTR char general[4096];
+    /* 6144, not 4096: markup, German labels and the escaped node ID/peer list
+     * overrun the smaller size, and HTML_PRINTF only logs a truncation. */
+static EXT_RAM_BSS_ATTR char general[6144];
     HTML_PRINTF(general,
         "<h2>%s</h2><table class='kv'>"
         /* size='16', not the field's full width: the HTML size attribute
@@ -5076,6 +5099,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='peers' value='%s' maxlength='159' placeholder='its-node344.local, 192.168.178.40'>"
         "<br><small>%s</small></td></tr>"
+        /* Size new rows against general[] at its declaration, not from here. */
+        "<tr><th>%s</th><td><input type='checkbox' id='bten'%s>"
+        "<br><small>%s</small></td></tr>"
         "</table>",
         T(S_SET_GROUP_GENERAL),
         T(S_NODEID), nodeid,
@@ -5091,7 +5117,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_LED_OVERRIDE), led_color, T(S_LED_OVERRIDE_HINT),
         T(S_REFRESH_SEC), (unsigned long)refresh_sec,
         T(S_MAP_STALE_SEC), (unsigned long)map_stale_sec, T(S_MAP_STALE_HINT),
-        T(S_PEERS), peers_esc, T(S_PEERS_HINT));
+        T(S_PEERS), peers_esc, T(S_PEERS_HINT),
+        T(S_BT_ENABLE), bt_en ? " checked" : "", T(S_BT_HINT));
     httpd_resp_send_chunk(req, general, HTTPD_RESP_USE_STRLEN);
 
     /* --- Network --- */
@@ -5260,6 +5287,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('refreshsec',document.getElementById('refreshsec').value);"
         "p.append('mapstale',document.getElementById('mapstale').value);"
         "p.append('peers',document.getElementById('peers').value);"
+        "p.append('bten',document.getElementById('bten').checked?'1':'0');"
         "p.append('ntpserver',document.getElementById('ntpserver').value);"
         "p.append('webpasswd',document.getElementById('webpasswd').value);"
         "if(document.getElementById('webpwclear').checked)p.append('webpwclear','1');"
@@ -5447,6 +5475,12 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         }
     }
 #endif
+    /* No 'rejected' branch: a checkbox only ever sends "1" or "0", so unlike the
+     * number fields there is no out-of-range case to report. */
+    if (httpd_query_key_value(buf, "bten", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_BT_ENABLE, value[0] == '1' ? 1 : 0) == ESP_OK) saved++;
+    }
     if (httpd_query_key_value(buf, "peers", value, sizeof(value)) == ESP_OK)
     {
         url_decode(value);
@@ -6048,11 +6082,21 @@ static esp_err_t system_get_handler(httpd_req_t *req)
 #if CONFIG_ENABLE_SD
         tracklog_losses(&trk_evicted, &trk_dropped, NULL);
 #endif
-        char loss[1024];
+        /* Rendered as seconds with three decimals and a unit, because every
+         * other row in this table is a frame count and would be misread. */
+        uint64_t paused_ms = (uint64_t)sniffer_paused_ms();
+        char paused_str[32];
+        snprintf(paused_str, sizeof(paused_str), "%llu%s%03llu s",
+                 (unsigned long long)(paused_ms / 1000),
+                 current_lang == LANG_DE ? "," : ".",
+                 (unsigned long long)(paused_ms % 1000));
+        /* 1280, not 1024: the pause row and its German hint overran the old size. */
+        char loss[1280];
         HTML_PRINTF(loss,
             "<h2>%s</h2><div class='scroll'><table class='kv'>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%s</td></tr>"
 #if CONFIG_ENABLE_SD
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
@@ -6062,6 +6106,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
             T(S_LOSS_TITLE),
             T(S_LOSS_SNIFFER), (unsigned long)sniffer_dropped(),
             T(S_LOSS_MQTT), (unsigned long)mqtt_tx_dropped(),
+            T(S_LOSS_BT_PAUSED), paused_str,
 #if CONFIG_ENABLE_SD
             T(S_LOSS_PCAP), (unsigned long)sdpcap_dropped(),
             T(S_LOSS_THINNED), (unsigned long)sdpcap_filtered(),

@@ -6,6 +6,7 @@
 #include "esp_console.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
@@ -49,7 +50,9 @@ esp_http_client_config_t http_client_config = {
 esp_https_ota_config_t ota_config = {
     .http_config = &http_client_config,
     .bulk_flash_erase = true,
-    .buffer_caps = MALLOC_CAP_SPIRAM
+    /* DRAM, not PSRAM: esp_flash_write takes a source buffer in one piece only
+     * from DRAM, from PSRAM it trickles through a 32-byte bounce buffer. */
+    .buffer_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
 };
 
 static void ota_task(void *)

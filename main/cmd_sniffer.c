@@ -15,9 +15,11 @@
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 
+#include "bt_stream.h"
 #include "cmd_pcap.h"
 #include "config.h"
 #include "events.h"
@@ -59,6 +61,14 @@ static TaskHandle_t task;
 static QueueHandle_t work_queue;
 static SemaphoreHandle_t sem_task_over;
 static esp_eth_handle_t eth_handles[SNIFFER_MAX_ETH_INTFS];
+
+/* BLE co-existence: true while only the RX path is off. The sniffer task keeps
+ * looping either way -- its heartbeat is the watchdog input. */
+static bool s_paused;
+/* Own spinlock, so the web getter never waits on ctl_lock (held across SD work). */
+static portMUX_TYPE s_pause_mux = portMUX_INITIALIZER_UNLOCKED;
+static int64_t s_pause_started_us; /* 0 = no pause in flight */
+static int64_t s_paused_total_us;
 
 static esp_err_t sniffer_stop();
 
@@ -149,6 +159,39 @@ uint32_t sniffer_get_heartbeat(void)
     return sniffer_heartbeat;
 }
 
+/* Callers hold ctl_lock, so this runs once per running->paused edge. */
+static void pause_clock_begin(void)
+{
+    taskENTER_CRITICAL(&s_pause_mux);
+    s_pause_started_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_pause_mux);
+}
+
+/* Idempotent on purpose: the zero sentinel makes a second call add nothing, so
+ * start/stop may call it unconditionally without inflating the total. */
+static void pause_clear(void)
+{
+    taskENTER_CRITICAL(&s_pause_mux);
+    if (s_pause_started_us) {
+        s_paused_total_us += esp_timer_get_time() - s_pause_started_us;
+        s_pause_started_us = 0;
+    }
+    taskEXIT_CRITICAL(&s_pause_mux);
+    s_paused = false;
+}
+
+uint64_t sniffer_paused_ms(void)
+{
+    taskENTER_CRITICAL(&s_pause_mux);
+    int64_t us = s_paused_total_us;
+    /* Include the pause in flight, else the value freezes for the whole BLE
+     * window and reads as "nothing missed". */
+    if (s_pause_started_us)
+        us += esp_timer_get_time() - s_pause_started_us;
+    taskEXIT_CRITICAL(&s_pause_mux);
+    return (uint64_t)(us / 1000);
+}
+
 static void sniffer_task(void *)
 {
     sniffer_packet_info_t packet_info;
@@ -169,6 +212,11 @@ static void sniffer_task(void *)
         mqtt_handle_packet(&packet_info);
         webserver_handle_packet(&packet_info);
         sdpcap_handle_packet(&packet_info);
+
+        /* Copies what it needs and never blocks, so it cannot stall this
+         * loop -- must stay above the free() below. */
+        bt_stream_publish_packet(packet_info.payload, (uint16_t)packet_info.length,
+                                 packet_info.seconds, packet_info.microseconds);
 
         esp_event_post(SNIFFER_EVENT_BASE, SNIFFER_RECEIVED_PACKET, NULL, 0, 0);
 
@@ -206,6 +254,10 @@ static esp_err_t sniffer_stop()
         break;
     }
     ESP_LOGI(TAG, "stop promiscuous ok");
+
+    /* Ends any pause in flight, so a later sniffer_resume() cannot re-enable
+     * reception with nobody left to drain the work queue. */
+    pause_clear();
 
     /* stop sniffer local task */
     is_running = false;
@@ -264,6 +316,9 @@ static esp_err_t sniffer_start()
     if (write_pcap)
         ESP_GOTO_ON_ERROR(sniff_packet_start(link_type), err, TAG, "init pcap session failed");
 
+    /* A fresh start owns the radio: begin unpaused, whatever was left over. */
+    pause_clear();
+
     is_running = true;
     ESP_GOTO_ON_FALSE(xTaskCreate(sniffer_task, "snifferT", CONFIG_SNIFFER_TASK_STACK_SIZE,
                                   NULL, CONFIG_SNIFFER_TASK_PRIORITY, &task), ESP_FAIL,
@@ -315,6 +370,71 @@ err:
     if (ctl_lock)
         xSemaphoreGive(ctl_lock);
     return ret;
+}
+
+void sniffer_pause(void)
+{
+    /* Same lock as start/stop: otherwise a "stop" landing inside a BLE window
+     * deletes the task and the resume re-enables reception into a dead queue. */
+    if (ctl_lock)
+        xSemaphoreTake(ctl_lock, portMAX_DELAY);
+
+    /* WLAN only: Ethernet has no RF conflict, and phy_11p_set(0,0) without the
+     * (1,0) from sniffer_start() would touch a PHY nobody switched on. */
+    if (s_paused || !is_running || interf != SNIFFER_INTF_WLAN)
+        goto out;
+
+    /* Only the receive path -- the task keeps running, see sniffer_task(). */
+    esp_wifi_set_promiscuous(false);
+    phy_11p_set(0, 0);
+    s_paused = true;
+    pause_clock_begin();
+
+out:
+    if (ctl_lock)
+        xSemaphoreGive(ctl_lock);
+}
+
+void sniffer_resume(void)
+{
+    wifi_promiscuous_filter_t wifi_filter;
+    esp_err_t promisc_err, chan_err;
+
+    if (ctl_lock)
+        xSemaphoreTake(ctl_lock, portMAX_DELAY);
+
+    if (!s_paused || !is_running || interf != SNIFFER_INTF_WLAN)
+        goto out;
+
+    /* Mirrors the WLAN branch of sniffer_start(). No esp_wifi_start(): promiscuous
+     * mode only needs esp_wifi_init(), and this firmware runs WIFI_MODE_NULL. */
+    wifi_filter.filter_mask = filter;
+    esp_wifi_set_promiscuous_filter(&wifi_filter);
+    esp_wifi_set_promiscuous_rx_cb(wifi_sniffer_cb);
+    promisc_err = esp_wifi_set_promiscuous(true);
+    phy_11p_set(1, 0);
+    chan_err = esp_wifi_set_channel(140, WIFI_SECOND_CHAN_NONE);
+    phy_change_channel(channel, 1, 0, 0);
+
+    /* Only this direction is checked: a failed resume leaves the device deaf,
+     * a failed pause only costs BLE quality. Logged once -- runs every cycle. */
+    if (promisc_err != ESP_OK || chan_err != ESP_OK) {
+        static bool resume_err_logged;
+        if (!resume_err_logged) {
+            resume_err_logged = true;
+            ESP_LOGE(TAG, "resume failed, sniffer stays deaf: promisc=%s channel=%s",
+                     esp_err_to_name(promisc_err), esp_err_to_name(chan_err));
+        }
+        /* s_paused stays SET on purpose: the pause clock keeps running so
+         * /system shows reception is down, and the next coex cycle retries. */
+        goto out;
+    }
+
+    pause_clear();
+
+out:
+    if (ctl_lock)
+        xSemaphoreGive(ctl_lock);
 }
 
 static struct {

@@ -84,13 +84,13 @@ void sysstat_tick(uint32_t uptime_sec)
         write_crash = true;
     }
 
-    /* Track the live max always; persist only when it grows by >=60 s, to
-     * keep NVS wear negligible even across a multi-day record run. */
+    /* Track the live max always, persist at most hourly: an NVS write disables
+     * the flash cache and stalls flash/PSRAM code -- a hiccup on an open BLE link. */
     bool write_max = false;
     if (uptime_sec > s_max_uptime)
     {
         s_max_uptime = uptime_sec;
-        if (s_max_uptime - s_max_uptime_nvs >= 60)
+        if (s_max_uptime - s_max_uptime_nvs >= 3600)
             write_max = true;
     }
 

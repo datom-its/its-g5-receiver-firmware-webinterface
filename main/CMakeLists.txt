@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "main.c"
+        "ble_cache.c"
+        "bt_stream.c"
         "cmd_sniffer.c"
         "cmd_pcap.c"
         "config.c"
@@ -27,8 +29,10 @@ idf_component_register(
         "webserver.c"
     PRIV_REQUIRES
         app_trace
+        bt
         app_update
         console
+        esp_coex
         esp_eth
         esp_http_server
         esp_https_ota
