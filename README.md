@@ -39,6 +39,9 @@ Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.27.2-webui** | Frees 36 KB of internal memory by switching off JTAG application tracing. The `pcap` console command writes to the SD card instead. The freed memory goes to the network stack, the web server and the SD writer. |
+| **0.27.1-webui** | Repair release. The PCAP recorder now recovers by itself after a stumble at a full hour, and retention limits also apply on a device that gets restarted often. The measured green/red phase durations on `/traffic` are trustworthy for the first time, so earlier averages should be treated as void. |
+| **0.27.0-webui** | Two new pages. `/senders` lists every stationary sender heard, with the message types it transmits. `/transit` turns the VDV R09 telegrams into passages per line and schedule deviation. **Note when running several receivers:** `/tracks.json` now answers with an object instead of an array. All of them need this version for the shared map overlay. |
 | **0.26.0-webui** | Full VDV R09.16 decoding — line, course, destination, priority, turn request and schedule deviation (a decoder bug had hidden lines from 100 up) — and the message list shows the 802.11 sender address. Long transfers now run on a worker task, so the web UI stays responsive during multi-MB downloads, and the messages page gains a search across the PCAP recording, a live filter box, and a manual re-upload of recorded stationary senders (RSUs, traffic lights) to the server — capped at 24 h, with optional thinning. SD SPI clock back at the 20 MHz default. |
 | **0.25.2-webui** | The format button now also appears while no card is mounted, and formatting a card the device cannot read (e.g. a factory exFAT card) actually works. Cards with a readable filesystem are still never touched without asking. |
 | **0.25.1-webui** | Fix: compiling for the alternative SPI Ethernet chips (W5500, ENC28J60) works now, and the prototype sdkconfigs are updated to match. The network-LED switch stays KSZ8851SNL-only — the W5500 has no LED register, the ENC28J60 would allow it but is untested for lack of hardware — and such builds hide the setting in the web interface. |
@@ -99,6 +102,14 @@ English.
   play button; a **Live** button returns to the real-time feed. Map tiles
   need the browser to have internet access (OpenStreetMap) — the device
   itself does not.
+- `/traffic` — how much of each road-user category was received per hour, rolled
+  up per day beyond 48 hours, with distinct radio identifiers per hour and the
+  green/red phase durations measured from the traffic lights themselves.
+- `/senders` — every stationary sender heard (traffic light or roadside unit),
+  with the message types it transmits, signal level, position and how long it
+  has been known. Survives restarts on the SD card and can be reset.
+- `/transit` — the public-transport telegrams (VDV R09) decoded into passages
+  per line, schedule deviation, and a log of individual passages.
 - `/settings` — view and change node ID, MQTT URI, autostart channel, LED
   brightness (applied live), the web password, network (DHCP / static IP /
   DNS), NTP server, SD logging, and **rolling PCAP capture** (off by default:

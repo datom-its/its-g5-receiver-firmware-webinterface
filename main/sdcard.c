@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "argtable3/argtable3.h"
@@ -48,6 +49,27 @@ static void sd_lock_give(void)
         xSemaphoreGive(sd_lock);
 }
 
+/* Health of the writer lock: a wedged SPI transaction is otherwise invisible,
+ * because every user just returns quietly on timeout. */
+static volatile uint32_t s_fail_streak;
+static volatile int64_t  s_held_since_us;
+
+static void sd_mark_held(void) { s_held_since_us = esp_timer_get_time(); }
+
+/* Mount, format and archive reads hold the lock for minutes; masked from the
+ * watchdog, but only bounded -- a wedge inside one must not disable it for good. */
+#define LONG_OP_MAX_US (10 * 60 * 1000000LL)
+static volatile bool s_long_op;
+static volatile int64_t s_long_since_us;
+
+static bool long_op_active(void)
+{
+    if (!s_long_op)
+        return false;
+    int64_t since = s_long_since_us;
+    return since && (esp_timer_get_time() - since) < LONG_OP_MAX_US;
+}
+
 /* ================================================================== */
 /*  Public API                                                        */
 /* ================================================================== */
@@ -70,8 +92,12 @@ bool sdcard_io_begin(void)
         sd_lock_give();
         return false;
     }
+    /* Stamped here too: the pcap and log writers use this variant, and the
+     * stall detector would otherwise never see the very tasks it watches. */
+    sd_mark_held();
     return true;
 }
+
 
 bool sdcard_io_begin_timeout(uint32_t timeout_ms)
 {
@@ -80,22 +106,58 @@ bool sdcard_io_begin_timeout(uint32_t timeout_ms)
     if (!sd_lock)
         return false;
     if (xSemaphoreTake(sd_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+    {
+        s_fail_streak++;
         return false;
+    }
     if (card == NULL)
     {
         xSemaphoreGive(sd_lock);
         return false;
     }
+    s_fail_streak = 0;
+    sd_mark_held();
     return true;
 }
 
 void sdcard_io_end(void)
 {
+    /* A completed transaction proves the bus is alive. Clearing here and not only
+     * in begin_timeout() also covers the blocking sdcard_io_begin() path. */
+    s_fail_streak = 0;
+    s_held_since_us = 0;
     sd_lock_give();
 }
 
-/* Streaming readers run WITHOUT sd_lock, only counted; unmount/format
- * refuse to free the filesystem while the count is nonzero. */
+void sdcard_io_long_begin(void)
+{
+    s_long_since_us = esp_timer_get_time();
+    s_long_op = true;
+}
+
+void sdcard_io_long_end(void)
+{
+    s_long_op = false;
+    s_fail_streak = 0;   /* the misses during it were expected, not a wedge */
+    /* Re-stamp only an existing writer hold, so held_ms does not report the whole
+     * masked span. NOT for mount/format (stamp 0): a stamp would outlive the hold. */
+    if (s_held_since_us)
+        sd_mark_held();
+}
+
+uint32_t sdcard_io_fail_streak(void) { return long_op_active() ? 0 : s_fail_streak; }
+
+uint32_t sdcard_io_held_ms(void)
+{
+    int64_t since = s_held_since_us;
+    if (!since || long_op_active())
+        return 0;
+    int64_t d = esp_timer_get_time() - since;
+    return d > 0 ? (uint32_t)(d / 1000) : 0;
+}
+
+/* Streaming readers run WITHOUT sd_lock, only counted. No timeout or reaper on
+ * the count on purpose; an unbalanced begin/end therefore latches forever. */
 static portMUX_TYPE rd_mux = portMUX_INITIALIZER_UNLOCKED;
 static int rd_count;
 static bool rd_closing;
@@ -119,6 +181,16 @@ void sdcard_read_end(void)
     if (rd_count > 0)
         rd_count--;
     portEXIT_CRITICAL(&rd_mux);
+}
+
+/* Plain query, no lock required: how many streaming readers hold a file open.
+ * Anything that UNLINKS must consult it -- FATFS runs with FS_LOCK=0. */
+int sdcard_read_active(void)
+{
+    portENTER_CRITICAL(&rd_mux);
+    int n = rd_count;
+    portEXIT_CRITICAL(&rd_mux);
+    return n;
 }
 
 /* Called with sd_lock held. True: no readers left, rd_closing stays set (new
@@ -156,22 +228,20 @@ static esp_err_t sdcard_mount_internal(bool format_if_failed)
         /* An unreadable filesystem is usually a stumbled-over or foreign card, not one
          * that wants erasing -- auto-format would destroy the archive. /sdcard can format. */
         .format_if_mount_failed = format_if_failed,
-        /* Concurrent openers: sdlog, sdpcap, tracklog, events_log, plus
-         * whatever the web UI has open for a download -- 4 was below the
-         * real worst case, and the overflow shows up as a sporadic,
-         * unexplained fopen failure in whichever writer asked last. */
+        /* Must cover every concurrent opener (all SD writers plus a web download);
+         * too low shows up only as a sporadic fopen failure in a random writer. */
         .max_files = 8,
         .allocation_unit_size = 16 * 1024
     };
 
     esp_err_t ret;
+    sdcard_io_long_begin();
 #if CONFIG_SNIFFER_SD_SPI_MODE
     /* The SPI bus is initialised elsewhere (shared with Ethernet). */
     ESP_LOGI(TAG, "Mounting SD card (SPI)");
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    /* Back at the 20 MHz default: the bus-error source was fixed in 0.22.7
-     * (see reference-sd-spi-bus-bug); if 0x107/0x108/0x109 lines return to
-     * the log, dropping to 15000 here was the old mitigation. */
+    /* The 20 MHz default; if SPI bus errors ever reappear in the log,
+     * lowering this was the old mitigation. */
     host.max_freq_khz = 20000;
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
@@ -189,6 +259,7 @@ static esp_err_t sdcard_mount_internal(bool format_if_failed)
     ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
 #endif
 
+    sdcard_io_long_end();
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL)
             ESP_LOGE(TAG, "Failed to mount filesystem (card present and FAT-formatted?)");
@@ -209,9 +280,8 @@ esp_err_t sdcard_mount(void)
     return sdcard_mount_internal(false);
 }
 
-/* Set by /poweroff so sysmon's auto-remount doesn't re-mount the card the
- * user just had unmounted -- not reset by sdcard_mount(), which sysmon
- * itself calls. */
+/* Set by /poweroff so sysmon's auto-remount does not undo it -- deliberately
+ * NOT cleared by sdcard_mount(), which sysmon itself calls. */
 static volatile bool s_no_auto_remount;
 
 void sdcard_inhibit_auto_remount(void) { s_no_auto_remount = true; }
@@ -272,7 +342,9 @@ esp_err_t sdcard_format(void)
     }
 
     ESP_LOGW(TAG, "Formatting SD card...");
+    sdcard_io_long_begin();
     esp_err_t ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, card);
+    sdcard_io_long_end();
     rd_closing = false;
     if (ret != ESP_OK)
         ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
@@ -293,9 +365,8 @@ esp_err_t sdcard_usage(uint64_t *total_bytes, uint64_t *free_bytes)
 /*  Console commands (thin wrappers around the API)                   */
 /* ================================================================== */
 
-/* mount and unmount each get their OWN argtable -- they used to share one,
- * which meant the second esp_console_cmd_register() silently repointed both
- * commands at freshly-allocated args and leaked the first pair. */
+/* mount and unmount each need their OWN argtable: sharing one makes the second
+ * esp_console_cmd_register() repoint both commands and leak the first pair. */
 static struct {
     struct arg_str *device;
     struct arg_end *end;

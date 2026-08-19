@@ -4,10 +4,8 @@
 extern "C" {
 #endif
 
-/* Call EARLY in app_main, before initialize_ethernet() -- a static-IP config
- * posts APP_ETHERNET_MGMT_INTERFACE_GOT_IP synchronously from inside that
- * call, so registering later can miss the one-shot event and skip mDNS for
- * that boot. DHCP is unaffected (lease acquisition takes much longer). */
+/* Call EARLY in app_main, BEFORE initialize_ethernet(): with a static IP the
+ * one-shot GOT_IP event is posted synchronously inside that call and is missed. */
 void sysmon_register_events(void);
 
 /* System monitor task: sniffer watchdog, SD auto-remount, low-heap reboot.

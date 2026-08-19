@@ -11,10 +11,10 @@ extern "C" {
 #define ITS_SPAT_MAX_SG 32  /* signal groups (movements) decoded per intersection */
 
 /* SPATEM decode result (identity + phase per signal group; no timing). `phase`
- * is the SAE J2735 MovementPhaseState enum. Validated -- see reference-its-decode. */
+ * is the SAE J2735 MovementPhaseState enum, validated against captured frames. */
 /* IntersectionStatusObject, a BIT STRING(16) whose bit 0 is the MSB -- so the
  * standard's bit n is (1 << (15 - n)) here. Cross-checked against real
- * traffic: the Graz controller sends 0x0200 = TRAFFIC_DEPENDENT, constant. */
+ * traffic: controllers seen here send 0x0200 = TRAFFIC_DEPENDENT, constant. */
 #define ITS_ISTAT_MANUAL         (1u << 15)  /* manual control (police box open) */
 #define ITS_ISTAT_STOPTIME       (1u << 14)
 #define ITS_ISTAT_FAILURE_FLASH  (1u << 13)  /* flashing amber */
@@ -46,7 +46,7 @@ typedef struct {
 #define ITS_MAP_NAME_LEN 40  /* DescriptiveName is SIZE(1..63); 40 covers real names */
 
 /* MAPEM decode result (stage 1: intersection identity + human-readable name).
- * The name is what turns "Kreuzung 43/840" into "Kärntner Straße - Busgarage".
+ * The name is what turns a bare "Kreuzung <region>/<id>" into something readable.
  * The lane geometry / signal-group-to-lane mapping that follows it in the
  * message is deliberately NOT decoded (far larger job, see project memory). */
 /* AllowedManeuvers bits, MSB-first in the 12-bit BIT STRING. */
@@ -158,7 +158,7 @@ bool its_decode_map_geometry(const uint8_t *frame, size_t len, its_map_geom_t *o
 
 /* Identifies the facility message ("Bus CAM", "RSU SPATEM", "Signed", "?") and
  * decodes position/speed/ids; optional spat/map/veh outputs are filled when non-NULL.
- * Offsets validated against real traffic -- see reference-its-decode before changing any. */
+ * Offsets validated against real traffic; re-validate before changing any. */
 
 #define ITS_LABEL_LEN 32
 
@@ -189,7 +189,7 @@ typedef struct {
 
     /* VDV R09.16 telegram out of the CAM's publicTransportContainer. Field
      * names are the standard's own; byte layout validated against tshark on
-     * real frames (see reference-its-decode). 0xFFFF/0xFF = not carried. */
+     * real frames. 0xFFFF/0xFF = not carried. */
     uint16_t pt_line;              /* LN Liniennummer  (0..999, 0 = none) */
     uint8_t  pt_course;            /* KN Kursnummer    (0..99) */
     uint16_t pt_dest;              /* ZN Zielnummer    (0..999) */

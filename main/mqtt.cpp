@@ -443,6 +443,11 @@ extern "C" bool mqtt_replay_frame(const uint8_t *data, size_t length)
     return true;
 }
 
+extern "C" uint32_t mqtt_tx_dropped(void)
+{
+    return tx_dropped;
+}
+
 extern "C" uint32_t mqtt_replay_pending(void)
 {
     return __atomic_load_n(&replay_pending, __ATOMIC_RELAXED);

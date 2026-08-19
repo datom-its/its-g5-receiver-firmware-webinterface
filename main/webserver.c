@@ -45,11 +45,11 @@
 #include "its_decode.h"
 #include "ota.h"
 #include "sysmon.h"
+#include "mqtt.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
 #include "sdlog.h"
 #include "sdpcap.h"
-#include "mqtt.h"
 #endif
 #ifdef CONFIG_ENABLE_TEMPERATURE
 #include "temperature.h"
@@ -58,6 +58,8 @@
 #include "stats.h"
 #include "events_log.h"
 #include "tracklog.h"
+#include "inventory.h"
+#include "ptlog.h"
 #include "spatem.h"
 
 #include "webserver.h"
@@ -118,13 +120,14 @@ typedef enum {
     S_MAP_LATE, S_MAP_EARLY, S_MAP_ONTIME, S_EVT_TRAFFIC,
     S_BROADCAST_ONLY, S_BROADCAST_ONLY_HINT,
     S_LED_OVERRIDE, S_LED_OVERRIDE_HINT,
-    S_LED_BRIGHTNESS, S_SAVE, S_SAVED,
+    S_LED_BRIGHTNESS, S_SAVE, S_SAVED, S_SAVED_REJECTED, S_SET_BAD,
     S_WEB_PASSWORD, S_WEB_PASSWORD_SET, S_WEB_PASSWORD_NONE, S_WEB_PASSWORD_CLEAR,
     S_REFRESH_SEC,
     S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
-    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_NONE, S_TYPE_HINT,
-    S_LOG_SYS, S_LOG_FRAMES, S_LOG_BUDGET, S_LOG_HINT,
+    S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_SPARK, S_ACTIVITY_TYPES,
+    S_ACTIVITY_NONE, S_TYPE_HINT,
+    S_LOG_SYS, S_LOG_BUDGET, S_LOG_HINT,
     S_PCAP_ENABLE, S_PCAP_RETAIN_HOURS, S_PCAP_MAX_MB, S_PCAP_HINT,
     S_PCAP_BUF_MB, S_PCAP_BUF_HINT, S_PCAP_FLUSH_SEC,
     S_PLAYBACK_FROM, S_PLAYBACK_TO, S_PLAYBACK_LOAD, S_PLAYBACK_LIVE, S_PLAYBACK_NONE, S_PLAYBACK_ERROR,
@@ -141,23 +144,35 @@ typedef enum {
     S_RSU_UP_TITLE, S_RSU_UP_HINT, S_RSU_UP_BTN, S_RSU_UP_NOMQTT, S_RSU_UP_RUN,
     S_RSU_UP_THIN, S_RSU_UP_ONCE, S_RSU_UP_BUSY,
     S_SRCH_TITLE, S_SRCH_HINT, S_SRCH_FILTER, S_SRCH_BTN, S_SRCH_RUN,
-    S_SRCH_NONE, S_SRCH_LIMIT, S_SRCH_PARTIAL,
+    S_SRCH_NONE, S_SRCH_LIMIT, S_SRCH_PARTIAL, S_SRCH_EXPORT, S_SRCH_EXPORT_HINT,
     S_SD_NOT_MOUNTED, S_SD_UNMOUNTED_HINT, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
+    S_PEER_TITLE, S_PEER_NODE, S_PEER_RATE, S_PEER_UPTIME, S_PEER_MQTT,
+    S_PEER_OFFLINE, S_PEER_OLDFW,
+    S_LOSS_TITLE, S_LOSS_SNIFFER, S_LOSS_MQTT, S_LOSS_PCAP, S_LOSS_THINNED,
+    S_LOSS_HINT,
     S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
     S_SYS_IDF, S_SYS_RESET, S_SYS_FLASH, S_SYS_RAM_INT, S_SYS_RAM_PSRAM,
     S_SYS_TRIPLE, S_SYS_TASKS, S_SYS_COL_STATE, S_SYS_COL_PRIO, S_SYS_COL_CPU,
     S_SYS_COL_STACK,
     S_STAT_BOOTS, S_STAT_CRASHES, S_STAT_LASTCRASH, S_STAT_MAXUP, S_STAT_NEVER,
     S_STAT_RESET, S_STAT_RESET_CONFIRM,
-    S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_FRAMES, S_LOGS_REFRESH,
+    S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_REFRESH,
     S_LOGS_NONE, S_LOGS_TAIL,
-    S_NAV_TRAFFIC, S_TITLE_TRAFFIC, S_TRF_INTRO, S_TRF_WINDOW, S_TRF_W_24H, S_TRF_W_7D,
+    S_NAV_SENDERS, S_TITLE_SENDERS, S_SND_INTRO, S_SND_NONE, S_SND_ID, S_SND_NAME,
+    S_SND_TYPES, S_SND_FRAMES, S_SND_FIRST, S_SND_LAST, S_SND_POS, S_SND_VEHICLES,
+    S_SND_FULL, S_SND_CLEAR, S_SND_CLEAR_CONFIRM, S_SND_RSSI,
+    S_NAV_TRANSIT, S_TITLE_TRANSIT, S_PT_INTRO, S_PT_NONE, S_PT_LINE,
+    S_PT_SIGHTINGS, S_PT_AVG, S_PT_LATE, S_PT_EARLY, S_PT_UNKNOWN, S_PT_LAST,
+    S_PT_LIMIT, S_PT_ACTIVE, S_PT_CLEAR, S_PT_CLEAR_CONFIRM,
+    S_PT_PASSAGES, S_PT_WHEN, S_PT_COURSE, S_PT_DEST, S_PT_DEV, S_PT_INRANGE,
+    S_NAV_TRAFFIC, S_TITLE_TRAFFIC, S_TRF_DAY, S_TRF_SENDERS, S_TRF_SENDERS_NOTE,
+    S_TRF_SENDERS_DAY, S_TRF_SG, S_TRF_CYCLES, S_TRF_PH_WAIT, S_TRF_BUSY, S_TRF_IDENT_NOTE, S_TRF_INTRO, S_TRF_WINDOW, S_TRF_W_24H, S_TRF_W_7D,
     S_TRF_W_30D, S_TRF_TOTAL, S_TRF_HOUR, S_TRF_SPEED, S_TRF_NODATA,
     S_CAT_CAR, S_CAT_BUS, S_CAT_TRUCK, S_CAT_TWOWHEEL, S_CAT_PED, S_CAT_RSU, S_CAT_OTHER,
     S_EVT_TITLE, S_EVT_NONE, S_EVT_TIME, S_EVT_SENDER, S_EVT_WARNING, S_EVT_DENM,
-    S_TRF_SPEED_BY_TYPE,
+    S_TRF_SPEED_BY_TYPE, S_TRF_SPEED_MIXED, S_EVT_CAPPED, S_MAP_TRACK_CAP, S_LOSS_TRACKS,
     S_TRF_LIGHTS, S_TRF_LIGHTS_NONE, S_TRF_INTERSECTION,
     S_TRF_LIGHTS_INTRO, S_TRF_PH_GREEN, S_TRF_PH_AMBER, S_TRF_PH_RED, S_TRF_PH_OTHER,
     S_DIR_STRAIGHT, S_DIR_LEFT, S_DIR_RIGHT, S_DIR_UTURN, S_DIR_PED,
@@ -246,8 +261,8 @@ static const char *STR[S_COUNT][2] = {
     [S_COL_SENDER]      = { "Absender",                 "Sender" },
     [S_COL_LENGTH]      = { "L&auml;nge",               "Length" },
     [S_COL_PREVIEW]     = { "Details",                  "Details" },
-    [S_SET_INTRO]       = { "&Auml;nderungen werden im NVS gespeichert. Die meisten wirken nach einem Neustart.",
-                            "Changes are saved to NVS. Most take effect after a reboot." },
+    [S_SET_INTRO]       = { "&Auml;nderungen liegen im NVS. Die meisten wirken sofort, einzelne erst nach einem Neustart.",
+                            "Changes live in NVS. Most take effect at once, a few only after a reboot." },
     [S_MQTT_URI]        = { "MQTT-URI",                 "MQTT URI" },
     [S_AUTOSTART_CHAN]  = { "Autostart-Kanal",          "Autostart channel" },
     [S_CHAN_NONE]       = { "(keiner)",                 "(none)" },
@@ -273,12 +288,28 @@ static const char *STR[S_COUNT][2] = {
     [S_UNSAVED]         = { "Nicht gespeicherte &Auml;nderungen",
                             "Unsaved changes" },
     [S_SAVED]           = { "%d Einstellung(en) gespeichert.", "Saved %d setting(s)." },
+    /* Rendered via textContent, so plain UTF-8 -- no entities. */
+    [S_SET_BAD]         = { "Nicht gespeichert, Wert außerhalb des Bereichs:",
+                            "Not saved, value out of range:" },
+    /* Silently dropping an out-of-range value while reporting success is how a
+     * setting appears to "reset itself" -- the page has to say it refused. */
+    /* Goes out as text/plain, which decodes NO entities -- literal UTF-8 here,
+     * like S_UPD_NOT_CONFIRMED and unlike the rest of this table. */
+    [S_SAVED_REJECTED]  = { "%d gespeichert, %d abgelehnt: Wert außerhalb des erlaubten Bereichs "
+                            "(siehe Min/Max beim Feld).",
+                            "%d saved, %d rejected: value outside the allowed range "
+                            "(see the field's min/max)." },
     [S_WEB_PASSWORD]    = { "Web-Passwort (Benutzer &quot;admin&quot;)",
                             "Web password (user &quot;admin&quot;)" },
     [S_WEB_PASSWORD_SET]  = { "gesetzt &ndash; leer lassen = unver&auml;ndert",
                               "set &ndash; leave empty to keep unchanged" },
-    [S_WEB_PASSWORD_NONE] = { "kein Passwort &ndash; sch&uuml;tzt /update und /settings",
-                              "no password &ndash; protects /update and /settings" },
+    /* Names what check_update_auth() really gates -- naming only /update and
+     * /settings hid that without a password the whole card, the internal
+     * filesystem and the exports are readable by anyone on the network. */
+    [S_WEB_PASSWORD_NONE] = { "kein Passwort &ndash; sch&uuml;tzt Einstellungen, Firmware-Update "
+                              "und alle Datei-Zugriffe (SD, Flash, Logs, Export)",
+                              "no password &ndash; protects settings, firmware update "
+                              "and all file access (SD, flash, logs, export)" },
     [S_WEB_PASSWORD_CLEAR] = { "Passwortschutz entfernen",
                                "Remove password protection" },
     [S_REFRESH_SEC]     = { "Auto-Refresh (Sek., 0=aus)", "Auto-refresh (sec, 0=off)" },
@@ -298,20 +329,22 @@ static const char *STR[S_COUNT][2] = {
                            "(no IP yet &ndash; check cable/link)" },
     [S_NTP_SERVER]      = { "NTP-Server",                "NTP server" },
     [S_COL_TYPE]        = { "Typ",                       "Type" },
-    [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t (60s)",      "Activity (60s)" },
+    [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t",            "Activity" },
+    [S_ACTIVITY_SPARK]  = { "Letzte 60 Sekunden",       "Last 60 seconds" },
+    [S_ACTIVITY_TYPES]  = { "Nachrichtentypen seit dem Einschalten",
+                            "Message types since power-on" },
     [S_ACTIVITY_NONE]   = { "(noch keine Nachrichten)",  "(no messages yet)" },
-    [S_TYPE_HINT]       = { "Typ = Absender + Nachricht. Absender: Auto, Bus, Fu&szlig;g&auml;nger, "
+    [S_TYPE_HINT]       = { "Typ = Absender + Nachricht. Absender: Car, Bus, Ped, Tram, "
                             "RSU (Stra&szlig;enrand-Einheit, z.B. Ampel). Nachricht: CAM=Fahrzeug-Status, "
                             "DENM=Warnung, SPATEM=Ampelphase, MAPEM=Kreuzungskarte, IVIM=Verkehrszeichen, "
-                            "CPM=Umfeldwahrnehmung. &bdquo;Signed&ldquo;=signiert, nicht entschl&uuml;sselbar. "
-                            "&bdquo;?&ldquo;=kein GeoNetworking-Paket.",
-                            "Type = sender + message. Sender: car, bus, pedestrian, RSU (roadside unit, "
+                            "CPM=Umfeldwahrnehmung. &bdquo;Signed&ldquo;=signiert, Inhalt nicht ausgepackt. "
+                            "&bdquo;?&ldquo;=kein ETSI-Inhalt.",
+                            "Type = sender + message. Sender: Car, Bus, Ped, Tram, RSU (roadside unit, "
                             "e.g. a traffic light). Message: CAM=vehicle status, DENM=hazard warning, "
                             "SPATEM=signal phase/timing, MAPEM=intersection map, IVIM=road signs, "
-                            "CPM=perceived objects. \"Signed\"=signed, not unwrapped. "
-                            "\"?\"=not a GeoNetworking packet." },
+                            "CPM=perceived objects. \"Signed\"=signed, content not unwrapped. "
+                            "\"?\"=no ETSI payload." },
     [S_LOG_SYS]         = { "System-Log auf SD",        "System log to SD" },
-    [S_LOG_FRAMES]      = { "Frame-Log auf SD (CSV)",   "Frame log to SD (CSV)" },
     [S_LOG_BUDGET]      = { "Log-Speicher-Budget (MB)", "Log storage budget (MB)" },
     [S_LOG_HINT]        = { "Logs unter /sdcard/logs/, rotierend. Braucht eine eingebundene SD-Karte.",
                             "Logs in /sdcard/logs/, rotating. Requires a mounted SD card." },
@@ -321,8 +354,12 @@ static const char *STR[S_COUNT][2] = {
     [S_PCAP_HINT]         = { "Rohe 802.11-Frames unter /sdcard/pcap/, stündlich rotierend, mit tshark/Wireshark lesbar. Braucht eine eingebundene SD-Karte.",
                               "Raw 802.11 frames in /sdcard/pcap/, rotating hourly, readable with tshark/Wireshark. Requires a mounted SD card." },
     [S_PCAP_BUF_MB]       = { "PCAP-RAM-Puffer (MB)",                "PCAP RAM buffer (MB)" },
-    [S_PCAP_BUF_HINT]     = { "Frames werden erst im PSRAM gesammelt und dann in einem Rutsch geschrieben, statt bei jedem Frame einzeln auf die (mit Ethernet geteilte) SD-Bus zuzugreifen. Wirkt erst nach einem Neustart.",
-                              "Frames are collected in PSRAM first and written in one batch, instead of touching the SD bus (shared with Ethernet) for every single frame. Takes effect after a reboot." },
+    [S_PCAP_BUF_HINT] = { "Frames sammeln sich erst im PSRAM und gehen dann in einem Rutsch "
+                          "auf die Karte, statt einzeln &uuml;ber den (mit Ethernet geteilten) "
+                          "SD-Bus. Wirkt erst nach einem Neustart.",
+                          "Frames gather in PSRAM first and then go to the card in one go, "
+                          "instead of one at a time over the (Ethernet-shared) SD bus. Takes "
+                          "effect after a reboot." },
     [S_PCAP_FLUSH_SEC]    = { "Sp&auml;testens schreiben nach (Sek.)", "Flush to SD at least every (sec)" },
     [S_PLAYBACK_FROM]   = { "Von",                       "From" },
     [S_PLAYBACK_TO]     = { "bis",                       "to" },
@@ -344,21 +381,23 @@ static const char *STR[S_COUNT][2] = {
     [S_MAP_LAYER_TRACKS_P]= { "Fahrspuren anderer Empf&auml;nger",
                                                          "Other receivers' tracks" },
     [S_MAP_TRACK_PTS]   = { "Punkte",                    "points" },
+    /* Goes to the map via textContent, which does NOT decode HTML entities --
+     * plain UTF-8 here, unlike every other entry in this table. */
+    [S_MAP_TRACK_CAP]   = { "Spuren gekürzt – die ältesten Punkte des Zeitraums fehlen",
+                            "tracks shortened – the oldest points of the period are missing" },
     [S_MAP_SEEN_BY]     = { "empfangen von",             "received by" },
     [S_PEERS]           = { "Weitere Empf&auml;nger",    "Other receivers" },
-    [S_PEERS_HINT]      = { "Hostnamen oder IP-Adressen weiterer Empf&auml;nger, mit Komma getrennt "
-                            "&ndash; z.&nbsp;B. <code>its-node344.local, 192.168.178.40</code>. Deren "
-                            "Fahrzeuge erscheinen dann zus&auml;tzlich auf dieser Karte. Es gibt keine "
-                            "Haupt- oder Nebenger&auml;te: jedes Ger&auml;t zeigt genau die an, die hier "
-                            "eingetragen sind. Abgefragt wird vom Browser aus, das Ger&auml;t selbst "
-                            "wird dadurch nicht belastet &ndash; dein Browser muss die anderen "
-                            "Empf&auml;nger also erreichen k&ouml;nnen (gleiches Netz).",
-                            "Host names or IP addresses of other receivers, comma-separated &ndash; e.g. "
-                            "<code>its-node344.local, 192.168.178.40</code>. Their vehicles then also "
-                            "appear on this map. There are no primary or secondary devices: each one "
-                            "shows exactly those listed here. The browser does the fetching, so the "
-                            "device itself carries no extra load &ndash; which means your browser must "
-                            "be able to reach the other receivers (same network)." },
+    [S_PEERS_HINT]  = { "Hostnamen oder IP-Adressen weiterer Empf&auml;nger, mit Komma "
+                        "getrennt &ndash; z.&nbsp;B. <code>its-node344.local, "
+                        "192.168.178.40</code>. Deren Fahrzeuge erscheinen zus&auml;tzlich auf "
+                        "dieser Karte; jedes Ger&auml;t zeigt genau die, die bei ihm "
+                        "eingetragen sind. Abgefragt wird vom Browser, nicht vom Ger&auml;t "
+                        "&ndash; dein Browser muss die anderen also erreichen k&ouml;nnen.",
+                        "Host names or IP addresses of other receivers, comma-separated "
+                        "&ndash; e.g. <code>its-node344.local, 192.168.178.40</code>. Their "
+                        "vehicles also appear on this map; every device shows exactly the ones "
+                        "listed on it. The browser does the fetching, not the device &ndash; "
+                        "so your browser has to be able to reach the others." },
     /* Set via innerText -- plain text, no HTML entities. */
     [S_UPD_WAIT]        = { "warte auf Neustart",        "waiting for reboot" },
     /* innerText/textContent -- plain text, no HTML entities. */
@@ -369,42 +408,51 @@ static const char *STR[S_COUNT][2] = {
      * it might drop everything else too. */
     [S_PCAP_FILTER]     = { "Umfang der Aufzeichnung",   "What gets recorded" },
     [S_PCAP_FILT_ALL]   = { "alles, ungek&uuml;rzt",     "everything, in full" },
-    [S_PCAP_FILT_THIN]  = { "alles &ndash; nur Ampelmeldungen h&ouml;chstens 1&times;/s",
-                            "everything &ndash; but traffic-light messages at most once a second" },
-    [S_PCAP_FILT_VEH]   = { "nur Fahrzeuge und Warnungen, keine Ampelmeldungen",
-                            "vehicles and warnings only, no traffic-light messages" },
-    [S_PCAP_FILT_HINT]  = { "Eine einzige Ampel macht 85&nbsp;% der Aufzeichnung aus &ndash; sie "
-                            "wiederholt sich zehnmal pro Sekunde. Gemessen: 14,3&nbsp;MB/h ungek&uuml;rzt, "
-                            "3,4&nbsp;MB/h bei 1&times;/s, 0,04&nbsp;MB/h nur mit Fahrzeugen. Die Frames "
-                            "selbst bleiben unver&auml;ndert und vollst&auml;ndig, es werden nur "
-                            "Wiederholungen weggelassen.",
-                            "A single traffic light makes up 85% of the recording &ndash; it repeats "
-                            "itself ten times a second. Measured: 14.3&nbsp;MB/h unfiltered, "
-                            "3.4&nbsp;MB/h at 1/s, 0.04&nbsp;MB/h with vehicles only. The frames "
-                            "themselves stay complete and unaltered; only repeats are skipped." },
+    [S_PCAP_FILT_THIN]  = { "alles &ndash; Ampelmeldungen h&ouml;chstens 1&times;/s <b>insgesamt</b>",
+                            "everything &ndash; traffic-light messages at most once a second "
+                            "<b>in total</b>" },
+    [S_PCAP_FILT_VEH]   = { "alles au&szlig;er Ampelphasen und Kreuzungskarten",
+                            "everything except signal phases and intersection maps" },
+    [S_PCAP_FILT_HINT] = { "Eine einzige Ampel macht 85&nbsp;% der Aufzeichnung aus, sie "
+                           "wiederholt sich zehnmal pro Sekunde. Gemessen: 14,3 / 3,4 / "
+                           "0,04&nbsp;MB/h. Die Frames bleiben unver&auml;ndert und "
+                           "vollst&auml;ndig, nur Wiederholungen fallen weg. <b>Wichtig:</b> "
+                           "die Grenze gilt je Nachrichtenart &uuml;ber ALLE Ampeln zusammen "
+                           "&ndash; bei zwei Kreuzungen in Reichweite steht pro Sekunde nur "
+                           "eine im Archiv. Wer jede l&uuml;ckenlos braucht, nimmt "
+                           "&bdquo;alles, ungek&uuml;rzt&ldquo;.",
+                           "A single traffic light makes up 85% of the recording, repeating "
+                           "itself ten times a second. Measured: 14.3 / 3.4 / 0.04&nbsp;MB/h. "
+                           "Frames stay unaltered and complete, only repeats are skipped. "
+                           "<b>Note:</b> the limit applies per message kind across ALL traffic "
+                           "lights &ndash; with two intersections in range only one makes it "
+                           "into the archive each second. Pick \"everything, in "
+                           "full\" if you need every light without gaps." },
     [S_TRACKS_ENABLE]   = { "Fahrspuren aufzeichnen",    "Record vehicle tracks" },
     [S_TRACKS_DAYS]     = { "Fahrspuren aufbewahren (Tage)", "Keep tracks for (days)" },
     [S_TRACKS_HINT]     = { "Zeichnet auf, wo Fahrzeuge tats&auml;chlich gefahren sind, und blendet "
                             "es auf der Karte als zuschaltbare Ebene ein. Sehr sparsam &ndash; rund "
-                            "150 Punkte pro Stunde, etwa 150 KB f&uuml;r drei Tage. Beginnt bei null: "
-                            "&auml;ltere Fahrten aus der PCAP-Aufzeichnung sind nicht enthalten.",
+                            "150 Punkte pro Stunde, gut 150 KB am Tag. Beginnt bei null: "
+                            "&auml;ltere Fahrten aus der PCAP-Aufzeichnung fehlen. Die Karte "
+                            "zeichnet h&ouml;chstens 26.000 Punkte je Abfrage.",
                             "Records where vehicles actually drove and shows it on the map as a "
-                            "switchable layer. Very light &ndash; about 150 points an hour, roughly "
-                            "150 KB for three days. Starts empty: earlier journeys from the PCAP "
-                            "recordings are not included." },
+                            "switchable layer. Light &ndash; about 150 points an hour, some 150 KB a day. "
+                            "Starts empty: earlier journeys from the PCAP recordings are missing. "
+                            "The map draws at most 26,000 points per request." },
     [S_ETH_LEDS]        = { "Netzwerk-LEDs",             "Network LEDs" },
-    [S_ETH_LEDS_HINT]   = { "Die zwei LEDs an der Netzwerkbuchse zeigen Verbindung und Datenverkehr. "
-                            "Abschalten st&ouml;rt den Betrieb nicht &ndash; nur die Verbindung ist "
-                            "dann am Ger&auml;t selbst nicht mehr ablesbar. Wirkt sofort.",
-                            "The two LEDs on the network socket show link and traffic. Turning them "
-                            "off does not affect operation &ndash; it just means the link can no "
-                            "longer be checked on the device itself. Takes effect immediately." },
-    [S_UPD_INTRO]       = { "W&auml;hle eine Firmware-Datei (.bin) und klicke Hochladen. Das Ger&auml;t "
-                            "flasht sie auf die inaktive OTA-Partition und startet neu. Danach musst du "
-                            "das Update im Status best&auml;tigen, sonst wird es zur&uuml;ckgerollt.",
-                            "Select a firmware (.bin) file and click Upload. The device flashes it to the "
-                            "inactive OTA partition and reboots. Afterwards you must confirm the update on "
-                            "the status page, otherwise it will be rolled back." },
+    [S_ETH_LEDS_HINT] = { "Die zwei LEDs an der Netzwerkbuchse zeigen Verbindung und "
+                          "Datenverkehr. Abschalten st&ouml;rt den Betrieb nicht, nur die "
+                          "Verbindung ist dann am Ger&auml;t nicht mehr ablesbar. Wirkt "
+                          "sofort.",
+                          "The two LEDs on the network socket show link and traffic. Switching "
+                          "them off does not affect operation, it only makes the link state "
+                          "unreadable on the device. Applies at once." },
+    [S_UPD_INTRO]   = { "Firmware-Datei (.bin) w&auml;hlen und hochladen. Das Ger&auml;t "
+                        "flasht sie auf die inaktive OTA-Partition und startet neu. Danach im "
+                        "Status best&auml;tigen, sonst wird zur&uuml;ckgerollt.",
+                        "Pick a firmware file (.bin) and upload it. The device flashes it to "
+                        "the inactive OTA partition and reboots. Confirm it on the status page "
+                        "afterwards, or it is rolled back." },
     /* Deliberately says "flash" not just "upload" -- the button triggers an
      * immediate flash + reboot in one step, no separate "apply" step, and
      * that's easy to miss if it only said "Upload" (people click buttons
@@ -438,26 +486,26 @@ static const char *STR[S_COUNT][2] = {
     [S_FS_USED]         = { "belegt",                   "used" },
     [S_FS_MOUNT_AT]     = { "eingebunden unter",        "mounted at" },
     [S_FS_INTERNAL]     = { "Interner Speicher",        "Internal storage" },
-    [S_FS_NOTE]         = { "Nur &bdquo;storage&ldquo; (/data) und die SD-Karte sind Dateisysteme mit Ordnern. "
-                            "Die &uuml;brigen Partitionen sind Rohbereiche ohne Dateien "
-                            "(nvs = Einstellungs-Datenbank, ota_* = Firmware-Images) &ndash; nur als Roh-Abbild ladbar.",
-                            "Only \"storage\" (/data) and the SD card are file systems with folders. "
-                            "The other partitions are raw regions without files "
-                            "(nvs = settings database, ota_* = firmware images) &ndash; downloadable only as a raw image." },
+    [S_FS_NOTE]     = { "Nur &bdquo;storage&ldquo; (/data) und die SD-Karte sind Dateisysteme "
+                        "mit Ordnern. Die &uuml;brigen Partitionen sind Rohbereiche (nvs = "
+                        "Einstellungen, ota_* = Firmware) und nur als Roh-Abbild ladbar.",
+                        "Only \"storage\" (/data) and the SD card are file systems "
+                        "with folders. The other partitions are raw areas (nvs = settings, "
+                        "ota_* = firmware) and can only be downloaded as a raw image." },
     [S_TAR_SELECTED]    = { "Auswahl (.tar)",           "Selection (.tar)" },
     [S_TAR_NONE]        = { "Nichts markiert.",         "Nothing selected." },
-    [S_TAR_HINT]        = { "Hinweis: Gr&ouml;&szlig;ere Downloads k&ouml;nnen wegen der "
-                             "Ger&auml;te-Architektur mehrere Minuten dauern &ndash; die "
-                             "Weboberfl&auml;che ist w&auml;hrenddessen nicht bedienbar.",
-                             "Note: larger downloads can take several minutes due to the "
-                             "device architecture &ndash; the web UI is unresponsive meanwhile." },
+    [S_TAR_HINT]        = { "Gr&ouml;&szlig;ere Downloads dauern mehrere Minuten. Die Oberfl&auml;che "
+                             "bleibt bedienbar; weitere Downloads laufen nacheinander, bei "
+                             "Andrang kommt eine Absage.",
+                             "Larger downloads take several minutes. The UI stays usable; further "
+                             "downloads run one after another, and are refused when too many pile up." },
     [S_SD_NOT_MOUNTED]  = { "Keine SD-Karte eingebunden.", "No SD card mounted." },
-    [S_SD_UNMOUNTED_HINT] = { "Steckt eine Karte, l&auml;sst sich aber nicht einbinden, ist sie "
-                              "vermutlich nicht FAT-formatiert (fabrikneue Karten &uuml;ber 32 GB "
-                              "kommen als exFAT) &ndash; einmal formatieren richtet sie ein.",
+    [S_SD_UNMOUNTED_HINT] = { "L&auml;sst sich eine steckende Karte nicht einbinden, ist sie "
+                              "vermutlich nicht FAT (fabrikneue &uuml;ber 32&nbsp;GB kommen "
+                              "als exFAT) &ndash; einmal formatieren richtet sie ein.",
                               "If a card is inserted but cannot be mounted, it is probably not "
-                              "FAT-formatted (factory cards above 32 GB ship as exFAT) &ndash; "
-                              "formatting it once sets it up." },
+                              "FAT (factory-fresh cards above 32&nbsp;GB come as exFAT) "
+                              "&ndash; formatting once sets it up." },
     [S_SD_MOUNT]        = { "Einbinden",               "Mount" },
     [S_SD_USAGE]        = { "Belegung",                 "Usage" },
     [S_SD_USED_OF]      = { "%s von %s belegt (%s frei)", "%s of %s used (%s free)" },
@@ -475,17 +523,15 @@ static const char *STR[S_COUNT][2] = {
     [S_SD_DELETE_SEL_CONFIRM] = { "Ausgewählte Dateien/Ordner löschen?",
                                   "Delete selected files/folders?" },
     [S_RSU_UP_TITLE]    = { "Standortfeste Sender nachliefern", "Re-send stationary transmitters" },
-    [S_RSU_UP_HINT]     = { "Sendet Ampeln und RSUs aus der PCAP-Aufzeichnung des gew&auml;hlten "
-                            "Zeitraums (h&ouml;chstens 24 h) nachtr&auml;glich an opentrafficmap "
-                            "&ndash; z.&nbsp;B. was w&auml;hrend eines Ausfalls empfangen wurde. "
-                            "Bewegliche Sender (Fahrzeuge) werden nie mitgesendet. Die "
-                            "Ausd&uuml;nnung bestimmt, wie viel je Station und Nachrichtentyp "
-                            "rausgeht &ndash; f&uuml;r den Karteneintrag reicht die Voreinstellung.",
-                            "Re-sends traffic lights and RSUs from the PCAP recording of the "
-                            "chosen period (24 h at most) to opentrafficmap &ndash; e.g. what was "
-                            "received during an outage. Moving senders (vehicles) are never "
-                            "included. Thinning controls how much is sent per station and message "
-                            "type &ndash; for a map entry the default is plenty." },
+    [S_RSU_UP_HINT] = { "Sendet Ampeln und RSUs aus der PCAP-Aufzeichnung des gew&auml;hlten "
+                        "Zeitraums (h&ouml;chstens 24&nbsp;h) nachtr&auml;glich an "
+                        "opentrafficmap &ndash; z.&nbsp;B. was w&auml;hrend eines Ausfalls "
+                        "ankam. Fahrzeuge nie. Die Ausd&uuml;nnung gilt je Station und "
+                        "Nachrichtentyp; f&uuml;r den Karteneintrag reicht die Voreinstellung.",
+                        "Re-sends traffic lights and RSUs from the PCAP recording of the "
+                        "chosen period (24&nbsp;h at most) to opentrafficmap &ndash; e.g. what "
+                        "arrived during an outage. Never vehicles. The thinning applies per "
+                        "station and message kind; the default is enough for the map entry." },
     [S_RSU_UP_THIN]     = { "Ausd&uuml;nnung",           "Thinning" },
     [S_RSU_UP_ONCE]     = { "1 Frame je Station u. Typ", "1 frame per station &amp; type" },
     [S_RSU_UP_BTN]      = { "An opentrafficmap senden",  "Send to opentrafficmap" },
@@ -496,10 +542,10 @@ static const char *STR[S_COUNT][2] = {
     [S_SRCH_TITLE]      = { "Suche in der Aufzeichnung", "Search the recording" },
     [S_SRCH_HINT]       = { "Durchsucht die PCAP-Aufzeichnung des Zeitraums (h&ouml;chstens 24 h). "
                             "Der Filter wirkt auf Typ, Absender-Adresse und Stations-Nummer. "
-                            "RSSI steht nicht in der Aufzeichnung und bleibt leer.",
+                            "RSSI steht nicht in der Aufzeichnung, die Spalte bleibt ein Strich.",
                             "Searches the PCAP recording of the chosen period (24 h at most). "
                             "The filter matches type, sender address and station id. "
-                            "RSSI is not part of the recording and stays empty." },
+                            "RSSI is not part of the recording, the column stays a dash." },
     [S_SRCH_FILTER]     = { "Filter",                   "Filter" },
     [S_SRCH_BTN]        = { "Suchen",                   "Search" },
     [S_SRCH_RUN]        = { "Suche…",                   "Searching…" },
@@ -507,6 +553,15 @@ static const char *STR[S_COUNT][2] = {
     [S_SRCH_LIMIT]      = { "Limit von 200 Treffern erreicht &ndash; Zeitraum oder Filter eingrenzen.",
                             "Hit the 200-match limit &ndash; narrow the period or filter." },
     [S_SRCH_PARTIAL]    = { "Zeitraum nur teilweise gelesen.", "Period only partly read." },
+    [S_SRCH_EXPORT]     = { "Als PCAP laden",              "Download as PCAP" },
+    [S_SRCH_EXPORT_HINT] = { "H&ouml;chstens 4&nbsp;MB; reicht das nicht, steht "
+                             "&bdquo;GEKUERZT&ldquo; im Dateinamen, bei l&uuml;ckenhaftem "
+                             "Lesen &bdquo;teilweise&ldquo;. Ganze Stunden liegen ohnehin "
+                             "unter /sdcard/pcap/. Braucht das Web-Passwort.",
+                             "4&nbsp;MB at most; beyond that the file name says "
+                             "\"GEKUERZT\", and \"teilweise\" if the read "
+                             "had gaps. Whole hours are under /sdcard/pcap/ anyway. Needs the "
+                             "web password." },
     [S_SD_FORMAT]       = { "Karte formatieren",        "Format card" },
     /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
     [S_SD_FORMAT_CONFIRM] = { "Karte wirklich formatieren? Alle Daten gehen verloren!",
@@ -515,6 +570,38 @@ static const char *STR[S_COUNT][2] = {
     [S_SD_FORMATTING]   = { "Formatiere\\u2026",        "Formatting\\u2026" },
     [S_SD_UP_HERE]      = { "Datei hierher hochladen",  "Upload a file here" },
     [S_SD_UP_BTN]       = { "Hochladen",                "Upload" },
+    [S_PEER_TITLE]      = { "Andere Empf&auml;nger",    "Other receivers" },
+    [S_PEER_NODE]       = { "Knoten",                   "Node" },
+    [S_PEER_RATE]       = { "Rate (letzte 60s)",        "Rate (last 60s)" },
+    [S_PEER_UPTIME]     = { "Laufzeit",                 "Uptime" },
+    [S_PEER_MQTT]       = { "MQTT",                     "MQTT" },
+    [S_PEER_OFFLINE]    = { "nicht erreichbar",         "unreachable" },
+    [S_PEER_OLDFW]      = { "antwortet, aber nicht mit Statusdaten &ndash; alte Firmware, "
+                            "Passwortschutz oder ein fremder Server",
+                            "answers, but not with status data &ndash; old firmware, password "
+                            "protection or some other server" },
+    [S_LOSS_TITLE]      = { "Verluste seit dem Start",  "Losses since boot" },
+    [S_LOSS_SNIFFER]    = { "Empfangspuffer voll oder kein Speicher",
+                            "Receive queue full or out of memory" },
+    [S_LOSS_MQTT]       = { "MQTT-Warteschlange voll",  "MQTT queue full" },
+    [S_LOSS_TRACKS]     = { "Fahrspur-Punkte verworfen",
+                            "Track points discarded" },
+    /* "(gesch&auml;tzt)": of sdpcap's drop sources only the hour-boundary give-up
+     * is byte-derived (buffered BYTES / measured average record size); oversize
+     * and starved-ring drops are exact frame counts like the rows above. */
+    [S_LOSS_PCAP]       = { "Aufzeichnung verloren (gesch&auml;tzt)",
+                            "Recording lost (estimated)" },
+    [S_LOSS_THINNED]    = { "Bewusst ausged&uuml;nnt",  "Thinned on purpose" },
+    [S_LOSS_HINT]       = { "Die Werte z&auml;hlen Frames seit dem Einschalten; bei der Aufzeichnung "
+                            "ist der Wert gesch&auml;tzt, weil dort ganze Puffer auf einmal verworfen "
+                            "werden. Ausged&uuml;nnte sind "
+                            "kein Fehler, sondern die eingestellte Filterung. Steigen die &uuml;brigen, "
+                            "kommt das Ger&auml;t nicht nach &ndash; SD-Karte, Netzwerk oder Speicher.",
+                            "The values count frames since power-on; the recording row is an estimate, "
+                            "because whole buffers are discarded there at once. "
+                            "Thinned ones are not an error but "
+                            "the configured filtering. If the others keep rising, the device is not "
+                            "keeping up &ndash; SD card, network or memory." },
     [S_NAV_SYSTEM]      = { "System",                   "System" },
     [S_TITLE_SYSTEM]    = { "System-Info",              "System info" },
     [S_SYS_CHIP]        = { "Chip",                     "Chip" },
@@ -542,13 +629,111 @@ static const char *STR[S_COUNT][2] = {
     [S_NAV_LOGS]        = { "Logs",                     "Logs" },
     [S_TITLE_LOGS]      = { "Logs",                     "Logs" },
     [S_LOGS_SYS]        = { "System-Log",               "System log" },
-    [S_LOGS_FRAMES]     = { "Frame-Log",                "Frame log" },
     [S_LOGS_REFRESH]    = { "Aktualisieren",            "Refresh" },
     [S_LOGS_NONE]       = { "Keine Log-Datei vorhanden (Logging aktiviert? SD eingebunden?).",
                             "No log file yet (logging enabled? SD mounted?)." },
     [S_LOGS_TAIL]       = { "Letzte %d KB, neueste Zeilen unten.",
                             "Last %d KB, newest lines at the bottom." },
+    [S_NAV_SENDERS]     = { "Sender",                   "Senders" },
+    [S_TITLE_SENDERS]   = { "Ortsfeste Sender, die geh&ouml;rt wurden",
+                            "Stationary senders heard" },
+    [S_SND_INTRO]   = { "Ampeln und RSU, die dieses Ger&auml;t geh&ouml;rt hat &ndash; mit "
+                        "SD-Karte auch &uuml;ber Neustarts. Fahrzeuge fehlen: sie wechseln "
+                        "laufend ihre Kennung.",
+                        "Traffic lights and RSUs this device has heard &ndash; across reboots "
+                        "too, with an SD card. Vehicles are missing: they keep changing their "
+                        "identifier." },
+    [S_SND_NONE]        = { "Noch kein ortsfester Sender geh&ouml;rt.",
+                            "No stationary sender heard yet." },
+    [S_SND_ID]          = { "Kennung",                  "ID" },
+    [S_SND_NAME]        = { "Kreuzung",                 "Intersection" },
+    [S_SND_TYPES]       = { "Sendet",                   "Sends" },
+    [S_SND_FRAMES]      = { "Frames",                   "Frames" },
+    [S_SND_FIRST]       = { "Zuerst",                   "First" },
+    [S_SND_LAST]        = { "Zuletzt",                  "Last" },
+    [S_SND_POS]         = { "Position",                 "Position" },
+    [S_SND_RSSI]        = { "Pegel dBm",                "Level dBm" },
+    [S_SND_VEHICLES]    = { "Dazu %lu Frames von Fahrzeugen <b>seit dem letzten Neustart</b> "
+                            "&ndash; die Tabelle oben z&auml;hlt mit SD-Karte &uuml;ber Neustarts weiter. "
+                            "Wie viele Fahrzeuge das waren, l&auml;sst sich nicht sagen: die "
+                            "Kennungen wechseln unterwegs.",
+                            "Plus %lu frames from vehicles <b>since the last restart</b> &ndash; the table "
+                            "above keeps counting across restarts when a card is present. How many "
+                            "vehicles that was cannot be said: identifiers change on the move." },
+    [S_SND_FULL]        = { "Tabelle voll &ndash; weitere Sender werden nicht mehr erfasst.",
+                            "Table full &ndash; further senders are no longer recorded." },
+    [S_SND_CLEAR]       = { "Liste zur&uuml;cksetzen",  "Reset list" },
+    /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
+    [S_SND_CLEAR_CONFIRM] = { "Senderliste wirklich zurücksetzen?",
+                              "Really reset the sender list?" },
+    [S_NAV_TRANSIT]     = { "&Ouml;ffis",                  "Transit" },
+    [S_TITLE_TRANSIT]   = { "Stra&szlig;enbahn und Bus", "Tram and bus" },
+    [S_PT_INTRO]        = { "Aus den VDV-R09-Telegrammen der vorbeifahrenden Fahrzeuge. "
+                            "Eine Vorbeifahrt = eine Sichtung &ndash; solange die Kennung nicht wechselt und sie unter 15 Minuten bleibt.",
+                            "From the VDV R09 telegrams of passing vehicles. One passage counts "
+                            "as one sighting &ndash; as long as the identifier holds and it stays under 15 minutes." },
+    [S_PT_NONE]         = { "Noch keine Linie erfasst.", "No line recorded yet." },
+    [S_PT_LINE]         = { "Linie",                     "Line" },
+    [S_PT_SIGHTINGS]    = { "Sichtungen",                "Sightings" },
+    [S_PT_AVG]          = { "&Oslash; Abweichung",       "Avg. deviation" },
+    [S_PT_LATE]         = { "max. Versp&auml;tung",      "Worst late" },
+    [S_PT_EARLY]        = { "max. zu fr&uuml;h",         "Worst early" },
+    [S_PT_UNKNOWN]      = { "Null",                      "Zero" },
+    [S_PT_LAST]         = { "Zuletzt",                   "Last" },
+    /* The wire format cannot express more, and a reader would otherwise take
+     * the numbers for a precise measurement. */
+    [S_PT_LIMIT]    = { "Das Funkformat kennt nur &plusmn;7&nbsp;Minuten; Werte am Anschlag "
+                        "sind mit &ge; markiert. Eine Null hei&szlig;t <em>p&uuml;nktlich oder "
+                        "nicht mitgesendet</em> &ndash; nicht unterscheidbar, daher eigene "
+                        "Spalte statt Mittelwert.",
+                        "The radio format only carries &plusmn;7&nbsp;minutes; values at that "
+                        "limit are marked &ge;. A zero means <em>on time or not "
+                        "transmitted</em> &ndash; indistinguishable, hence its own column "
+                        "instead of the average." },
+    [S_PT_ACTIVE]       = { "Offene Vorbeifahrten: %d (eine gilt bis 90 s nach der letzten Nachricht).",
+                            "Open passages: %d (one stays open until 90 s after the last message)." },
+    [S_PT_PASSAGES]     = { "Letzte Vorbeifahrten",     "Recent passages" },
+    [S_PT_WHEN]         = { "Wann",                     "When" },
+    [S_PT_COURSE]       = { "Kurs",                     "Course" },
+    [S_PT_DEST]         = { "Ziel",                     "Destination" },
+    [S_PT_DEV]          = { "Abweichung",               "Deviation" },
+    [S_PT_INRANGE]      = { "in Reichweite",            "In range" },
+    [S_PT_CLEAR]        = { "Statistik zur&uuml;cksetzen", "Reset statistics" },
+    [S_PT_CLEAR_CONFIRM] = { "Öffi-Statistik wirklich zurücksetzen?",
+                             "Really reset the transit statistics?" },
     [S_NAV_TRAFFIC]     = { "Verkehr",                  "Traffic" },
+    [S_TRF_BUSY]        = { "SD-Karte war besch&auml;ftigt &ndash; die gespeicherte Historie "
+                            "fehlt in dieser Ansicht. Gleich nochmal laden.",
+                            "The SD card was busy &ndash; the stored history is missing from this "
+                            "view. Reload in a moment." },
+    [S_TRF_DAY]         = { "Tag",                      "Day" },
+    [S_TRF_SG]          = { "Signalgruppe",             "Signal group" },
+    [S_TRF_PH_WAIT]     = { "Phasendauern erscheinen, sobald hier eine Gr&uuml;n- oder Rotphase "
+                            "einmal zu Ende ist &ndash; nachts h&auml;lt eine verkehrsabh&auml;ngige "
+                            "Anlage lange dieselbe.",
+                            "Phase durations appear once a green or red phase has ended here "
+                            "&ndash; at night a traffic-actuated installation holds one for a "
+                            "long time." },
+    [S_TRF_CYCLES]      = { "Gr&uuml;nphasen",          "Green phases" },
+    [S_TRF_SENDERS]     = { "Kennungen",                "Identifiers" },
+    [S_TRF_SENDERS_NOTE] = { "&bdquo;Kennungen&ldquo; z&auml;hlt verschiedene Funkkennungen, "
+                             "nicht Nachrichten &ndash; an einer Durchfahrtsstelle also grob "
+                             "die Fahrzeugzahl, genau ist sie nicht: Fahrzeuge wechseln ihre "
+                             "Kennung alle paar Minuten. &ge; hei&szlig;t, die "
+                             "Z&auml;hltabelle der Stunde war voll.",
+                             "\"Identifiers\" counts distinct radio identifiers, not messages "
+                             "&ndash; at a through road roughly the vehicle count, but not "
+                             "exact: vehicles change their identifier every few minutes. &ge; "
+                             "means the hour's counting table was full." },
+    [S_TRF_IDENT_NOTE]  = { "Nicht zu verwechseln mit der Seite &bdquo;Sender&ldquo;: die listet "
+                            "ortsfeste Anlagen, diese Spalte z&auml;hlt alle Funkkennungen der Stunde.",
+                            "Not to be confused with the \"Senders\" page: that lists "
+                            "stationary installations, this column counts every radio identifier "
+                            "seen in the hour." },
+    [S_TRF_SENDERS_DAY] = { "Im Tagesmodus z&auml;hlt je Klasse die st&auml;rkste Stunde, nicht die Tagessumme "
+                            "&ndash; sonst z&auml;hlte jede Ampel 24-mal.",
+                            "In daily mode each class contributes its busiest hour, not the day's total "
+                            "&ndash; otherwise every traffic light would count 24 times." },
     [S_TITLE_TRAFFIC]   = { "Verkehr",                  "Traffic" },
     [S_TRF_INTRO]       = { "Empfangene Nachrichten pro Stunde, nach Verkehrsteilnehmer. Wird st&uuml;ndlich auf die SD-Karte geschrieben und &uuml;berlebt Neustarts.",
                             "Received messages per hour, by road user. Written hourly to the SD card, survives reboots." },
@@ -558,9 +743,11 @@ static const char *STR[S_COUNT][2] = {
     [S_TRF_W_30D]       = { "30 Tage",                  "30 days" },
     [S_TRF_TOTAL]       = { "Gesamt",                   "Total" },
     [S_TRF_HOUR]        = { "Stunde",                   "Hour" },
-    [S_TRF_SPEED]       = { "&Oslash;/max km/h",        "avg/max km/h" },
-    [S_TRF_NODATA]      = { "Noch keine Daten (SD-Karte n&ouml;tig, sammelt ab der ersten vollen Stunde).",
-                            "No data yet (needs an SD card; collects from the first full hour)." },
+    [S_TRF_SPEED]       = { "&Oslash;/max km/h (Fahrzeuge)", "avg/max km/h (vehicles)" },
+    [S_TRF_NODATA]      = { "Noch keine Daten &ndash; die laufende Stunde erscheint ab dem ersten Frame, "
+                            "sobald die Uhr steht.",
+                            "No data yet &ndash; the current hour appears with the first frame, once "
+                            "the clock is set." },
     [S_CAT_CAR]         = { "Auto",                     "Car" },
     [S_CAT_BUS]         = { "Bus",                      "Bus" },
     [S_CAT_TRUCK]       = { "Lkw",                      "Truck" },
@@ -576,6 +763,12 @@ static const char *STR[S_COUNT][2] = {
     [S_EVT_WARNING]     = { "Warnung",                  "Warning" },
     [S_EVT_DENM]        = { "Gefahrenmeldung",          "Hazard notification" },
     [S_EVT_TRAFFIC]     = { "Verkehrslage / Stau",      "Traffic condition / queue" },
+    [S_EVT_CAPPED]      = { "Nur die neuesten 256 Warnungen &ndash; im Zeitraum waren es mehr.",
+                            "Only the newest 256 warnings &ndash; the period held more." },
+    [S_TRF_SPEED_MIXED] = { "Ein Teil dieses Zeitraums stammt noch aus einer anderen Regel f&uuml;r stehende "
+                            "Fahrzeuge &ndash; der Durchschnitt ist dort nicht direkt vergleichbar.",
+                            "Part of this period follows a different rule for standing vehicles &ndash; "
+                            "the average is not directly comparable there." },
     [S_TRF_SPEED_BY_TYPE] = { "Geschwindigkeit nach Typ (&Oslash;/max km/h)",
                               "Speed by type (avg/max km/h)" },
     [S_TRF_LIGHTS]      = { "Ampeln (live)",            "Traffic lights (live)" },
@@ -586,15 +779,12 @@ static const char *STR[S_COUNT][2] = {
         "Aktueller Schaltzustand je Signalgruppe der empfangenen Kreuzungen. "
         "Angezeigt wird, was die Gruppe steuert (aus der Kartennachricht "
         "MAPEM), mit ihrer Signalgruppen-Nummer in Klammern. "
-        "Die Sekundenzahl daneben ist die Restzeit bis zum "
-        "Umschalten &ndash; sie erscheint nur, wenn die Ampel diese Angabe "
-        "mitsendet (meist kurz vor einem Wechsel). Farbe = aktuelle Phase:",
-        "Current phase per signal group of the received intersections. Shown is "
-        "what each group controls (from the MAPEM map message), with its "
-        "signal-group number in brackets. The seconds "
-        "next to it are the time left until the phase changes &ndash; shown "
-        "only when the light broadcasts it (usually shortly before a change). "
-        "Colour = current phase:" },
+        "&ge;x s ist die fr&uuml;heste Umschaltzeit, nicht die genaue &ndash; "
+        "und nur da, wo die Ampel sie mitsendet. Farbe = aktuelle Phase:",
+        "Current phase per signal group of the received intersections, named after "
+        "what they control (from the MAPEM), with the signal group number in "
+        "brackets. &ge;x s is the EARLIEST switching time, not the exact one &ndash; "
+        "and only where the light transmits it. Colour = current phase:" },
     [S_TRF_PH_GREEN]    = { "Gr&uuml;n (frei)",        "Green (go)" },
     [S_TRF_PH_AMBER]    = { "Gelb (&Uuml;bergang)",    "Amber (change)" },
     [S_TRF_PH_RED]      = { "Rot (Halt)",              "Red (stop)" },
@@ -606,8 +796,8 @@ static const char *STR[S_COUNT][2] = {
     [S_DIR_PED]         = { "Fu&szlig;g&auml;nger",    "pedestrian" },
     [S_NAV_MAP]         = { "Karte",                    "Map" },
     [S_TITLE_MAP]       = { "Live-Karte",               "Live map" },
-    [S_MAP_HINT]        = { "Positionen aus empfangenen V2X-Nachrichten: Fahrzeuge (CAM) und ortsfeste Sender wie Ampeln/RSUs (Position aus der GeoNetworking-Schicht). Symbol je Stationstyp; Anklicken zeigt Details (Typ, Zeit, RSSI, bei Fahrzeugen auch km/h). Marker verschwinden, wenn 60 Sekunden lang nichts mehr von diesem Sender empfangen wurde. Zum Laden der Kartenkacheln braucht der Browser Internetzugang (OpenStreetMap) &ndash; das Ger&auml;t selbst nicht.<br><br>Verlauf/Wiedergabe: W&auml;hle unten einen Zeitbereich (Von/bis) und klicke Laden, dann kannst du mit dem Regler und der Play-Taste die Positionen aus diesem Zeitraum abspielen. Diese Daten stammen aus der rollierenden PCAP-Aufzeichnung auf der SD-Karte (falls aktiviert).",
-                            "Positions from received V2X messages: vehicles (CAM) and stationary senders such as traffic lights/RSUs (position from the GeoNetworking layer). Icon per station type; click for details (type, time, RSSI, and km/h for vehicles). Markers disappear after 60 seconds without a new message from that sender. Loading the map tiles needs the browser to have internet access (OpenStreetMap) &ndash; the device itself doesn't.<br><br>History/playback: pick a time range (from/to) below and click Load, then use the slider and Play button to replay positions from that period. This data comes from the rolling PCAP recording on the SD card (if enabled)." },
+    [S_MAP_HINT]        = { "Positionen aus empfangenen V2X-Nachrichten: Fahrzeuge (CAM) und ortsfeste Sender wie Ampeln/RSUs (Position aus der GeoNetworking-Schicht). Symbol je Stationstyp; Anklicken zeigt Details (Typ, Zeit, RSSI, bei Fahrzeugen auch km/h). Ein Marker verschwindet nach der eingestellten Marker-Standzeit ohne neue Nachricht. Die Kartenkacheln holt der Browser aus dem Internet, das Ger&auml;t selbst nicht.<br><br>Verlauf: Zeitbereich unten w&auml;hlen, Laden, dann mit Regler und Play abspielen &ndash; Quelle ist die rollierende PCAP-Aufzeichnung auf der SD-Karte.",
+                            "Positions from received V2X messages: vehicles (CAM) and stationary senders such as traffic lights/RSUs (position from the GeoNetworking layer). Icon per station type; click for details (type, time, RSSI, and km/h for vehicles). A marker disappears after the configured marker hold time without a new message. The browser fetches the map tiles from the internet, the device does not.<br><br>History: pick a time range below, click Load, then replay with the slider and Play &ndash; the source is the rolling PCAP recording on the SD card." },
     [S_MAP_HELP]        = { "Info &amp; Hilfe",           "Info &amp; help" },
     [S_MAP_LAYER_STREETS] = { "Karte",                  "Map" },
     [S_MAP_LAYER_SATELLITE] = { "Satellit",             "Satellite" },
@@ -617,7 +807,7 @@ static const char *STR[S_COUNT][2] = {
     [S_MAP_DEST]        = { "Ziel",                    "Destination" },
     [S_MAP_LATE]        = { "Versp&auml;tung",         "delay" },
     [S_MAP_EARLY]       = { "Vorsprung",               "ahead" },
-    [S_MAP_ONTIME]      = { "p&uuml;nktlich",          "on time" },
+    [S_MAP_ONTIME]      = { "keine Abweichung gemeldet", "no deviation reported" },
     [S_SYS_COREDUMP]      = { "&#9888; Crash-Dump verf&uuml;gbar", "&#9888; Crash dump available" },
     [S_SYS_COREDUMP_DOWNLOAD] = { "Herunterladen",      "Download" },
     [S_SYS_COREDUMP_CLEAR] = { "L&ouml;schen",          "Delete" },
@@ -670,10 +860,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
 /*  NTP time synchronisation                                          */
 /* ================================================================== */
 
-/* WiFi frames only carry a device-relative microsecond timestamp, so the
- * message list cannot show a real wall-clock time on its own. We start an SNTP
- * client once the network is up; from then on webserver_handle_packet stamps
- * each frame with the synced wall-clock time and /messages shows HH:MM:SS. */
+/* Both sniffer paths stamp gettimeofday, which without a synced clock counts
+ * seconds since boot -- so wall-clock times need this SNTP client first. */
 
 /* Europe/Berlin with automatic CET/CEST daylight-saving switch. */
 #define LOCAL_TZ   "CET-1CEST,M3.5.0,M10.5.0/3"
@@ -941,8 +1129,8 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     web_msg_entry_t *e = &msg_ring[msg_ring_head];
     /* Prefer real wall-clock time once NTP has synced, so /messages shows
      * HH:MM:SS. Before sync (or if it never happens) fall back to the packet's
-     * own timestamp: a device-relative microsecond clock for WiFi frames,
-     * gettimeofday epoch for Ethernet. */
+     * own timestamp: both sniffer paths stamp gettimeofday, which before sync
+     * counts seconds since boot, not epoch. */
     if (time_is_synced())
     {
         struct timeval tv;
@@ -964,10 +1152,12 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     entry_from_decoded(e, &d);
     uint8_t st_code = d.station_type, msg_id = d.message_id;
     msg_type_stats_record(e->msgtype);
-    tstat_note(st_code, msg_id, e->has_speed, e->speed_cmps);
+    tstat_note(st_code, e->station_id, msg_id, e->has_speed, e->speed_cmps);
+    inventory_note(e->seconds, e->rssi, &d);
+    ptlog_note(e->seconds, e->station_id, &d);
     /* Log the hazard where it IS, not where the sender is -- the DENM's own
      * eventPosition when it carried one, the sender's position otherwise. */
-    events_note(e->seconds, st_code, msg_id, d.denm_cause, d.denm_subcause,
+    events_note(e->seconds, st_code, e->station_id, msg_id, d.denm_cause, d.denm_subcause,
                 d.denm_station, d.denm_seq,
                 d.has_denm_pos || e->has_position,
                 d.has_denm_pos ? d.denm_lat_e7 : e->lat_e7,
@@ -1269,6 +1459,8 @@ static const char PAGE_HEADER_FMT[] =
     "<a href='/?lang=%s'>%s</a><a href='/messages?lang=%s'>%s</a>"
     "<a href='/settings?lang=%s'>%s</a><a href='/update?lang=%s'>%s</a>"
     "<a href='/map?lang=%s'>%s</a>"
+    "<a href='/senders?lang=%s'>%s</a>"
+    "<a href='/transit?lang=%s'>%s</a>"
 #if CONFIG_ENABLE_SD
     "<a href='/traffic?lang=%s'>%s</a>"
 #endif
@@ -1364,6 +1556,8 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
              lc, T(S_NAV_SETTINGS),
              lc, T(S_NAV_UPDATE),
              lc, T(S_NAV_MAP),
+             lc, T(S_NAV_SENDERS),
+             lc, T(S_NAV_TRANSIT),
 #if CONFIG_ENABLE_SD
              lc, T(S_NAV_TRAFFIC),
 #endif
@@ -1461,6 +1655,13 @@ static void render_activity_stats(httpd_req_t *req)
     snprintf(title, sizeof(title), "<h3>%s</h3>", T(S_ACTIVITY_TITLE));
     httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
 
+    /* The two halves below cover DIFFERENT periods, so each says so itself --
+     * one heading for both had the type totals read as a 60 s snapshot. */
+    char sparklbl[128];
+    snprintf(sparklbl, sizeof(sparklbl), "<p style='margin:2px 0'><small>%s</small></p>",
+             T(S_ACTIVITY_SPARK));
+    httpd_resp_send_chunk(req, sparklbl, HTTPD_RESP_USE_STRLEN);
+
     char svgopen[160];
     snprintf(svgopen, sizeof(svgopen),
         "<svg id='st-spark' viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>",
@@ -1474,9 +1675,10 @@ static void render_activity_stats(httpd_req_t *req)
 
     static EXT_RAM_BSS_ATTR char typeline[1024];
     build_typeline_html(typeline, sizeof(typeline));
-    char typeblock[1152];
-    snprintf(typeblock, sizeof(typeblock), "<p id='st-type'>%s</p>",
-        typeline[0] ? typeline : T(S_ACTIVITY_NONE));
+    char typeblock[1408];
+    snprintf(typeblock, sizeof(typeblock),
+        "<p style='margin:8px 0 2px'><small>%s</small></p><p id='st-type'>%s</p>",
+        T(S_ACTIVITY_TYPES), typeline[0] ? typeline : T(S_ACTIVITY_NONE));
     httpd_resp_send_chunk(req, typeblock, HTTPD_RESP_USE_STRLEN);
 
     char hintblock[768];
@@ -1597,7 +1799,9 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     snprintf(buttons, sizeof(buttons),
         "<p>"
         "<button id='st-sniffbtn' data-action='%s' onclick=\"var a=this.getAttribute('data-action');"
-        "fetch('/sniffer?action='+a,{method:'POST'}).then(function(){if(window.stSetSniff)window.stSetSniff(a==='start');})\">%s</button> "
+        /* r.ok, not "it returned": /sniffer is password-gated, and a rejected
+         * request must not flip the label. The status poll re-asserts the truth. */
+        "fetch('/sniffer?action='+a,{method:'POST'}).then(function(r){if(r.ok&&window.stSetSniff)window.stSetSniff(a==='start');})\">%s</button> "
         "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
 #if CONFIG_ENABLE_SD
         /* Result goes into its own span rather than replacing the page: if the
@@ -1644,6 +1848,66 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         T(S_RUNNING), T(S_STOPPED), T(S_CONNECTED), T(S_DISCONNECTED),
         T(S_SNIFF_START), T(S_SNIFF_STOP));
     httpd_resp_send_chunk(req, applyscript, HTTPD_RESP_USE_STRLEN);
+
+    /* Neighbours at a glance: three receivers meant three browser tabs, and
+     * the comparison between them is the actual information. */
+    {
+        char peers_cfg[CONFIG_PEERS_BUFFER_SIZE] = "";
+        size_t psz = sizeof(peers_cfg);
+        config_get_str(CONFIG_INDEX_PEERS, peers_cfg, &psz);
+        if (peers_cfg[0])
+        {
+            char plist[CONFIG_PEERS_BUFFER_SIZE * 2] = {0};
+            size_t o = 0;
+            bool first = true, open_q = false;
+            for (const char *p = peers_cfg; *p && o + 4 < sizeof(plist); p++)
+            {
+                bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                          (*p >= '0' && *p <= '9') || *p == '.' || *p == '-' || *p == ':';
+                if (ok)
+                {
+                    if (!open_q)
+                    {
+                        if (!first) plist[o++] = ',';
+                        plist[o++] = '"';
+                        open_q = true; first = false;
+                    }
+                    plist[o++] = *p;
+                }
+                else if (open_q) { plist[o++] = '"'; open_q = false; }
+            }
+            if (open_q && o + 1 < sizeof(plist)) plist[o++] = '"';
+            plist[o] = '\0';
+
+            static EXT_RAM_BSS_ATTR char peerblk[2048];
+            HTML_PRINTF(peerblk,
+                "<h2>%s</h2><div class='scroll'><table id='peertbl'><thead><tr>"
+                "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
+                "<tbody id='peerbody'></tbody></table></div>"
+                "<script>(function(){var P=[%s];var B=document.getElementById('peerbody');"
+                "if(!P.length){return;}"
+                "function row(h,txt){var tr=document.createElement('tr');"
+                "tr.innerHTML=\"<td><a href='http://\"+h+\"/'>\"+h+\"</a></td>\"+txt;"
+                "return tr;}"
+                "P.forEach(function(h){var tr=row(h,'<td colspan=3>&hellip;</td>');B.appendChild(tr);"
+                "fetch('http://'+h+'/status.json',{cache:'no-store'})"
+                ".then(function(r){return r.json();}).then(function(d){"
+                "tr.innerHTML=\"<td><a href='http://\"+h+\"/'>\"+h+\"</a></td><td>\"+d.rate"
+                "+\"</td><td>\"+d.uptime+\"</td><td>\"+(d.mqtt?'&#10003;':'&#10007;')+\"</td>\";})"
+                /* A blocked cross-origin read and a dead host both land in
+                 * catch(); a no-cors probe tells them apart, so an older peer
+                 * is not reported as offline. */
+                ".catch(function(){"
+                "fetch('http://'+h+'/status.json',{mode:'no-cors',cache:'no-store'})"
+                ".then(function(){tr.innerHTML=\"<td><a href='http://\"+h+\"/'>\"+h"
+                "+\"</a></td><td colspan=3>%s</td>\";})"
+                ".catch(function(){tr.innerHTML=\"<td>\"+h+\"</td><td colspan=3>%s</td>\";});"
+                "});});})();</script>",
+                T(S_PEER_TITLE), T(S_PEER_NODE), T(S_PEER_RATE), T(S_PEER_UPTIME),
+                T(S_PEER_MQTT), plist, T(S_PEER_OLDFW), T(S_PEER_OFFLINE));
+            httpd_resp_send_chunk(req, peerblk, HTTPD_RESP_USE_STRLEN);
+        }
+    }
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
@@ -1700,6 +1964,9 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
         , (double)temperature_get()
 #endif
     );
+    /* The peer row on another node's status page reads this cross-origin,
+     * exactly like /markers.json and /tracks.json already allow. */
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
@@ -1769,8 +2036,9 @@ static size_t cam_json_extra(const web_msg_entry_t *e, char *out, size_t cap)
     /* role 0 is "default" -- nothing worth showing, so only send 1..15. */
     if (e->role != 0xFF && e->role != 0 && n < cap)
         n += snprintf(out + n, cap - n, ",\"vr\":%u", (unsigned)e->role);
-    /* R09 telegram detail. `pd` is sent even when zero: "on time" is a real
-     * statement, and the client keeps the last value per station. */
+    /* R09 telegram detail. `pd` is sent even when zero -- but zero means "on
+     * time OR the field was not transmitted", the two are indistinguishable in
+     * R09.16. The client keeps the last value per station. */
     if (e->pt_telegram && e->pt_course && n < cap)
         n += snprintf(out + n, cap - n, ",\"pk\":%u", (unsigned)e->pt_course);
     if (e->pt_telegram && e->pt_dest && n < cap)
@@ -1816,7 +2084,9 @@ static void msg_detail_text(const web_msg_entry_t *e, uint32_t now,
     if (e->has_position && (e->lat_e7 || e->lon_e7))
         n += snprintf(out + n, cap - n, "%s%.5f, %.5f", DETAIL_SEP,
                       e->lat_e7 / 1e7, e->lon_e7 / 1e7);
-    if (e->has_speed && n < cap)
+    /* -1 cm/s is the GN "not available" pattern; printing it yielded "-0 km/h"
+     * next to the popup key that already suppresses it. */
+    if (e->has_speed && e->speed_cmps != -1 && n < cap)
         n += snprintf(out + n, cap - n, "%s%.0f km/h", DETAIL_SEP,
                       e->speed_cmps * 0.036);
     if (e->heading_ddeg != 0xFFFF && n < cap)
@@ -1843,6 +2113,19 @@ static void msg_detail_text(const web_msg_entry_t *e, uint32_t now,
     if (e->pt_telegram && e->pt_deviation && n < cap)
         n += snprintf(out + n, cap - n, "%s%+d %s", DETAIL_SEP,
                       (int)e->pt_deviation, de ? "Min" : "min");
+    /* Priority request and turn request are what the telegram is actually FOR
+     * -- they are why the traffic light lets this vehicle through. */
+    if (e->pt_telegram && e->pt_priority && n < cap)
+        n += snprintf(out + n, cap - n, "%s%s %u", DETAIL_SEP,
+                      de ? "Prio" : "prio", (unsigned)e->pt_priority);
+    if (e->pt_telegram && e->pt_request && e->pt_request < 4 && n < cap)
+    {
+        static const char *const HA_DE[] = { "", "geradeaus", "links", "rechts" };
+        static const char *const HA_EN[] = { "", "straight", "left", "right" };
+        n += snprintf(out + n, cap - n, "%s%s %s", DETAIL_SEP,
+                      de ? "Wunsch" : "request",
+                      (de ? HA_DE : HA_EN)[e->pt_request]);
+    }
     if (e->role != 0xFF && e->role < 16 && (de ? ROLE_DE : ROLE_EN)[e->role] && n < cap)
         n += snprintf(out + n, cap - n, "%s%s", DETAIL_SEP,
                       (de ? ROLE_DE : ROLE_EN)[e->role]);
@@ -1900,7 +2183,7 @@ static size_t build_msg_json(char *out, size_t out_size)
     {
         web_msg_entry_t *e = &snapshot[count - 1 - n];
 
-        char detail[320];
+        char detail[384];
         msg_detail_text(e, jnow, detail, sizeof(detail));
 
         char clock[24];
@@ -1919,7 +2202,9 @@ static size_t build_msg_json(char *out, size_t out_size)
         {
             size_t po = snprintf(possuffix, sizeof(possuffix), ",\"a\":%ld,\"o\":%ld,\"i\":%lu",
                      (long)e->lat_e7, (long)e->lon_e7, (unsigned long)e->station_id);
-            if (e->has_speed && po < sizeof(possuffix))
+            /* -1 cm/s is the GN "speed unavailable" pattern, not a reading --
+             * emitting it printed "-0.0 km/h" in the popup. */
+            if (e->has_speed && e->speed_cmps != -1 && po < sizeof(possuffix))
                 po += snprintf(possuffix + po, sizeof(possuffix) - po, ",\"s\":%ld", (long)e->speed_cmps);
             if (e->length_dm && e->width_dm && po < sizeof(possuffix))
                 po += snprintf(possuffix + po, sizeof(possuffix) - po,
@@ -2124,7 +2409,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     {
         web_msg_entry_t *e = &snapshot[count - 1 - n];
 
-        char detail[320];
+        char detail[384];
         msg_detail_text(e, (uint32_t)time(NULL), detail, sizeof(detail));
 
         char clock[24];
@@ -2147,7 +2432,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
         else
             snprintf(mac_str, sizeof(mac_str), "-");
 
-        char row[832];
+        char row[896];
         HTML_PRINTF(row,
             "<tr><td>%zu</td><td>%s</td><td>%s</td><td>%lu</td>"
             "<td class='wrapcell'>%s</td><td class='mono'>%s</td><td class='wrapcell'>%s</td></tr>",
@@ -2190,13 +2475,17 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     /* Archive tools live here with the messages they operate on: search the
      * PCAP recording, and the manual re-send of stationary senders. */
     {
-        static EXT_RAM_BSS_ATTR char arch[4096];
-        snprintf(arch, sizeof(arch),
+        /* 2.6 KB of literal plus 15 substituted strings; sized with room and
+         * checked, because a cut here swallows the rest of the page. */
+        static EXT_RAM_BSS_ATTR char arch[6144];
+        HTML_PRINTF(arch,
             "<h2>%s</h2><p><small>%s</small></p>"
             "<p><input type='datetime-local' id='sf'> &ndash; "
             "<input type='datetime-local' id='st'> &nbsp; %s: "
             "<input id='sq' size='14' maxlength='32'> "
-            "<button onclick='srch()'>%s</button></p>"
+            "<button onclick='srch()'>%s</button> "
+            "<button onclick='expp()'>%s</button>"
+            "<br><small>%s</small></p>"
             "<div id='sr'></div>"
             "<h2>%s</h2><p><small>%s</small></p>"
             "<p><input type='datetime-local' id='rf'> &ndash; "
@@ -2222,6 +2511,12 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
             "fetch('/messages/search?from='+f+'&to='+t+'&q='+encodeURIComponent(document.getElementById('sq').value)+'&lang=%s')"
             ".then(function(r){return r.text();}).then(function(x){o.innerHTML=x;})"
             ".catch(function(){o.textContent='Fehler';});}"
+            "function expp(){"
+            "var f=Math.floor(new Date(document.getElementById('sf').value).getTime()/1000);"
+            "var t=Math.floor(new Date(document.getElementById('st').value).getTime()/1000);"
+            "if(!f||!t)return;"
+            "location.href='/messages/export.pcap?from='+f+'&to='+t"
+            "+'&q='+encodeURIComponent(document.getElementById('sq').value);}"
             "var RS='%s';"
             "function rsuup(){"
             "var f=Math.floor(new Date(document.getElementById('rf').value).getTime()/1000);"
@@ -2239,6 +2534,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
             ".catch(function(){o.textContent='Fehler';});}"
             "</script>",
             T(S_SRCH_TITLE), T(S_SRCH_HINT), T(S_SRCH_FILTER), T(S_SRCH_BTN),
+            T(S_SRCH_EXPORT), T(S_SRCH_EXPORT_HINT),
             T(S_RSU_UP_TITLE), T(S_RSU_UP_HINT), T(S_RSU_UP_THIN), T(S_RSU_UP_ONCE),
             T(S_RSU_UP_BTN),
             /* The fetches carry the page's language along -- without it the
@@ -2394,12 +2690,12 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         if (open_q && o + 1 < sizeof(peerjs)) peerjs[o++] = '"';
         peerjs[o] = '\0';
     }
-    char labels[1536];   /* worst case ~1110 with all texts, peers and node id */
+    char labels[1792];   /* worst case ~1190 with all texts, peers and node id */
     HTML_PRINTF(labels,
              "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\","
              "ITS_MAP_L_DARK=\"%s\",ITS_MAP_L_LIGHT=\"%s\","
              "ITS_MAP_L_TRACKS=\"%s\",ITS_MAP_L_TRACKS_P=\"%s\","
-             "ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
+             "ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_CAP=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
              "ITS_MAP_SEEN_BY=\"%s\",ITS_MAP_PEERS=[%s],ITS_MAP_SELF=\"%s\","
              "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\",ITS_PB_BUSY=\"%s\","
              "ITS_PB_PART=\"%s\","
@@ -2410,7 +2706,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
              T(S_MAP_LAYER_STREETS), T(S_MAP_LAYER_SATELLITE),
              T(S_MAP_LAYER_DARK), T(S_MAP_LAYER_LIGHT),
              T(S_MAP_LAYER_TRACKS), T(S_MAP_LAYER_TRACKS_P),
-             T(S_MAP_TRACK_PTS), (unsigned long)trkdays,
+             T(S_MAP_TRACK_PTS), T(S_MAP_TRACK_CAP), (unsigned long)trkdays,
              T(S_MAP_SEEN_BY), peerjs, selfname,
              T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR), T(S_PLAYBACK_BUSY),
              T(S_PLAYBACK_PARTIAL),
@@ -2477,7 +2773,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         if (e->rssi != 0) snprintf(rssi_str, sizeof(rssi_str), "%d dBm", e->rssi);
         else              snprintf(rssi_str, sizeof(rssi_str), "-");
         char speedsuffix[24] = "";
-        if (e->has_speed)
+        if (e->has_speed && e->speed_cmps != -1)   /* -1 = not available */
             snprintf(speedsuffix, sizeof(speedsuffix), ",\"s\":%ld", (long)e->speed_cmps);
         char denmsuffix[160] = "";
         denm_json(e->station_id, (uint32_t)time(NULL), denmsuffix, sizeof(denmsuffix));
@@ -2544,6 +2840,17 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * cost megabytes each on retina, and mobile Safari killed the tab. */
         "var trackRenderer=L.canvas();"
         "var trackLayer=L.layerGroup(),tracksLoaded=false;"
+        /* The point cap is a real omission, not a rounding -- the overlay says
+         * so rather than drawing a short day that looks complete. */
+        "var trackCap=false,trackCapSelf=false,trackCapPeer=false,trackNote=null;"
+        "function updateTrackNote(){"
+        "if(!trackCap){if(trackNote){trackNote.remove();trackNote=null;}return;}"
+        "if(trackNote)return;"
+        "trackNote=L.control({position:'bottomleft'});"
+        "trackNote.onAdd=function(){var d=L.DomUtil.create('div','tracknote');"
+        "d.style.cssText='background:rgba(20,22,24,.85);color:#e0b050;padding:4px 8px;"
+        "border-radius:4px;font-size:12px';d.textContent=ITS_MAP_TRACK_CAP;return d;};"
+        "trackNote.addTo(map);}"
         /* Separate overlay for peers' tracks, never merged per vehicle -- no
          * timestamps to order points across receivers, and separate lines show the overlap. */
         "var peerTrackLayer=L.layerGroup(),peerTracksLoaded=false;"
@@ -2564,21 +2871,28 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "pl.bindPopup('#'+t.i+' \\u00b7 '+pts.length+' '+ITS_MAP_TRACK_PTS"
         "+(who?'<br><small>'+ITS_MAP_SEEN_BY+' '+htxt(who)+'</small>':''));"
         "pl.addTo(layer);}}"
+        /* /tracks.json used to be a bare array and became {"t":[...],"c":n}.
+         * A peer still on the old firmware answers with the array, and without
+         * this its tracks vanish into the peer .catch -- indistinguishable
+         * from "receiver offline", which is exactly what that catch hides. */
+        "function trkArr(d){return Array.isArray(d)?d:((d&&d.t)||[]);}"
         "function loadTracks(){tracksLoaded=true;"
         "fetch('/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
-        ".then(function(r){return r.json();}).then(function(a){"
-        "trackLayer.clearLayers();drawTracks(a,trackLayer,'#4fb8e0',ITS_MAP_SELF);"
+        ".then(function(r){return r.json();}).then(function(d){"
+        "trackLayer.clearLayers();drawTracks(trkArr(d),trackLayer,'#4fb8e0',ITS_MAP_SELF);"
+        "trackCapSelf=!!(d&&d.c);trackCap=trackCapSelf||trackCapPeer;updateTrackNote();"
         "}).catch(function(){tracksLoaded=false;});}"
         /* One colour per peer, in the order they are configured, so the same
          * receiver keeps the same colour across reloads. Chosen to stay apart
          * from the local blue and from the amber UI accent. */
         "var PEER_COLORS=['#e07a4f','#7ad07a','#c07ae0','#e0c04f','#4fe0c0'];"
-        "function loadPeerTracks(){peerTracksLoaded=true;"
+        "function loadPeerTracks(){peerTracksLoaded=true;trackCapPeer=false;"
         "peerTrackLayer.clearLayers();"
         "ITS_MAP_PEERS.forEach(function(hp,idx){"
         "fetch('http://'+hp+'/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
-        ".then(function(r){return r.json();}).then(function(a){"
-        "drawTracks(a,peerTrackLayer,PEER_COLORS[idx%PEER_COLORS.length],hp);"
+        ".then(function(r){return r.json();}).then(function(d){"
+        "drawTracks(trkArr(d),peerTrackLayer,PEER_COLORS[idx%PEER_COLORS.length],hp);"
+        "if(d&&d.c)trackCapPeer=true;trackCap=trackCapSelf||trackCapPeer;updateTrackNote();"
         /* A peer that is off or unreachable is skipped silently, exactly like
          * the live marker poll -- one missing receiver must not cost the
          * others their tracks. */
@@ -2620,7 +2934,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "h+='<span style=\"display:inline-block;margin:1px 5px 1px 0;white-space:nowrap\">"
         "<span style=\"display:inline-block;width:11px;height:11px;border-radius:50%;"
         "background:'+spatColor(d.g[j][1])+';vertical-align:middle;margin-right:3px\"></span>'"
-        "+(d.g[j][3]?d.g[j][3]+' <small>('+d.g[j][0]+')</small>':d.g[j][0])+(d.g[j][2]>=0?' <small>'+d.g[j][2]+'s</small>':'')+'</span>';}return h;}"
+        "+(d.g[j][3]?d.g[j][3]+' <small>('+d.g[j][0]+')</small>':d.g[j][0])+(d.g[j][2]>=0?' <small>\\u2265'+d.g[j][2]+'s</small>':'')+'</span>';}return h;}"
         /* Renders the set bits of a BIT STRING as a comma-separated line.
          * Bit 0 is the MSB, hence 1<<(w-1-i). */
         "function bits(v,names,w){if(!v)return '';var o=[];"
@@ -2633,7 +2947,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "if(m.pl)h+='<br><b>'+ITS_MAP_LINE+' '+m.pl+'</b>';"
         "if(m.pk)h+=' &middot; '+ITS_MAP_KURS+' '+m.pk;"
         "if(m.pz)h+=' &middot; '+ITS_MAP_ZIEL+' '+m.pz;"
-        /* pd is the schedule deviation: >0 late, <0 early, 0 on time. */
+        /* pd is the schedule deviation: >0 late, <0 early. Zero is ambiguous
+         * (on time OR not transmitted) -- the label says so, see S_MAP_ONTIME. */
         "if(m.pd!==undefined)h+='<br>'+(m.pd>0?m.pd+' '+ITS_MAP_LATE:"
         "(m.pd<0?(-m.pd)+' '+ITS_MAP_EARLY:ITS_MAP_ONTIME));"
         "if(m.vl&&m.vw)h+='<br>'+(m.vl/10).toFixed(1)+' \\u00d7 '+(m.vw/10).toFixed(1)+' m';"
@@ -2699,14 +3014,25 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "markers[key].marker.bindPopup(popupHtml(m));"
         "markers[key].lastSeen=now;"
         "if(!haveView){map.setView([lat,lon],15);haveView=true;}}}"
+        /* ?lat=&lon= (1e-7 degrees) centres on one sender -- the senders page
+         * links here, and without it the reader lands on an overview. */
+        "(function(){var q=new URLSearchParams(location.search);"
+        "var la=parseInt(q.get('lat'),10),lo=parseInt(q.get('lon'),10);"
+        "if(la&&lo){map.setView([la/1e7,lo/1e7],17);haveView=true;"
+        "L.circle([la/1e7,lo/1e7],{radius:25,color:'#f2b134',weight:2,fill:false}).addTo(map);}})();"
         "apply(window.ITS_MAP_SEED||[]);"
         /* Named (not anonymous) so playback can pause/resume it -- it uses
          * real Date.now(), meaningless against historical/scrubbed
          * timestamps, so it must not run while replaying the past. */
         "var sweepTimer;"
+        /* VMEM holds the last known line, destination and deviation per station
+         * so a CAM that omits them does not blank the popup. It outlived the
+         * marker, so a new pseudonym reusing that id inherited a stale line and
+         * delay -- and the object grew for the lifetime of the page. */
         "function startSweep(){sweepTimer=setInterval(function(){var now=Date.now();"
         "for(var k in markers){if(now-markers[k].lastSeen>ITS_MAP_STALE*1000){"
-        "dropMarker(k);}}},5000);}"
+        "dropMarker(k);delete VMEM[k];}}"
+        "for(var k in VMEM){if(!markers[k])delete VMEM[k];}},5000);}"
         "startSweep();"
         "var delay=1000,ws,closing=false;"
         "function connect(){"
@@ -2882,7 +3208,12 @@ static esp_err_t spatem_json_handler(httpd_req_t *req)
     for (int i = 0; i < ni; i++)
     {
         spatem_intersection_t *e = &ints[i];
-        unsigned long age = now > e->last_seen ? (unsigned long)(now - e->last_seen) : 0;
+        /* phase_seen, not last_seen: this number sits beside the phase dots and
+         * must say how old THEY are, not when a MAPEM last arrived. An entry
+         * seeded by a MAPEM alone has no phases yet (phase_seen 0 = never) --
+         * fall back to last_seen, else its age froze at 0 = "just now". */
+        uint32_t seen = e->phase_seen ? e->phase_seen : e->last_seen;
+        unsigned long age = (seen && now > seen) ? (unsigned long)(now - seen) : 0;
         /* The name comes off the air unauthenticated and the popup renders markup, so
          * strip quotes AND angle brackets here; the client escapes again (htxt) -- both on purpose. */
         char nm[ITS_MAP_NAME_LEN];
@@ -2903,7 +3234,9 @@ static esp_err_t spatem_json_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
         for (int s = 0; s < e->n; s++)
         {
-            /* [signalGroup, phase, secondsUntilChange] -- -1 = no timing. */
+            /* [signalGroup, phase, secondsUntilChange] -- -1 = no timing.
+             * That is minEndTime: the EARLIEST the phase may end, so every
+             * renderer of this field has to show it as a lower bound. */
             long left = -1;
             if (e->change_at[s] > now && e->change_at[s] - now <= 600)
                 left = (long)(e->change_at[s] - now);
@@ -2924,7 +3257,7 @@ static esp_err_t spatem_json_handler(httpd_req_t *req)
 /* GET /lanes.json -- cached MAPEM lane geometry, for drawing intersections.
  * Fetched once by /map (the layout doesn't change), then recoloured live
  * from the phases in /spatem.json. Shape:
- * [{"rg":43,"id":840,"nm":"...","lanes":[{"l":11,"t":0,"sg":1,"p":[[lat,lon],..]}]}] */
+ * [{"rg":N,"id":N,"nm":"...","lanes":[{"l":11,"t":0,"sg":1,"p":[[lat,lon],..]}]}] */
 static esp_err_t lanes_json_handler(httpd_req_t *req)
 {
     static spatem_intersection_t ints[SPATEM_MAX_INT];
@@ -2933,14 +3266,22 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
     bool first = true;
-    /* Held for the whole walk: the pointers below aim into buffers the packet
-     * path re-decodes in place on a new MAPEM revision. */
-    spatem_geometry_lock();
+    /* One intersection at a time, copied under the lock and sent outside it.
+     * Holding the lock across the chunked send was a stall of the WHOLE
+     * receiver: the packet path takes this same lock (untimed) while holding
+     * msg_ring_mutex, so a browser that stopped reading froze reception. */
+    static EXT_RAM_BSS_ATTR its_map_geom_t geombuf;
     for (int i = 0; i < ni; i++)
     {
-        const its_map_geom_t *g = spatem_geometry(ints[i].region, ints[i].id);
-        if (!g)
+        spatem_geometry_lock();
+        const its_map_geom_t *src = spatem_geometry(ints[i].region, ints[i].id);
+        bool have = src != NULL;
+        if (have)
+            memcpy(&geombuf, src, sizeof(geombuf));
+        spatem_geometry_unlock();
+        if (!have)
             continue;
+        const its_map_geom_t *g = &geombuf;
         char head[64];
         snprintf(head, sizeof(head), "%s{\"rg\":%u,\"id\":%u,\"lanes\":[",
                  first ? "" : ",", (unsigned)g->region, (unsigned)g->id);
@@ -2972,7 +3313,6 @@ static esp_err_t lanes_json_handler(httpd_req_t *req)
         }
         httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN);
     }
-    spatem_geometry_unlock();
     httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -3092,7 +3432,7 @@ static bool playback_emit(uint32_t sec, uint32_t usec, const its_decoded_t *d, v
      * otherwise print uninitialised stack bytes into the JSON. */
     char extra[320] = "";
     size_t eo = 0;
-    if (d->has_speed)
+    if (d->has_speed && d->speed_cmps != -1)   /* -1 = not available */
         eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"s\":%ld", (long)d->speed_cmps);
     if (d->veh.valid && d->veh.length_dm && d->veh.width_dm && eo < sizeof(extra))
         eo += snprintf(extra + eo, sizeof(extra) - eo, ",\"vl\":%u,\"vw\":%u",
@@ -3416,12 +3756,17 @@ static void emit_traffic_lights(httpd_req_t *req)
     for (int i = 0; i < ni; i++)
     {
         spatem_intersection_t *e = &ints[i];
-        unsigned long age = now > e->last_seen ? (unsigned long)(now - e->last_seen) : 0;
+        /* phase_seen, not last_seen: this number sits beside the phase dots and
+         * must say how old THEY are, not when a MAPEM last arrived. An entry
+         * seeded by a MAPEM alone has no phases yet (phase_seen 0 = never) --
+         * fall back to last_seen, else its age froze at 0 = "just now". */
+        uint32_t seen = e->phase_seen ? e->phase_seen : e->last_seen;
+        unsigned long age = (seen && now > seen) ? (unsigned long)(now - seen) : 0;
         char agebuf[24];
         if (current_lang == LANG_DE) snprintf(agebuf, sizeof(agebuf), "vor %lus", age);
         else                         snprintf(agebuf, sizeof(agebuf), "%lus ago", age);
 
-        /* Prefer the MAPEM name ("Kaerntner Strasse - Busgarage"); the numeric
+        /* Prefer the MAPEM name when the intersection sends one; the numeric
          * id stays visible next to it, just demoted to the detail line. */
         char nameesc[ITS_MAP_NAME_LEN * 6];
         html_escape(e->name, nameesc, sizeof(nameesc));
@@ -3486,11 +3831,11 @@ static void emit_traffic_lights(httpd_req_t *req)
             /* Generous buffer: the styled chip alone is ~224 bytes, plus the
              * title text -- undersizing this once dropped the closing '>' of
              * </span>, leaving an unclosed span that collapsed the page width. */
-            /* Countdown only when the RSU actually sent timing for this
-             * group and the deadline hasn't passed. */
+            /* minEndTime is the EARLIEST the phase may end, not a promise --
+             * the leading sign says so instead of reading like a countdown. */
             char cd[64] = "";
             if (e->change_at[s] > now && e->change_at[s] - now <= 600)
-                snprintf(cd, sizeof(cd), " <small style='color:#94a0a8'>%lus</small>",
+                snprintf(cd, sizeof(cd), " <small style='color:#94a0a8'>&ge;%lus</small>",
                          (unsigned long)(e->change_at[s] - now));
 
             /* Prefer what the group actually controls over its bare number;
@@ -3515,6 +3860,54 @@ static void emit_traffic_lights(httpd_req_t *req)
             httpd_resp_send_chunk(req, chip, HTTPD_RESP_USE_STRLEN);
         }
         httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+
+        /* Measured phase durations. The controller never states these; they
+         * come from watching each group flip, so they only appear once a few
+         * full phases have been seen. */
+        static EXT_RAM_BSS_ATTR spatem_phases_t phbuf;
+        const spatem_phases_t *ph = spatem_phases(e->region, e->id, &phbuf) ? &phbuf : NULL;
+        bool any = false;
+        for (uint8_t r = 0; ph && r < ph->n_rows && !any; r++)
+            if (ph->cnt[r][0] || ph->cnt[r][2]) any = true;
+        if (any)
+        {
+            char dh[320];
+            HTML_PRINTF(dh,
+                "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th>"
+                "<th>%s</th><th>%s</th></tr></thead><tbody>",
+                T(S_TRF_SG), T(S_TRF_PH_GREEN), T(S_TRF_PH_RED), T(S_TRF_CYCLES));
+            httpd_resp_send_chunk(req, dh, HTTPD_RESP_USE_STRLEN);
+            /* Walk the TALLY ROWS, not the message's group order: rows are
+             * keyed by signal group id, so indexing them with the position in
+             * e->sg[] would print one group's numbers under another's name. */
+            for (uint8_t r = 0; r < ph->n_rows; r++)
+            {
+                if (!ph->cnt[r][0] && !ph->cnt[r][2])
+                    continue;
+                char gr[48] = "-", rd[48] = "-";
+                if (ph->cnt[r][0])
+                    snprintf(gr, sizeof(gr), "%lu s <small>(max %lu)</small>",
+                             (unsigned long)(ph->secs[r][0] / ph->cnt[r][0]),
+                             (unsigned long)ph->max[r][0]);
+                if (ph->cnt[r][2])
+                    snprintf(rd, sizeof(rd), "%lu s <small>(max %lu)</small>",
+                             (unsigned long)(ph->secs[r][2] / ph->cnt[r][2]),
+                             (unsigned long)ph->max[r][2]);
+                char drow[256];
+                HTML_PRINTF(drow, "<tr><td>%u</td><td>%s</td><td>%s</td><td>%lu</td></tr>",
+                            (unsigned)ph->sg[r], gr, rd, (unsigned long)ph->cnt[r][0]);
+                httpd_resp_send_chunk(req, drow, HTTPD_RESP_USE_STRLEN);
+            }
+            httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+        }
+        else
+        {
+            /* Nothing measured yet is not the same as broken -- a traffic-
+             * actuated light can hold one phase for a long time at night. */
+            char waitmsg[320];
+            HTML_PRINTF(waitmsg, "<p><small>%s</small></p>", T(S_TRF_PH_WAIT));
+            httpd_resp_send_chunk(req, waitmsg, HTTPD_RESP_USE_STRLEN);
+        }
     }
 }
 
@@ -3550,6 +3943,17 @@ static void traffic_refresh_footer(httpd_req_t *req, uint32_t ri)
     httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* Groups the hourly rows: the hour itself, or a local calendar day. */
+static uint32_t trf_bucket_key(const stat_hour_t *h, bool daily)
+{
+    if (!daily)
+        return h->hour;
+    time_t t = (time_t)h->hour * 3600;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    return (uint32_t)((lt.tm_year + 1900) * 512 + lt.tm_yday);
+}
+
 static esp_err_t traffic_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
@@ -3567,7 +3971,8 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     }
 
     static EXT_RAM_BSS_ATTR stat_hour_t rows[720];
-    int n = tstat_read(hours, rows, 720);   /* oldest-first */
+    bool hist_ok = true;
+    int n = tstat_read(hours, rows, 720, &hist_ok);   /* oldest-first */
 
     send_page_header(req, T(S_TITLE_TRAFFIC));
 
@@ -3584,6 +3989,14 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
 
     /* Everything below the intro/selector is the auto-refreshed fragment. */
     httpd_resp_send_chunk(req, "<div id='trf-body'>", HTTPD_RESP_USE_STRLEN);
+    if (!hist_ok)
+    {
+        /* Inside the fragment: the page swaps only this part on refresh, so
+         * the note must appear and disappear with the data it describes. */
+        char warn[384];
+        HTML_PRINTF(warn, "<p><small>&#9888; %s</small></p>", T(S_TRF_BUSY));
+        httpd_resp_send_chunk(req, warn, HTTPD_RESP_USE_STRLEN);
+    }
 
     /* Live traffic-light phases first -- independent of the hourly stats, so
      * it shows even right after boot before any hour has accumulated. */
@@ -3600,9 +4013,13 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
 
     /* Window totals + per-category speed. */
     uint64_t tot = 0;
+    /* Every speed number on this page averages exactly these four: all other
+     * categories carry a GN speed field too and report 0 km/h when parked. */
+    static const int spcats[] = { STAT_CAT_CAR, STAT_CAT_BUS, STAT_CAT_TRUCK, STAT_CAT_TWOWHEEL };
+    const unsigned SPCATS_N = sizeof(spcats) / sizeof(spcats[0]);
+    bool speed_mixed = false;   /* window spans the 0.27.0 speed-rule change */
     uint64_t wsp_sum[STAT_NCAT] = {0}, wsp_cnt[STAT_NCAT] = {0};
     uint32_t wsp_max[STAT_NCAT] = {0};
-    uint32_t max_total = 1;
     for (int i = 0; i < n; i++)
     {
         tot += rows[i].total;
@@ -3612,14 +4029,16 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
             wsp_cnt[c] += rows[i].sp_cnt[c];
             if (rows[i].sp_max[c] > wsp_max[c]) wsp_max[c] = rows[i].sp_max[c];
         }
-        if (rows[i].total > max_total) max_total = rows[i].total;
     }
-    /* Overall speed across all vehicle categories. */
+    /* Overall speed -- vehicle categories only, same set as the cards below. */
     uint64_t osp_sum = 0, osp_cnt = 0; uint32_t osp_max = 0;
-    for (int c = 0; c < STAT_NCAT; c++)
+    for (unsigned k = 0; k < SPCATS_N; k++)
     {
+        int c = spcats[k];
         osp_sum += wsp_sum[c]; osp_cnt += wsp_cnt[c];
         if (wsp_max[c] > osp_max) osp_max = wsp_max[c];
+        for (int i = 0; i < n; i++)
+            if (rows[i].speed_legacy && rows[i].sp_cnt[c]) speed_mixed = true;
     }
 
     char summary[512];
@@ -3631,18 +4050,25 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         T(S_TRF_TOTAL), (unsigned long long)tot,
         T(S_TRF_SPEED), (unsigned long)(osp_cnt ? osp_sum / osp_cnt : 0), (unsigned long)osp_max);
     httpd_resp_send_chunk(req, summary, HTTPD_RESP_USE_STRLEN);
+    /* Next to the overall card, not just the per-type ones: the overall card
+     * is always rendered, the per-type block only when a vehicle reported. */
+    if (speed_mixed)
+    {
+        char note[352];
+        snprintf(note, sizeof(note), "<p class='hint'>%s</p>", T(S_TRF_SPEED_MIXED));
+        httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
+    }
 
     /* Speed by vehicle type (only categories that actually reported speed). */
-    static const int spcats[] = { STAT_CAT_CAR, STAT_CAT_BUS, STAT_CAT_TRUCK, STAT_CAT_TWOWHEEL };
     bool any_speed = false;
-    for (unsigned k = 0; k < sizeof(spcats)/sizeof(spcats[0]); k++)
+    for (unsigned k = 0; k < SPCATS_N; k++)
         if (wsp_cnt[spcats[k]] > 0) { any_speed = true; break; }
     if (any_speed)
     {
         char sh[128];
         snprintf(sh, sizeof(sh), "<h3>%s</h3><div class='cards'>", T(S_TRF_SPEED_BY_TYPE));
         httpd_resp_send_chunk(req, sh, HTTPD_RESP_USE_STRLEN);
-        for (unsigned k = 0; k < sizeof(spcats)/sizeof(spcats[0]); k++)
+        for (unsigned k = 0; k < SPCATS_N; k++)
         {
             int c = spcats[k];
             if (wsp_cnt[c] == 0) continue;
@@ -3657,54 +4083,114 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
     }
 
-    /* Per-hour table, newest first, capped for readability (summary above
-     * still covers the whole window). */
+    /* Beyond a day, hourly rows are unreadable and the old 72-row cap simply
+     * hid the rest -- roll up per calendar day instead. */
+    bool daily = (hours > 48);
+
     httpd_resp_send_chunk(req, "<div class='scroll'><table><tr><th>", HTTPD_RESP_USE_STRLEN);
-    char thead[384];
+    char thead[448];
     snprintf(thead, sizeof(thead),
-        "%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
+        "%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
         "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
-        T(S_TRF_HOUR), T(S_TRF_TOTAL), T(S_CAT_CAR), T(S_CAT_BUS), T(S_CAT_TRUCK),
+        daily ? T(S_TRF_DAY) : T(S_TRF_HOUR), T(S_TRF_TOTAL), T(S_TRF_SENDERS),
+        T(S_CAT_CAR), T(S_CAT_BUS), T(S_CAT_TRUCK),
         T(S_CAT_TWOWHEEL), T(S_CAT_PED), T(S_CAT_RSU), T(S_CAT_OTHER), T(S_TRF_SPEED));
     httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
 
-    int shown = 0;
-    for (int i = n - 1; i >= 0 && shown < 72; i--, shown++)
+    /* One bucket = one hour, or one calendar day in daily mode. Key is an
+     * integer so grouping needs no string compare, and so the bar can be
+     * scaled against the largest BUCKET rather than the largest hour. */
+    uint32_t bar_max = 1;
+    for (int k = n - 1; k >= 0; )
     {
-        stat_hour_t *h = &rows[i];
-        time_t t = (time_t)h->hour * 3600;
-        struct tm lt;
-        localtime_r(&t, &lt);
-        char when[24];
-        strftime(when, sizeof(when), "%m-%d %H:00", &lt);
-        unsigned pct = (unsigned)((uint64_t)h->total * 100 / max_total);
+        uint32_t key = trf_bucket_key(&rows[k], daily), sum = 0;
+        while (k >= 0 && trf_bucket_key(&rows[k], daily) == key)
+            sum += rows[k--].total;
+        if (sum > bar_max) bar_max = sum;
+    }
 
-        /* Overall speed for the hour, derived from the per-category fields. */
-        uint64_t hsp_sum = 0, hsp_cnt = 0; uint32_t hsp_max = 0;
-        for (int c = 0; c < STAT_NCAT; c++)
+    int i = n - 1, shown = 0;
+    while (i >= 0 && shown < 96)
+    {
+        stat_hour_t acc = { 0 };
+        bool capped = false;
+        uint32_t key = trf_bucket_key(&rows[i], daily);
+        char when[24];
+        time_t t0 = (time_t)rows[i].hour * 3600;
+        struct tm lt0;
+        localtime_r(&t0, &lt0);
+        strftime(when, sizeof(when), daily ? "%Y-%m-%d" : "%m-%d %H:00", &lt0);
+
+        while (i >= 0)
         {
-            hsp_sum += h->sp_sum[c]; hsp_cnt += h->sp_cnt[c];
-            if (h->sp_max[c] > hsp_max) hsp_max = h->sp_max[c];
+            if (trf_bucket_key(&rows[i], daily) != key)
+                break;
+            acc.total += rows[i].total;
+            for (int c = 0; c < STAT_NCAT; c++)
+            {
+                acc.cat[c]     += rows[i].cat[c];
+                /* Summing hours would count a traffic light once per hour;
+                 * the busiest hour is an honest lower bound for the day. */
+                if (daily)
+                {
+                    if (rows[i].senders[c] > acc.senders[c])
+                        acc.senders[c] = rows[i].senders[c];
+                }
+                else
+                    acc.senders[c] += rows[i].senders[c];
+                acc.sp_sum[c]  += rows[i].sp_sum[c];
+                acc.sp_cnt[c]  += rows[i].sp_cnt[c];
+                if (rows[i].sp_max[c] > acc.sp_max[c]) acc.sp_max[c] = rows[i].sp_max[c];
+            }
+            capped = capped || rows[i].senders_capped;
+            i--;
         }
+        shown++;
+
+        uint64_t hsp_sum = 0, hsp_cnt = 0; uint32_t hsp_max = 0, senders = 0;
+        for (int c = 0; c < STAT_NCAT; c++)
+            senders += acc.senders[c];
+        for (unsigned k = 0; k < SPCATS_N; k++)   /* same vehicle-only set */
+        {
+            int c = spcats[k];
+            hsp_sum += acc.sp_sum[c]; hsp_cnt += acc.sp_cnt[c];
+            if (acc.sp_max[c] > hsp_max) hsp_max = acc.sp_max[c];
+        }
+        unsigned pct = (unsigned)((uint64_t)acc.total * 100 / bar_max);
+
+        /* Hours recorded before 0.27.0 carry no identifier count; show a dash
+         * rather than a zero that would read as "nothing was there". */
+        char idcell[24];
+        if (senders)
+            snprintf(idcell, sizeof(idcell), "%s%lu",
+                     capped ? "&ge;" : "", (unsigned long)senders);
+        else
+            snprintf(idcell, sizeof(idcell), "&ndash;");
 
         /* Number first, thin bar on its own line below -- the bar can span the
          * full cell without ever colliding with the count. */
-        char row[512];
+        char row[576];
         snprintf(row, sizeof(row),
             "<tr><td>%s</td>"
             "<td>%lu<div style='height:4px;background:#f2b134;border-radius:2px;"
-            "width:%u%%;min-width:2px;margin-top:3px'></div></td>"
+            "width:%u%%;min-width:2px;margin-top:3px'></div></td><td>%s</td>"
             "<td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td>"
             "<td>%lu / %lu</td></tr>",
-            when, (unsigned long)h->total, pct,
-            (unsigned long)h->cat[STAT_CAT_CAR], (unsigned long)h->cat[STAT_CAT_BUS],
-            (unsigned long)h->cat[STAT_CAT_TRUCK], (unsigned long)h->cat[STAT_CAT_TWOWHEEL],
-            (unsigned long)h->cat[STAT_CAT_PED], (unsigned long)h->cat[STAT_CAT_RSU],
-            (unsigned long)h->cat[STAT_CAT_OTHER],
+            when, (unsigned long)acc.total, pct,
+            idcell,
+            (unsigned long)acc.cat[STAT_CAT_CAR], (unsigned long)acc.cat[STAT_CAT_BUS],
+            (unsigned long)acc.cat[STAT_CAT_TRUCK], (unsigned long)acc.cat[STAT_CAT_TWOWHEEL],
+            (unsigned long)acc.cat[STAT_CAT_PED], (unsigned long)acc.cat[STAT_CAT_RSU],
+            (unsigned long)acc.cat[STAT_CAT_OTHER],
             (unsigned long)(hsp_cnt ? hsp_sum / hsp_cnt : 0), (unsigned long)hsp_max);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+
+    char snote[1024];
+    HTML_PRINTF(snote, "<p><small>%s%s%s %s</small></p>", T(S_TRF_SENDERS_NOTE),
+                daily ? " " : "", daily ? T(S_TRF_SENDERS_DAY) : "", T(S_TRF_IDENT_NOTE));
+    httpd_resp_send_chunk(req, snote, HTTPD_RESP_USE_STRLEN);
 
     /* --- Warning events (DENM) for the same window, newest first. --- */
     char etitle[64];
@@ -3712,15 +4198,27 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, etitle, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR event_rec_t evs[256];
-    int en = events_read(hours, evs, 256);
+    bool ev_ok = true, ev_capped = false;
+    int en = events_read(hours, evs, 256, &ev_ok, &ev_capped);
     if (en == 0)
     {
-        char none[192];
-        snprintf(none, sizeof(none), "<p><small>%s</small></p>", T(S_EVT_NONE));
+        /* "None" is only true if the stored events were actually read. */
+        char none[256];
+        snprintf(none, sizeof(none), "<p><small>%s</small></p>",
+                 ev_ok ? T(S_EVT_NONE) : T(S_TRF_BUSY));
         httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
     }
     else
     {
+        /* Caveat first, then the table -- a busy card or a full array means the
+         * rows below are a selection, not the window. */
+        const char *cav = !ev_ok ? T(S_TRF_BUSY) : (ev_capped ? T(S_EVT_CAPPED) : NULL);
+        if (cav)
+        {
+            char note[256];
+            snprintf(note, sizeof(note), "<p><small>%s</small></p>", cav);
+            httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
+        }
         httpd_resp_send_chunk(req, "<div class='scroll'><table><tr><th>", HTTPD_RESP_USE_STRLEN);
         char eh[160];
         snprintf(eh, sizeof(eh), "%s</th><th>%s</th><th>%s</th></tr>",
@@ -3762,10 +4260,8 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
                 snprintf(cause, sizeof(cause), "%s <small>(Detail %u)</small>",
                          ct, (unsigned)evs[i].subcause);
             else if (ct)
-                /* Sub-cause 0 means the sender explicitly said "unavailable".
-                 * Showing nothing made that look like a missing feature, so
-                 * say it plainly instead -- verified on real traffic: all 25
-                 * warnings in one recording carried cause 1, sub-cause 0. */
+                /* Sub-cause 0 is the sender saying "unavailable" -- say so,
+                 * otherwise it reads as a missing feature of this page. */
                 snprintf(cause, sizeof(cause), "%s <small>(%s)</small>", ct,
                          current_lang == LANG_DE ? "ohne n&auml;here Angabe"
                                                  : "no detail given");
@@ -3829,14 +4325,24 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_FAIL;
     }
-    int n = tracklog_read(days, pts, MAXPT);
+    bool tracks_wrapped = false;
+    int n = tracklog_read(days, pts, MAXPT, &tracks_wrapped);
+    /* A full array means the read hit its cap and the OLDEST points of the
+     * window were left out. Flagged in the reply so the overlay can say so
+     * instead of drawing a short day and looking complete. */
+    /* Only a real wrap loses points. Exactly MAXPT rows fits without loss, so
+     * equality with the cap must not raise the flag. */
+    bool capped = tracks_wrapped;
 
     httpd_resp_set_type(req, "application/json");
     /* Same reasoning as /markers.json: another receiver's map page reads this
      * cross-origin to draw all receivers' tracks on one map. Read-only, no
      * credential involved. */
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_send_chunk(req, "[", HTTPD_RESP_USE_STRLEN);
+    /* {"t":[tracks],"c":1} -- "c" marks a reply that hit the point cap. All
+     * receivers on a map are expected to run the same firmware, so this reads
+     * the same shape from a peer as from itself. */
+    httpd_resp_send_chunk(req, "{\"t\":[", HTTPD_RESP_USE_STRLEN);
 
     /* The log is in time order, so a station's points are scattered through
      * it. Walk it once per distinct station rather than sorting 12,000
@@ -3899,11 +4405,50 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
 
     if (!client_gone)
     {
-        httpd_resp_send_chunk(req, "]", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, capped ? "],\"c\":1}" : "]}", HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, NULL, 0);
     }
     heap_caps_free(pts);
     return client_gone ? ESP_FAIL : ESP_OK;
+}
+
+/* True when everything captured so far reached the card. Must be asked AFTER
+ * the flush: the recorder drains the ring itself, so a 0-byte flush is no error. */
+static bool pcap_on_card(void)
+{
+    if (sdpcap_buffered() == 0)
+        return true;
+    /* Ring-empty and `landed` are separate questions; the byte count answers
+     * neither -- it is 0 for an empty ring and for a failed write alike. */
+    /* Up to three passes: a single call pays only an outstanding hour-boundary
+     * debt and returns, leaving the current hour's records in RAM while the
+     * export would be stamped complete. Bounded so a failing card cannot spin
+     * here on the request task. */
+    bool landed = false;
+    for (int i = 0; i < 3; i++)
+    {
+        size_t before = sdpcap_buffered();
+        sdpcap_flush_now(&landed);
+        if (!landed || sdpcap_buffered() == 0 || sdpcap_buffered() >= before)
+            break;
+    }
+    /* Only whether the write landed. Testing the ring for emptiness as well
+     * looked stricter but was simply always false with a live sniffer, so
+     * every export got stamped "-teilweise" on a perfectly complete archive. */
+    return landed;
+}
+
+/* Same question, but only asked where the ring can still hold part of the
+ * answer -- a false "partial" invites an RSU re-send, and a re-send ADDS. */
+static bool pcap_window_on_card(uint32_t to_sec)
+{
+    /* Bound by the CONFIGURED flush interval, never a fixed guess: the writer
+     * empties the ring only on that interval. Doubled for the write itself. */
+    uint32_t now = (uint32_t)time(NULL);
+    uint32_t behind = sdpcap_flush_sec() * 2u + 60u;
+    if (now > behind && to_sec < now - behind)
+        return true;
+    return pcap_on_card();
 }
 
 static esp_err_t playback_get_handler(httpd_req_t *req)
@@ -3935,10 +4480,8 @@ static esp_err_t playback_get_handler(httpd_req_t *req)
     uint32_t from_sec = (uint32_t)from;
     uint32_t to_sec = (uint32_t)to;
 
-    /* An unmounted card would otherwise yield an empty array, which the page
-     * shows as "no data in this range" -- indistinguishable from a genuinely
-     * empty window. This actually misled a diagnosis: queried a minute after
-     * a reboot, playback looked broken when the card simply wasn't up yet. */
+    /* Without this an unmounted card yields an empty array, which the page
+     * shows as "no data in this range" -- same look as a genuinely empty one. */
     if (!sdcard_is_mounted())
     {
         /* This IDF's httpd only defines 500/501/505, so 500 it is -- the
@@ -3966,7 +4509,10 @@ static esp_err_t playback_get_handler(httpd_req_t *req)
     ctx.buf = pbuf;
     ctx.cap = PB_BUF_CAP;
 
-    bool partial = false;
+    /* The newest minutes live in the ring, not in the files -- only relevant
+     * for a window that runs up to "now", see pcap_window_on_card(). */
+    bool flushed = pcap_window_on_card(to_sec);
+    bool partial = !flushed;   /* unflushed frames are missing from the window */
     uint32_t cursor = from_sec;
     uint32_t last_full_sec = 0;
     bool have_full_sec = false;
@@ -4012,6 +4558,310 @@ static esp_err_t playback_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 #endif
+
+/* ==================================================================
+ *  GET /senders -- stationary senders (RSU/traffic light) heard since
+ *  boot. Pure RAM, no SD access, so it runs on the httpd task.
+ * ================================================================== */
+
+static const char *inv_msg_name(uint8_t bit)
+{
+    switch (bit)
+    {
+    case 1:  return "DENM";
+    case 2:  return "CAM";
+    case 4:  return "SPATEM";
+    case 5:  return "MAPEM";
+    case 6:  return "IVIM";
+    case 9:  return "SREM";
+    case 10: return "SSEM";
+    case 13: return "RTCMEM";
+    default: return NULL;
+    }
+}
+
+static esp_err_t senders_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    send_page_header(req, T(S_TITLE_SENDERS));
+
+    char intro[512];
+    HTML_PRINTF(intro, "<p><small>%s</small></p>", T(S_SND_INTRO));
+    httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
+
+    static EXT_RAM_BSS_ATTR inv_station_t snap[INV_MAX_STATIONS];
+    int n = inventory_snapshot(snap);
+
+    if (n == 0)
+    {
+        char none[192];
+        HTML_PRINTF(none, "<p>%s</p>", T(S_SND_NONE));
+        httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
+    }
+    else
+    {
+        char head[512];
+        HTML_PRINTF(head,
+            "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th>"
+            "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
+            T(S_SND_ID), T(S_SND_NAME), T(S_SND_TYPES), T(S_SND_FRAMES),
+            T(S_SND_RSSI), T(S_SND_POS), T(S_SND_FIRST), T(S_SND_LAST));
+        httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+        uint32_t now = (uint32_t)time(NULL);
+        for (int i = 0; i < n; i++)
+        {
+            inv_station_t *s = &snap[i];
+
+            char types[64] = "";
+            size_t to = 0;
+            for (uint8_t b = 0; b < 16 && to + 10 < sizeof(types); b++)
+                if (s->msg_mask & (1u << b))
+                {
+                    const char *nm = inv_msg_name(b);
+                    if (!nm) continue;
+                    to += snprintf(types + to, sizeof(types) - to, "%s%s", to ? " " : "", nm);
+                }
+
+            char nameesc[INV_NAME_LEN * 6];
+            html_escape(s->name, nameesc, sizeof(nameesc));
+
+            /* Signal range plus average: one bad reflection or one close pass
+             * says little, the spread over thousands of frames says a lot. */
+            char sig[64] = "-";
+            if (s->rssi_cnt)
+                snprintf(sig, sizeof(sig), "%d&hellip;%d <small>(&oslash;%ld)</small>",
+                         s->rssi_min, s->rssi_max,
+                         (long)(s->rssi_sum / (int64_t)s->rssi_cnt));
+
+            /* Deep link: the map centres on the sender instead of dropping the
+             * reader on an overview to hunt for it. */
+            char pos[96] = "-";
+            if (s->has_pos)
+                snprintf(pos, sizeof(pos),
+                         "<a href='/map?lang=%s&amp;lat=%ld&amp;lon=%ld'>%.5f, %.5f</a>",
+                         current_lang == LANG_EN ? "en" : "de",
+                         (long)s->lat_e7, (long)s->lon_e7,
+                         s->lat_e7 / 1e7, s->lon_e7 / 1e7);
+
+            char first[32], last[32];
+            struct tm lt;
+            time_t t1 = (time_t)s->first_seen;
+            localtime_r(&t1, &lt);
+            strftime(first, sizeof(first), "%d.%m. %H:%M", &lt);
+            /* Recent activity is what the reader looks for, so show an age
+             * rather than a second clock time. */
+            uint32_t age = now > s->last_seen ? now - s->last_seen : 0;
+            if (age < 60)        snprintf(last, sizeof(last), "%lus", (unsigned long)age);
+            else if (age < 3600) snprintf(last, sizeof(last), "%lum", (unsigned long)(age / 60));
+            else                 snprintf(last, sizeof(last), "%luh", (unsigned long)(age / 3600));
+
+            char row[896];
+            HTML_PRINTF(row,
+                "<tr><td class='mono'>%lu</td><td class='wrapcell'>%s</td>"
+                "<td>%s</td><td>%lu</td><td class='mono'>%s</td>"
+                "<td class='mono'>%s</td><td>%s</td><td>%s</td></tr>",
+                (unsigned long)s->station_id, nameesc[0] ? nameesc : "-",
+                types[0] ? types : "-", (unsigned long)s->frames, sig, pos, first, last);
+            httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+    }
+
+    if (inventory_overflow())
+    {
+        char full[256];
+        HTML_PRINTF(full, "<p><small>&#9888; %s</small></p>", T(S_SND_FULL));
+        httpd_resp_send_chunk(req, full, HTTPD_RESP_USE_STRLEN);
+    }
+
+    char veh[384];
+    char vtext[288];
+    snprintf(vtext, sizeof(vtext), T(S_SND_VEHICLES),
+             (unsigned long)inventory_vehicle_frames());
+    HTML_PRINTF(veh, "<p><small>%s</small></p>", vtext);
+    httpd_resp_send_chunk(req, veh, HTTPD_RESP_USE_STRLEN);
+
+    char clr[512];
+    HTML_PRINTF(clr,
+        /* r.ok: this page is ungated but the POST is not -- reloading after a
+         * 401 would show the untouched list as if the reset had happened. */
+        "<p><button onclick=\"if(confirm('%s'))fetch('/senders/clear',"
+        "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p>",
+        T(S_SND_CLEAR_CONFIRM), T(S_SND_CLEAR));
+    httpd_resp_send_chunk(req, clr, HTTPD_RESP_USE_STRLEN);
+
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ==================================================================
+ *  GET /transit -- R09 telegrams per tram/bus line. The table is RAM;
+ *  the passage list reads the card, so a busy card just omits it.
+ * ================================================================== */
+
+static esp_err_t transit_get_handler(httpd_req_t *req)
+{
+    resolve_language(req);
+    send_page_header(req, T(S_TITLE_TRANSIT));
+
+    char intro[640];
+    HTML_PRINTF(intro, "<p><small>%s</small></p>", T(S_PT_INTRO));
+    httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
+
+    static EXT_RAM_BSS_ATTR pt_line_t snap[PT_MAX_LINES];
+    int n = ptlog_snapshot(snap);
+
+    if (n == 0)
+    {
+        char none[192];
+        HTML_PRINTF(none, "<p>%s</p>", T(S_PT_NONE));
+        httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
+    }
+    else
+    {
+        char head[512];
+        HTML_PRINTF(head,
+            "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th>"
+            "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
+            T(S_PT_LINE), T(S_PT_SIGHTINGS), T(S_PT_AVG), T(S_PT_LATE),
+            T(S_PT_EARLY), T(S_PT_UNKNOWN), T(S_PT_LAST));
+        httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+        uint32_t now = (uint32_t)time(NULL);
+        for (int i = 0; i < n; i++)
+        {
+            pt_line_t *l = &snap[i];
+
+            char avg[24] = "-";
+            if (l->dev_count)
+            {
+                /* One decimal: the source values are whole minutes, so more
+                 * would only pretend precision the format never carried. */
+                double a = (double)l->dev_sum / (double)l->dev_count;
+                snprintf(avg, sizeof(avg), "%+.1f min", a);
+            }
+            char late[24] = "-", early[24] = "-";
+            if (l->worst_late > 0)
+                snprintf(late, sizeof(late), "%s%d min",
+                         l->worst_late >= 7 ? "&ge;" : "", l->worst_late);
+            if (l->worst_early < 0)
+                snprintf(early, sizeof(early), "%s%d min",
+                         l->worst_early <= -7 ? "&ge;" : "", -l->worst_early);
+
+            char last[24];
+            uint32_t age = now > l->last_seen ? now - l->last_seen : 0;
+            if (age < 3600)       snprintf(last, sizeof(last), "%lum", (unsigned long)(age / 60));
+            else if (age < 86400) snprintf(last, sizeof(last), "%luh", (unsigned long)(age / 3600));
+            else                  snprintf(last, sizeof(last), "%lud", (unsigned long)(age / 86400));
+
+            char row[512];
+            HTML_PRINTF(row,
+                "<tr><td><b>%u</b></td><td>%lu</td><td>%s</td><td>%s</td>"
+                "<td>%s</td><td>%lu</td><td>%s</td></tr>",
+                l->line, (unsigned long)l->sightings, avg, late, early,
+                (unsigned long)l->dev_zero, last);
+            httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+        }
+        httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+
+        char note[768];
+        HTML_PRINTF(note, "<p><small>%s</small></p>", T(S_PT_LIMIT));
+        httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
+    }
+
+#if CONFIG_ENABLE_SD
+    /* The summary says how late a line usually is; this says WHEN. */
+    {
+        static EXT_RAM_BSS_ATTR pt_pass_t pass[120];
+        int pn = ptlog_read_passages(pass, 120);
+        if (pn > 0)
+        {
+            char ph[384];
+            HTML_PRINTF(ph,
+                "<h2>%s</h2><div class='scroll'><table><thead><tr><th>%s</th>"
+                "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
+                "</tr></thead><tbody>",
+                T(S_PT_PASSAGES), T(S_PT_WHEN), T(S_PT_LINE), T(S_PT_COURSE),
+                T(S_PT_DEST), T(S_PT_DEV), T(S_PT_INRANGE));
+            httpd_resp_send_chunk(req, ph, HTTPD_RESP_USE_STRLEN);
+            for (int k = 0; k < pn; k++)
+            {
+                time_t t = (time_t)pass[k].seconds;
+                struct tm lt;
+                localtime_r(&t, &lt);
+                char when[24];
+                strftime(when, sizeof(when), "%d.%m. %H:%M:%S", &lt);
+                char dev[24] = "-";
+                if (pass[k].deviation)
+                    snprintf(dev, sizeof(dev), "%s%+d min",
+                             (pass[k].deviation >= 7 || pass[k].deviation <= -7) ? "&ge;" : "",
+                             pass[k].deviation);
+                char prow[320];
+                HTML_PRINTF(prow,
+                    "<tr><td>%s</td><td><b>%u</b></td><td>%u</td><td>%u</td><td>%s</td>"
+                    "<td>%u s</td></tr>",
+                    when, pass[k].line, pass[k].course, pass[k].dest, dev,
+                    pass[k].secs_in_range);
+                httpd_resp_send_chunk(req, prow, HTTPD_RESP_USE_STRLEN);
+            }
+            httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+        }
+    }
+#endif
+
+    char act[256], atext[192];
+    snprintf(atext, sizeof(atext), T(S_PT_ACTIVE), ptlog_open_count());
+    HTML_PRINTF(act, "<p><small>%s</small></p>", atext);
+    httpd_resp_send_chunk(req, act, HTTPD_RESP_USE_STRLEN);
+
+    char clr[512];
+    HTML_PRINTF(clr,
+        /* r.ok: this page is ungated but the POST is not -- reloading after a
+         * 401 would show the untouched list as if the reset had happened. */
+        "<p><button onclick=\"if(confirm('%s'))fetch('/transit/clear',"
+        "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p>",
+        T(S_PT_CLEAR_CONFIRM), T(S_PT_CLEAR));
+    httpd_resp_send_chunk(req, clr, HTTPD_RESP_USE_STRLEN);
+
+    httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* Defined further down with the update handlers; declared here because the
+ * two clear endpoints above it need the same gate -- including the 401 reply,
+ * without which the handler returns having sent nothing at all and the
+ * browser's fetch() just hangs instead of asking for the password. */
+static bool check_update_auth(httpd_req_t *req);
+static esp_err_t send_auth_required(httpd_req_t *req);
+
+static esp_err_t transit_clear_post_handler(httpd_req_t *req)
+{
+    /* Destroys persisted user data, so it belongs behind the same gate as the
+     * firmware update and the raw downloads. It was reachable by anyone on the
+     * network with a single POST. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+    ptlog_clear();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+static esp_err_t senders_clear_post_handler(httpd_req_t *req)
+{
+    /* Destroys persisted user data, so it belongs behind the same gate as the
+     * firmware update and the raw downloads. It was reachable by anyone on the
+     * network with a single POST. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+    inventory_clear();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
 
 /* ================================================================== */
 /*  Basic Auth for /update and /settings write                        */
@@ -4122,10 +4972,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
                   && cur_pw_size > 1;
 
 #if CONFIG_ENABLE_SD
-    uint8_t log_sys = 0, log_frames = 0;
+    uint8_t log_sys = 0;
     uint32_t log_mb = 50;
     config_get_u8(CONFIG_INDEX_LOG_SYS, &log_sys);
-    config_get_u8(CONFIG_INDEX_LOG_FRAMES, &log_frames);
     config_get_u32(CONFIG_INDEX_LOG_MAX_MB, &log_mb);
 
     uint8_t pcap_en = 0;
@@ -4296,12 +5145,11 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     HTML_PRINTF(storage,
         "<h2>%s</h2><table class='kv'>"
         "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
-        "<tr><th>%s</th><td><input type='checkbox' id='logframes'%s></td></tr>"
-        "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' value='%lu' size='6'>"
+        "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' max='512' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input type='checkbox' id='pcapen'%s></td></tr>"
         "<tr><th>%s</th><td><input id='pcaphours' type='number' min='1' max='720' value='%lu' size='6'></td></tr>"
-        "<tr><th>%s</th><td><input id='pcapmaxmb' type='number' min='1' value='%lu' size='6'>"
+        "<tr><th>%s</th><td><input id='pcapmaxmb' type='number' min='1' max='100000' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='pcapbufmb' type='number' min='1' max='4' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
@@ -4317,7 +5165,6 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "</table>",
         T(S_SET_GROUP_STORAGE),
         T(S_LOG_SYS), log_sys ? " checked" : "",
-        T(S_LOG_FRAMES), log_frames ? " checked" : "",
         T(S_LOG_BUDGET), (unsigned long)log_mb, T(S_LOG_HINT),
         T(S_PCAP_ENABLE), pcap_en ? " checked" : "",
         T(S_PCAP_RETAIN_HOURS), (unsigned long)pcap_hours,
@@ -4362,7 +5209,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_WEB_PASSWORD_CLEAR));
     httpd_resp_send_chunk(req, security, HTTPD_RESP_USE_STRLEN);
 
-    static EXT_RAM_BSS_ATTR char save_block[4096];
+    /* Grew with the client-side range pre-check and the range hints. PSRAM,
+     * so the size is cheap; -Wformat-truncation is what caught the last bump. */
+    static EXT_RAM_BSS_ATTR char save_block[6144];
     HTML_PRINTF(save_block,
         "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
         /* Floating save bar: appears once anything is edited and doubles as the
@@ -4377,8 +5226,30 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "body.dirty{padding-bottom:64px}</style>"
         "<div id='savebar'><div class='in'><button onclick=\"save()\">%s</button>"
         "<small>%s</small> <span id='result2'></span></div></div>"
-        "<script>"
+        "<script>var ITS_SET_BAD=\"%s\";"
+        /* Show every number field's allowed range, read from the field's OWN
+         * min/max so the hint can never drift from what the device enforces.
+         * Without it a value outside the range was simply refused and the
+         * setting looked like it had reset itself. */
+        "document.querySelectorAll('input[type=number]').forEach(function(i){"
+        "if(!i.min&&!i.max)return;"
+        "i.insertAdjacentHTML('afterend',\" <small style='color:#94a0a8'>\"+"
+        "(i.min||'0')+'\\u2013'+(i.max||'\\u221e')+'</small>');});"
         "function save(){"
+        /* Check before sending: an empty or out-of-range number field used to
+         * be discarded by the device without naming itself, and an emptied one
+         * silently meant "0" for the fields where 0 is legal. */
+        "var bad=[];"
+        "document.querySelectorAll('input[type=number]').forEach(function(i){"
+        "var v=i.value.trim();var n=Number(v);"
+        "if(v===''||!isFinite(n)||(i.min!==''&&n<Number(i.min))||(i.max!==''&&n>Number(i.max))){"
+        /* Name the field the way the page labels it. Every setting sits in a
+         * <tr><th>label</th><td><input></td></tr>, so the row's header IS the
+         * human name; the element id ('trkdays') means nothing to a reader. */
+        "var r=i.closest('tr'),h=r?r.querySelector('th'):null;"
+        "bad.push(h?h.textContent.trim():i.id);}});"
+        "if(bad.length){document.getElementById('result2').textContent="
+        "ITS_SET_BAD+' '+bad.join(', ');return;}"
         "var p=new URLSearchParams();"
         "p.append('nodeid',document.getElementById('nodeid').value);"
         "p.append('mqtturi',document.getElementById('mqtturi').value);"
@@ -4394,8 +5265,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "if(document.getElementById('webpwclear').checked)p.append('webpwclear','1');"
 #if CONFIG_ENABLE_SD
         "p.append('logsys',document.getElementById('logsys').checked?'1':'0');"
-        "p.append('logframes',document.getElementById('logframes').checked?'1':'0');"
-        "p.append('logmaxmb',document.getElementById('logmaxmb').value);"
+            "p.append('logmaxmb',document.getElementById('logmaxmb').value);"
         "p.append('pcapen',document.getElementById('pcapen').checked?'1':'0');"
         "p.append('pcaphours',document.getElementById('pcaphours').value);"
         "p.append('pcapmaxmb',document.getElementById('pcapmaxmb').value);"
@@ -4441,7 +5311,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "['ethip','ethnm','ethgw'].forEach(function(i){document.getElementById(i).disabled=d;});}"
         "dhcpToggle();"
         "</script>",
-        T(S_SAVE), T(S_SAVE), T(S_UNSAVED), lc);
+        T(S_SAVE), T(S_SAVE), T(S_UNSAVED), T(S_SET_BAD), lc);
     httpd_resp_send_chunk(req, save_block, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -4503,7 +5373,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     buf[got] = '\0';
 
     char value[256];
-    int saved = 0;
+    int saved = 0, rejected = 0;
 
     if (httpd_query_key_value(buf, "nodeid", value, sizeof(value)) == ESP_OK)
     {
@@ -4542,12 +5412,16 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (httpd_query_key_value(buf, "refreshsec", value, sizeof(value)) == ESP_OK)
     {
         unsigned long s = strtoul(value, NULL, 10);
-        if (s <= 3600 && config_set_u32(CONFIG_INDEX_REFRESH_SEC, (uint32_t)s) == ESP_OK) saved++;
+        if (s > 3600)
+            rejected++;
+        else if (config_set_u32(CONFIG_INDEX_REFRESH_SEC, (uint32_t)s) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "pcapfilt", value, sizeof(value)) == ESP_OK)
     {
         unsigned long m = strtoul(value, NULL, 10);
-        if (m <= 2 && config_set_u8(CONFIG_INDEX_PCAP_FILTER, (uint8_t)m) == ESP_OK) saved++;
+        if (m > 2)
+            rejected++;
+        else if (config_set_u8(CONFIG_INDEX_PCAP_FILTER, (uint8_t)m) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "trkon", value, sizeof(value)) == ESP_OK)
     {
@@ -4557,8 +5431,9 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (httpd_query_key_value(buf, "trkdays", value, sizeof(value)) == ESP_OK)
     {
         unsigned long d = strtoul(value, NULL, 10);
-        if (d >= 1 && d <= 7 &&
-            config_set_u32(CONFIG_INDEX_TRACKS_DAYS, (uint32_t)d) == ESP_OK) saved++;
+        if (d < 1 || d > 7)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_TRACKS_DAYS, (uint32_t)d) == ESP_OK) saved++;
     }
 #if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
     if (httpd_query_key_value(buf, "ethleds", value, sizeof(value)) == ESP_OK)
@@ -4580,8 +5455,9 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (httpd_query_key_value(buf, "mapstale", value, sizeof(value)) == ESP_OK)
     {
         unsigned long s = strtoul(value, NULL, 10);
-        if (s >= 10 && s <= 3600 &&
-            config_set_u32(CONFIG_INDEX_MAP_STALE_SEC, (uint32_t)s) == ESP_OK) saved++;
+        if (s < 10 || s > 3600)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_MAP_STALE_SEC, (uint32_t)s) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "ntpserver", value, sizeof(value)) == ESP_OK)
     {
@@ -4612,15 +5488,15 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     {
         if (config_set_u8(CONFIG_INDEX_LOG_SYS, strcmp(value, "1") == 0 ? 1 : 0) == ESP_OK) saved++;
     }
-    if (httpd_query_key_value(buf, "logframes", value, sizeof(value)) == ESP_OK)
-    {
-        if (config_set_u8(CONFIG_INDEX_LOG_FRAMES, strcmp(value, "1") == 0 ? 1 : 0) == ESP_OK) saved++;
-    }
     if (httpd_query_key_value(buf, "logmaxmb", value, sizeof(value)) == ESP_OK)
     {
         unsigned long mb = strtoul(value, NULL, 10);
-        if (mb >= 1 && mb <= 100000 &&
-            config_set_u32(CONFIG_INDEX_LOG_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
+        /* The same bound sdlog actually enforces. Accepting 100000 here and
+         * silently using 512 meant the page echoed back a number the device
+         * was not honouring. */
+        if (mb < 1 || mb > SDLOG_MAX_MB)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_LOG_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "pcapen", value, sizeof(value)) == ESP_OK)
     {
@@ -4629,38 +5505,44 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (httpd_query_key_value(buf, "pcaphours", value, sizeof(value)) == ESP_OK)
     {
         unsigned long h = strtoul(value, NULL, 10);
-        if (h >= 1 && h <= 720 &&
-            config_set_u32(CONFIG_INDEX_PCAP_RETAIN_HOURS, (uint32_t)h) == ESP_OK) saved++;
+        if (h < 1 || h > 720)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_PCAP_RETAIN_HOURS, (uint32_t)h) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "pcapbufmb", value, sizeof(value)) == ESP_OK)
     {
         unsigned long mb = strtoul(value, NULL, 10);
-        if (mb >= 1 && mb <= 4 &&
-            config_set_u32(CONFIG_INDEX_PCAP_BUF_MB, (uint32_t)mb) == ESP_OK) saved++;
+        if (mb < 1 || mb > 4)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_PCAP_BUF_MB, (uint32_t)mb) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "pcapflushsec", value, sizeof(value)) == ESP_OK)
     {
         unsigned long s = strtoul(value, NULL, 10);
-        if (s >= 8 && s <= 3600 &&
-            config_set_u32(CONFIG_INDEX_PCAP_FLUSH_SEC, (uint32_t)s) == ESP_OK) saved++;
+        if (s < 8 || s > 3600)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_PCAP_FLUSH_SEC, (uint32_t)s) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "pcapmaxmb", value, sizeof(value)) == ESP_OK)
     {
         unsigned long mb = strtoul(value, NULL, 10);
-        if (mb >= 1 && mb <= 100000 &&
-            config_set_u32(CONFIG_INDEX_PCAP_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
+        if (mb < 1 || mb > 100000)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_PCAP_MAX_MB, (uint32_t)mb) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "statsdays", value, sizeof(value)) == ESP_OK)
     {
         unsigned long d = strtoul(value, NULL, 10);
-        if (d >= 1 && d <= 30 &&
-            config_set_u32(CONFIG_INDEX_STATS_RETAIN_DAYS, (uint32_t)d) == ESP_OK) saved++;
+        if (d < 1 || d > 30)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_STATS_RETAIN_DAYS, (uint32_t)d) == ESP_OK) saved++;
     }
     if (httpd_query_key_value(buf, "eventdays", value, sizeof(value)) == ESP_OK)
     {
         unsigned long d = strtoul(value, NULL, 10);
-        if (d >= 1 && d <= 30 &&
-            config_set_u32(CONFIG_INDEX_EVENT_RETAIN_DAYS, (uint32_t)d) == ESP_OK) saved++;
+        if (d < 1 || d > 30)
+                rejected++;
+        else if (config_set_u32(CONFIG_INDEX_EVENT_RETAIN_DAYS, (uint32_t)d) == ESP_OK) saved++;
     }
 #endif
     /* Ethernet / network — only touched when the form submitted the block, so a
@@ -4690,6 +5572,9 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
                 config_set_str(CONFIG_INDEX_ETH_GATEWAY, gw);
                 saved++;
             }
+            else
+                rejected++;   /* was dropped in silence, and a wrong static IP
+                               * is the one setting you cannot fix remotely */
         }
         /* DNS 1/2/3: empty clears, a valid address is stored. Applies in both
          * DHCP and static mode. */
@@ -4706,12 +5591,16 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
                 url_decode(d);
                 if (d[0] == '\0')      { if (config_set_str(dnsf[i].idx, "") == ESP_OK) saved++; }
                 else if (is_ipv4(d))   { if (config_set_str(dnsf[i].idx, d)  == ESP_OK) saved++; }
+                else                   rejected++;
             }
         }
     }
 
-    char msg[64];
-    snprintf(msg, sizeof(msg), T(S_SAVED), saved);
+    char msg[160];
+    if (rejected)
+        snprintf(msg, sizeof(msg), T(S_SAVED_REJECTED), saved, rejected);
+    else
+        snprintf(msg, sizeof(msg), T(S_SAVED), saved);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, msg);
     return ESP_OK;
@@ -4723,6 +5612,12 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
 
 static esp_err_t sniffer_post_handler(httpd_req_t *req)
 {
+    /* Stopping reception destroys data that was never recorded, so it belongs
+     * behind the same gate as the clear endpoints and the downloads -- the
+     * password protected taking data OUT but not switching the intake off. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+
     char query[32] = {0};
     char action[16] = {0};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
@@ -4776,6 +5671,11 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
 static esp_err_t poweroff_post_handler(httpd_req_t *req)
 {
     resolve_language(req);
+    /* Leaves the card unmounted with auto-remount inhibited: one unauthenticated
+     * POST stopped recording, tracks, transit log and pcap until someone mounts
+     * again or reboots. Same gate as /sdcard/mount, which undoes it. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
 
     /* Same flush the restart paths use, plus the unmount that only makes
      * sense when nothing is going to run afterwards. */
@@ -5137,6 +6037,39 @@ static esp_err_t system_get_handler(httpd_req_t *req)
     build_task_rows_html(task_rows, sizeof(task_rows));
     httpd_resp_send_chunk(req, task_rows, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+
+    /* Recorder health: every one of these was already counted internally
+     * and shown nowhere, so a degraded device looked perfectly fine. */
+    {
+        /* Write failures are deliberately NOT added: those batches stay queued
+         * and are retried, so counting them here would report a loss that did
+         * not happen. Only points that really left are shown. */
+        uint32_t trk_evicted = 0, trk_dropped = 0;
+#if CONFIG_ENABLE_SD
+        tracklog_losses(&trk_evicted, &trk_dropped, NULL);
+#endif
+        char loss[1024];
+        HTML_PRINTF(loss,
+            "<h2>%s</h2><div class='scroll'><table class='kv'>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+#if CONFIG_ENABLE_SD
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+#endif
+            "</table></div><p><small>%s</small></p>",
+            T(S_LOSS_TITLE),
+            T(S_LOSS_SNIFFER), (unsigned long)sniffer_dropped(),
+            T(S_LOSS_MQTT), (unsigned long)mqtt_tx_dropped(),
+#if CONFIG_ENABLE_SD
+            T(S_LOSS_PCAP), (unsigned long)sdpcap_dropped(),
+            T(S_LOSS_THINNED), (unsigned long)sdpcap_filtered(),
+            T(S_LOSS_TRACKS), (unsigned long)(trk_evicted + trk_dropped),
+#endif
+            T(S_LOSS_HINT));
+        httpd_resp_send_chunk(req, loss, HTTPD_RESP_USE_STRLEN);
+    }
 
     /* Applies a /system.json response -- uptime/RAM as plain text, the task
      * table as a pre-rendered HTML fragment (same rows build_task_rows_html
@@ -5881,15 +6814,35 @@ static esp_err_t sdcard_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Unlink under the SD WRITER lock (FS_LOCK=0: removing a file a writer has
+ * open corrupts its handle). Per entry -- around the whole walk it starves. */
+static bool sd_rm_locked(const char *path, bool is_dir, bool *lock_busy)
+{
+    /* Foreign streaming readers hold a FILE open under no lock (sdcard.h); 1 is
+     * our own guard. NOT *lock_busy -- a bulk walk must go on, not abandon. */
+    if (sdcard_read_active() > 1)
+        return false;
+    if (!sdcard_io_begin_timeout(2000))
+    {
+        /* Transient, not a bad entry -- re-attempting costs another 2 s on the
+         * httpd task, so the caller abandons the walk rather than retrying. */
+        *lock_busy = true;
+        return false;
+    }
+    bool ok = is_dir ? (rmdir(path) == 0) : (remove(path) == 0);
+    sdcard_io_end();
+    return ok;
+}
+
 /* Recursive delete on ONE caller-owned buffer (append, recurse, truncate) --
  * the 16 KB httpd stack can't afford per-level buffers; `depth` bounds corrupt cards. */
-static bool sd_rm_tree(char *path, size_t size, int depth)
+static bool sd_rm_tree(char *path, size_t size, int depth, bool *lock_busy)
 {
     struct stat st;
     if (stat(path, &st) != 0)
         return false;
     if (!S_ISDIR(st.st_mode))
-        return remove(path) == 0;
+        return sd_rm_locked(path, false, lock_busy);
     if (depth <= 0)
         return false;
 
@@ -5910,19 +6863,24 @@ static bool sd_rm_tree(char *path, size_t size, int depth)
             int n = snprintf(path + len, size - len, "/%s", e->d_name);
             if (n <= 0 || (size_t)n >= size - len)
                 left++;
-            else if (sd_rm_tree(path, size, depth - 1))
+            else if (sd_rm_tree(path, size, depth - 1, lock_busy))
                 removed++;
             else
                 left++;
             path[len] = '\0';
+            /* Writer lock busy: every further entry would wait its own 2 s. */
+            if (*lock_busy)
+                break;
         }
         closedir(d);
+        if (*lock_busy)
+            return false;
         if (left == 0)
             break;
         if (removed == 0)
             return false;
     }
-    return rmdir(path) == 0;
+    return sd_rm_locked(path, true, lock_busy);
 }
 
 static esp_err_t sdcard_delete_handler(httpd_req_t *req)
@@ -5965,6 +6923,7 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
         *w = '\0';
 
         int failed = 0;
+        bool lock_busy = false;
         char *save = NULL;
         for (char *tok = strtok_r(sel, "|", &save); tok; tok = strtok_r(NULL, "|", &save))
         {
@@ -5972,7 +6931,10 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
             if (tok[0] == '\0' || strstr(tok, "..") || has_control_char(tok)) { failed++; continue; }
             char full[SD_PATH_MAX];
             sd_full_path(tok, full, sizeof(full));
-            if (!sd_rm_tree(full, sizeof(full), 8)) failed++;
+            if (!sd_rm_tree(full, sizeof(full), 8, &lock_busy)) failed++;
+            /* The entry that set this already counted as failed; stop here so a
+             * whole selection cannot pile up 2 s waits on the httpd task. */
+            if (lock_busy) break;
         }
         sdcard_read_end();
         httpd_resp_sendstr(req, failed == 0 ? "OK" : "Error");
@@ -5988,7 +6950,8 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     }
     char full[SD_PATH_MAX];
     sd_full_path(rel, full, sizeof(full));
-    bool removed = sd_rm_tree(full, sizeof(full), 8);
+    bool lock_busy = false;
+    bool removed = sd_rm_tree(full, sizeof(full), 8, &lock_busy);
     sdcard_read_end();
     if (removed)
     {
@@ -5999,12 +6962,8 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     return ESP_FAIL;
 }
 
-/* POST /sdcard/upload_rsu?from=&to=&thin= -- re-sends stationary senders
- * (station type RSU) from the PCAP archive to opentrafficmap. Runs on its own
- * background task so the web UI stays responsive; frames are only COLLECTED
- * while the SD writer lock is held and sent afterwards, so the pacing can
- * never starve the recorders. The whitelist means anything not positively
- * identified as an RSU -- vehicles included -- is skipped. */
+/* POST /sdcard/upload_rsu -- re-sends only positively-identified RSU frames.
+ * Own task; frames are COLLECTED under the SD lock and sent after releasing it. */
 
 #define RSU_BATCH_BYTES (256 * 1024)
 #define RSU_BATCH_MAX   256
@@ -6133,6 +7092,13 @@ static void rsu_upload_task(void *arg)
         goto out;
     }
     b->buf = buf;
+
+    /* The newest minutes are still in the PSRAM ring; without this the last
+     * window before "now" is re-sent short and reported as complete -- same
+     * reason as in the search and the export. A window that ended earlier is
+     * complete on the card, and a false alarm here invites a SECOND re-send. */
+    if (!pcap_window_on_card(rsu_job.to))
+        truncated = true;
 
     /* Hour by hour: each walk covers exactly one file, the batch is drained
      * BETWEEN walks -- i.e. with the SD lock released. */
@@ -6728,9 +7694,8 @@ static esp_err_t internal_tar_handler(httpd_req_t *req)
 }
 
 /* ==================================================================
- *  Slow-request worker: long downloads and playback move off the
- *  single httpd task, so the UI (and any watchdog polling
- *  /status.json) keeps answering during a multi-MB transfer.
+ *  Slow-request worker: long downloads move off the single httpd
+ *  task, so the UI keeps answering during a multi-MB transfer.
  * ================================================================== */
 
 typedef struct { httpd_req_t *req; esp_err_t (*fn)(httpd_req_t *); } slow_job_t;
@@ -6777,7 +7742,7 @@ static esp_err_t defer_to_worker(httpd_req_t *req, esp_err_t (*fn)(httpd_req_t *
  * ================================================================== */
 
 #define SRCH_LIMIT 200
-#define SRCH_ROW_MAX 832
+#define SRCH_ROW_MAX 896
 #define SRCH_OUT_CAP (SRCH_LIMIT * SRCH_ROW_MAX)
 
 typedef struct {
@@ -6824,7 +7789,7 @@ static bool srch_cb(uint32_t sec, uint32_t usec, const uint8_t *frame,
         return false;               /* enough -- stop reading the card */
     }
 
-    char detail[320];
+    char detail[384];
     msg_detail_text(&e, sec, detail, sizeof(detail));
 
     char clock[24];
@@ -6919,7 +7884,11 @@ static esp_err_t messages_search_stream(httpd_req_t *req)
         T(S_COL_SENDER), T(S_COL_PREVIEW));
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
 
-    bool complete = sdpcap_read_frames((uint32_t)from, (uint32_t)to, srch_cb, &ctx);
+    /* The newest minutes are still in the PSRAM ring; without this the search
+     * reports them as "nothing found". Same reason as in the export -- and,
+     * for a window that already closed, the ring is not asked at all. */
+    bool flushed = pcap_window_on_card((uint32_t)to);
+    bool complete = sdpcap_read_frames((uint32_t)from, (uint32_t)to, srch_cb, &ctx) && flushed;
 
     /* Rows go out AFTER the walk -- capped at 200, this is at most ~166 KB
      * and the send no longer runs under the SD writer lock. */
@@ -6937,7 +7906,151 @@ static esp_err_t messages_search_stream(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ==================================================================
+ *  GET /messages/export.pcap -- the frames behind a search, as one
+ *  .pcap file. Collected during the walk, sent afterwards.
+ * ================================================================== */
+
+#define EXP_CAP (4 * 1024 * 1024)
+#define EXP_REC_HDR 16
+#define EXP_SNAPLEN 2048        /* matches the recorder's frame cap */
+
+typedef struct {
+    uint8_t *buf;
+    size_t   len;
+    char     q[129];            /* lowercase needle; empty = everything */
+    uint32_t kept;
+    bool     full;
+} exp_ctx_t;
+
+static bool exp_cb(uint32_t sec, uint32_t usec, const uint8_t *frame,
+                   size_t frame_len, const its_decoded_t *d, void *vctx)
+{
+    exp_ctx_t *c = (exp_ctx_t *)vctx;
+
+    if (c->q[0])
+    {
+        web_msg_entry_t e = { 0 };
+        entry_from_decoded(&e, d);
+        char mac_str[20] = "-";
+        if (e.has_src_mac)
+            snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     e.src_mac[0], e.src_mac[1], e.src_mac[2],
+                     e.src_mac[3], e.src_mac[4], e.src_mac[5]);
+        char hay[96];
+        snprintf(hay, sizeof(hay), "%s %s %lu",
+                 e.msgtype, mac_str, (unsigned long)e.station_id);
+        for (char *p = hay; *p; p++)
+            *p = (char)tolower((unsigned char)*p);
+        if (!strstr(hay, c->q))
+            return true;
+    }
+
+    if (c->len + EXP_REC_HDR + frame_len > EXP_CAP)
+    {
+        c->full = true;         /* size cap -- stated in the file name */
+        return false;
+    }
+
+    uint32_t hdr[4] = { sec, usec, (uint32_t)frame_len, (uint32_t)frame_len };
+    memcpy(c->buf + c->len, hdr, sizeof(hdr));
+    c->len += sizeof(hdr);
+    memcpy(c->buf + c->len, frame, frame_len);
+    c->len += frame_len;
+    c->kept++;
+    return true;
+}
+
+static esp_err_t messages_export_stream(httpd_req_t *req)
+{
+    /* Raw frames, i.e. exactly what /sdcard/download hands out -- so the same
+     * password applies. The search beside it only shows decoded summaries. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
+
+    time_t now = time(NULL);
+    long from = (long)now - 3600, to = (long)now;
+    exp_ctx_t ctx = { 0 };
+
+    char query[512];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        char val[224];
+        if (httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK)
+            from = strtol(val, NULL, 10);
+        if (httpd_query_key_value(query, "to", val, sizeof(val)) == ESP_OK)
+            to = strtol(val, NULL, 10);
+        esp_err_t qe = httpd_query_key_value(query, "q", val, sizeof(val));
+        if (qe == ESP_OK)
+        {
+            url_decode(val);
+            if (strlcpy(ctx.q, val, sizeof(ctx.q)) >= sizeof(ctx.q))
+                { ctx.q[0] = '\x01'; ctx.q[1] = '\0'; }
+            for (char *p = ctx.q; *p; p++)
+                *p = (char)tolower((unsigned char)*p);
+        }
+        else if (qe == ESP_ERR_HTTPD_RESULT_TRUNC)
+            { ctx.q[0] = '\x01'; ctx.q[1] = '\0'; }
+    }
+    if (to > (long)now) to = (long)now;
+    if (from < 0)       from = 0;
+    if (to <= from)     to = from + 3600;
+    if (to - from > 24L * 3600)
+        from = to - 24L * 3600;
+
+    ctx.buf = heap_caps_malloc(EXP_CAP, MALLOC_CAP_SPIRAM);
+    if (!ctx.buf)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
+    /* One pass, one buffer -- do not segment this: resuming duplicates the
+     * boundary second and loses records written past an hour boundary. */
+    /* The newest minutes still sit in the PSRAM ring; without this the export
+     * would silently end before them and still claim to be complete. Only for
+     * a window running up to "now" -- an older one is on the card already. */
+    bool flushed = pcap_window_on_card((uint32_t)to);
+    bool complete = sdpcap_read_frames((uint32_t)from, (uint32_t)to, exp_cb, &ctx) && flushed;
+
+    /* Nothing has been sent yet, so the name can still state the truth. */
+    char disp[144];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"its-%ld-%ld%s.pcap\"",
+             from, to, ctx.full ? "-GEKUERZT" : (complete ? "" : "-teilweise"));
+    httpd_resp_set_type(req, "application/vnd.tcpdump.pcap");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+    /* Classic pcap global header, native byte order (the magic states it),
+     * link type 105 = IEEE 802.11 -- same as the stored hourly files. */
+    struct __attribute__((packed)) {
+        uint32_t magic;
+        uint16_t ver_major, ver_minor;
+        int32_t  thiszone;
+        uint32_t sigfigs, snaplen, network;
+    } gh = { 0xa1b2c3d4u, 2, 4, 0, 0, EXP_SNAPLEN, 105 };
+    httpd_resp_send_chunk(req, (const char *)&gh, sizeof(gh));
+
+    bool gone = false;
+    for (size_t off = 0; off < ctx.len; )
+    {
+        size_t n = ctx.len - off;
+        if (n > 8192) n = 8192;
+        if (httpd_resp_send_chunk(req, (const char *)ctx.buf + off, n) != ESP_OK)
+            { gone = true; break; }
+        off += n;
+    }
+    heap_caps_free(ctx.buf);
+    ESP_LOGI(TAG, "export %ld..%ld: %lu frames, %u bytes%s%s", from, to,
+             (unsigned long)ctx.kept, (unsigned)ctx.len,
+             ctx.full ? " (size cap hit)" : "", complete ? "" : " (partial)");
+    if (gone)
+        return ESP_FAIL;
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 static esp_err_t messages_search_async(httpd_req_t *req)  { return defer_to_worker(req, messages_search_stream); }
+static esp_err_t messages_export_async(httpd_req_t *req)  { return defer_to_worker(req, messages_export_stream); }
 
 static esp_err_t sdcard_download_async(httpd_req_t *req)  { return defer_to_worker(req, sdcard_download_handler); }
 static esp_err_t sdcard_tar_async(httpd_req_t *req)       { return defer_to_worker(req, sdcard_tar_handler); }
@@ -7031,30 +8144,14 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     if (!check_update_auth(req))
         return send_auth_required(req);
 
-    /* Which log: ?file=frames selects the frame CSV, otherwise the system log. */
-    bool frames = false;
-    char query[64];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
-    {
-        char v[16];
-        if (httpd_query_key_value(query, "file", v, sizeof(v)) == ESP_OK && strcmp(v, "frames") == 0)
-            frames = true;
-    }
-    const char *path = frames ? CONFIG_SNIFFER_MOUNT_POINT "/logs/frames.csv"
-                              : CONFIG_SNIFFER_MOUNT_POINT "/logs/system.log";
+    const char *path = CONFIG_SNIFFER_MOUNT_POINT "/logs/system.log";
     const char *lc = current_lang == LANG_DE ? "de" : "en";
 
     send_page_header(req, T(S_TITLE_LOGS));
 
-    /* Switcher + refresh links. */
-    char nav[512];
-    snprintf(nav, sizeof(nav),
-        "<p><a href='/logs?file=system&lang=%s'>%s%s%s</a> | "
-        "<a href='/logs?file=frames&lang=%s'>%s%s%s</a> | "
-        "<a href='/logs?file=%s&lang=%s'>%s</a></p>",
-        lc, frames ? "" : "<b>", T(S_LOGS_SYS), frames ? "" : "</b>",
-        lc, frames ? "<b>" : "", T(S_LOGS_FRAMES), frames ? "</b>" : "",
-        frames ? "frames" : "system", lc, T(S_LOGS_REFRESH));
+    char nav[320];
+    snprintf(nav, sizeof(nav), "<p><b>%s</b> &middot; <a href='/logs?lang=%s'>%s</a></p>",
+             T(S_LOGS_SYS), lc, T(S_LOGS_REFRESH));
     httpd_resp_send_chunk(req, nav, HTTPD_RESP_USE_STRLEN);
 
     /* Counted reader -- the tail stream sends many chunks with the FILE open;
@@ -7131,7 +8228,7 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 50; /* 44 routes today, plus headroom */
+    config.max_uri_handlers = 58; /* 50 routes today, plus headroom */
     /* /messages and /map each hold a /ws socket open for as long as the tab
      * is open -- 8 proved too tight once /map existed (accept() failures as
      * dead WS sessions piled up, see the reaping in ws_broadcast_work). */
@@ -7178,6 +8275,10 @@ void webserver_init(void)
         { .uri = "/system/coredump/clear", .method = HTTP_POST, .handler = coredump_clear_post_handler },
         { .uri = "/system/stats/clear", .method = HTTP_POST, .handler = stats_clear_post_handler },
         { .uri = "/map",         .method = HTTP_GET, .handler = map_get_handler },
+        { .uri = "/senders",     .method = HTTP_GET, .handler = senders_get_handler },
+        { .uri = "/senders/clear", .method = HTTP_POST, .handler = senders_clear_post_handler },
+        { .uri = "/transit",     .method = HTTP_GET, .handler = transit_get_handler },
+        { .uri = "/transit/clear", .method = HTTP_POST, .handler = transit_clear_post_handler },
         { .uri = "/spatem.json", .method = HTTP_GET, .handler = spatem_json_handler },
         { .uri = "/lanes.json",  .method = HTTP_GET, .handler = lanes_json_handler },
 #if CONFIG_ENABLE_SD
@@ -7207,6 +8308,7 @@ void webserver_init(void)
         { .uri = "/sdcard/upload_rsu", .method = HTTP_POST, .handler = rsu_upload_post_handler },
         { .uri = "/sdcard/upload_rsu/status", .method = HTTP_GET, .handler = rsu_upload_status_handler },
         { .uri = "/messages/search", .method = HTTP_GET, .handler = messages_search_async },
+        { .uri = "/messages/export.pcap", .method = HTTP_GET, .handler = messages_export_async },
         { .uri = "/sdcard/mount",    .method = HTTP_POST, .handler = sdcard_mount_handler },
         { .uri = "/fs",              .method = HTTP_GET,  .handler = internal_get_handler },
         { .uri = "/fs/download",     .method = HTTP_GET,  .handler = internal_download_async },

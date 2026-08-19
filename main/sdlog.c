@@ -28,17 +28,13 @@ static const char TAG[] = "SDLOG";
 #define LOG_DIR        CONFIG_SNIFFER_MOUNT_POINT "/logs"
 #define SYS_LOG        LOG_DIR "/system.log"
 #define SYS_LOG_OLD    LOG_DIR "/system.1.log"
-#define FRAME_LOG      LOG_DIR "/frames.csv"
-#define FRAME_LOG_OLD  LOG_DIR "/frames.1.csv"
+
+/* Upper bound for the log budget: keeps the byte arithmetic in 32 bit and
+ * a runaway setting from eating the card. */
+#define SYS_BUDGET_MAX_MB SDLOG_MAX_MB
 
 #define SYS_RING_SIZE    (16 * 1024)   /* PSRAM buffer, low-volume text */
-#define FRAME_RING_SIZE  (64 * 1024)   /* PSRAM buffer, higher volume   */
 #define FLUSH_INTERVAL_MS 2000
-#define FRAME_HEX_BYTES   32           /* first N bytes logged as hex   */
-
-/* Fixed slice of the total budget reserved for the (low-volume) system log;
- * the rest goes to the frame log. Each stream keeps 2 rotated files. */
-#define SYS_BUDGET_MB     4
 
 /* ================================================================== */
 /*  Byte ring buffer (allocated in PSRAM)                             */
@@ -123,11 +119,9 @@ typedef struct {
 } stream_t;
 
 static stream_t sys_stream   = { SYS_LOG,   SYS_LOG_OLD,   0, {0} };
-static stream_t frame_stream = { FRAME_LOG, FRAME_LOG_OLD, 0, {0} };
 
 static volatile bool s_ready;
 static volatile bool cfg_log_sys;
-static volatile bool cfg_log_frames;
 
 static vprintf_like_t s_orig_vprintf;
 
@@ -135,9 +129,8 @@ static vprintf_like_t s_orig_vprintf;
  * midnight (and after NTP sync); the boundary is cached so localtime runs once a day. */
 static time_t s_next_day_boundary;
 
-/* Called from the vprintf hook (any task). Appends a date header to the sys
- * ring iff the local day changed. Suppressed until the clock is plausibly
- * NTP-set, to avoid a bogus 1970 header at boot. */
+/* Called from the vprintf hook (any task). Suppressed until the clock is
+ * plausibly NTP-set, to avoid a bogus 1970 header at boot. */
 static void sdlog_emit_date_marker_if_needed(void)
 {
     struct timeval tv;
@@ -165,29 +158,25 @@ static void sdlog_emit_date_marker_if_needed(void)
 
 static void reload_config(void)
 {
-    uint8_t sys = 0, frames = 0;
+    uint8_t sys = 0;
     uint32_t mb = 50;
     config_get_u8(CONFIG_INDEX_LOG_SYS, &sys);
-    config_get_u8(CONFIG_INDEX_LOG_FRAMES, &frames);
     config_get_u32(CONFIG_INDEX_LOG_MAX_MB, &mb);
     cfg_log_sys = sys;
-    cfg_log_frames = frames;
 
-    /* Split the budget: SYS_BUDGET_MB for the system log, the rest for frames.
-     * Each stream keeps 2 files, so per-file cap is half the stream budget. */
-    uint32_t sys_mb = mb > SYS_BUDGET_MB * 2 ? SYS_BUDGET_MB : (mb / 2 ? mb / 2 : 1);
-    uint32_t frame_mb = mb > sys_mb ? mb - sys_mb : 1;
-    sys_stream.file_cap = (size_t)(sys_mb * 1024UL * 1024UL) / 2;
-    frame_stream.file_cap = (size_t)(frame_mb * 1024UL * 1024UL) / 2;
+    /* Per-file cap is half the budget because 2 rotated files are kept. Clamped
+     * because the settings field allows values that overflow 32-bit byte math. */
+    uint32_t sys_mb = mb ? mb : 1;
+    if (sys_mb > SYS_BUDGET_MAX_MB) sys_mb = SYS_BUDGET_MAX_MB;
+    sys_stream.file_cap = (size_t)((uint64_t)sys_mb * 1024u * 1024u / 2u);
     if (sys_stream.file_cap < 4096) sys_stream.file_cap = 4096;
-    if (frame_stream.file_cap < 4096) frame_stream.file_cap = 4096;
 }
 
 static void config_event_handler(void *arg, esp_event_base_t base,
                                  int32_t id, void *data)
 {
     (void)arg; (void)base; (void)data;
-    if (id == CONFIG_INDEX_LOG_SYS || id == CONFIG_INDEX_LOG_FRAMES ||
+    if (id == CONFIG_INDEX_LOG_SYS ||
         id == CONFIG_INDEX_LOG_MAX_MB)
         reload_config();
 }
@@ -246,8 +235,6 @@ static void sdlog_task(void *arg)
 
         if (sys_stream.ring.used)
             flush_stream(&sys_stream);
-        if (frame_stream.ring.used)
-            flush_stream(&frame_stream);
         sdcard_io_end();
     }
 }
@@ -261,8 +248,6 @@ void sdlog_flush_now(void)
     mkdir(LOG_DIR, 0777);   /* the writer task may not have run yet */
     if (sys_stream.ring.used)
         flush_stream(&sys_stream);
-    if (frame_stream.ring.used)
-        flush_stream(&frame_stream);
     sdcard_io_end();
 }
 
@@ -298,49 +283,16 @@ static int sdlog_vprintf(const char *fmt, va_list args)
 /*  Public API                                                        */
 /* ================================================================== */
 
-void sdlog_handle_packet(sniffer_packet_info_t *packet)
-{
-    if (!s_ready || !cfg_log_frames || !packet)
-        return;
-
-    /* Readable local wall-clock time (TZ set in webserver_init). Correct once
-     * NTP has synced; before that it reflects the unset device clock. */
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    struct tm tm_local;
-    localtime_r(&tv.tv_sec, &tm_local);
-    char ts[24];
-    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_local);
-
-    char line[48 + FRAME_HEX_BYTES * 2 + 8];
-    int off = snprintf(line, sizeof(line), "%s.%03ld,%d,%lu,",
-                       ts, (long)(tv.tv_usec / 1000),
-                       packet->rssi, (unsigned long)packet->length);
-    if (off < 0)
-        return;
-
-    size_t hexn = packet->length < FRAME_HEX_BYTES ? packet->length : FRAME_HEX_BYTES;
-    const uint8_t *p = (const uint8_t *)packet->payload;
-    static const char hexd[] = "0123456789abcdef";
-    for (size_t i = 0; i < hexn && off + 2 < (int)sizeof(line); i++)
-    {
-        line[off++] = hexd[p[i] >> 4];
-        line[off++] = hexd[p[i] & 0xF];
-    }
-    if (off < (int)sizeof(line))
-        line[off++] = '\n';
-
-    ring_append(&frame_stream.ring, line, (size_t)off, pdMS_TO_TICKS(10));
-}
-
 void sdlog_init(void)
 {
+    /* Leftover frames.csv from the removed frame log is left ALONE: outside the
+     * /logs budget, but it is captured data -- deleting is the operator's call. */
+
     reload_config();
 
-    if (!ring_init(&sys_stream.ring, SYS_RING_SIZE) ||
-        !ring_init(&frame_stream.ring, FRAME_RING_SIZE))
+    if (!ring_init(&sys_stream.ring, SYS_RING_SIZE))
     {
-        ESP_LOGE(TAG, "Failed to allocate log ring buffers");
+        ESP_LOGE(TAG, "Failed to allocate log ring buffer");
         return;
     }
 
@@ -356,13 +308,12 @@ void sdlog_init(void)
 
     ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, ESP_EVENT_ANY_ID,
                                                config_event_handler, NULL));
-    ESP_LOGI(TAG, "SD logger ready (sys=%d frames=%d)", cfg_log_sys, cfg_log_frames);
+    ESP_LOGI(TAG, "SD logger ready (sys=%d)", cfg_log_sys);
 }
 
 #else /* !CONFIG_ENABLE_SD */
 
 void sdlog_init(void) {}
-void sdlog_handle_packet(sniffer_packet_info_t *packet) { (void)packet; }
 void sdlog_flush_now(void) {}
 
 #endif

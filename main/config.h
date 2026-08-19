@@ -32,7 +32,6 @@ typedef enum {
     CONFIG_INDEX_LED_OVERRIDE_COLOR,
     CONFIG_INDEX_WEB_PASSWORD,
     CONFIG_INDEX_LOG_SYS,      /* u8  bool: write system log to SD */
-    CONFIG_INDEX_LOG_FRAMES,   /* u8  bool: write received-frame CSV log to SD */
     CONFIG_INDEX_LOG_MAX_MB,   /* u32 total SD budget for logs, in MiB */
     CONFIG_INDEX_REFRESH_SEC,  /* u32 web UI auto-refresh interval (0 = off) */
     CONFIG_INDEX_NTP_SERVER,   /* str NTP server hostname (default pool.ntp.org) */
@@ -51,9 +50,8 @@ typedef enum {
     CONFIG_INDEX_ETH_LEDS,          /* u8  bool: Ethernet port's link/activity LEDs (1 = on, default) */
 } config_index_t;
 
-/* Hashes a raw web-UI password the same salted way CONFIG_INDEX_WEB_PASSWORD
- * is stored -- used by webserver.c's auth check to hash an attempted
- * password identically before comparing against the stored hash. */
+/* Hashes a raw password exactly the way CONFIG_INDEX_WEB_PASSWORD is stored,
+ * so the auth check can compare an attempt against the stored hash. */
 void config_hash_web_password(const char *raw, char out_hex[65]);
 
 esp_err_t config_get_u8(config_index_t index, uint8_t *out);
