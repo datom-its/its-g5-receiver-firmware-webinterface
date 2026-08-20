@@ -103,14 +103,16 @@ typedef enum { LANG_DE = 0, LANG_EN = 1 } lang_t;
 typedef enum {
     S_NAV_STATUS, S_NAV_MESSAGES, S_NAV_SETTINGS, S_NAV_UPDATE,
     S_TITLE_STATUS, S_TITLE_MESSAGES, S_TITLE_SETTINGS, S_TITLE_UPDATE,
-    S_NODEID, S_MAC, S_FW_VERSION, S_HW_VARIANT, S_UPTIME, S_SNIFFER,
+    S_NODEID, S_MAC, S_FW_VERSION, S_SD_CARD, S_UPTIME, S_SNIFFER,
     S_CHANNEL, S_MQTT, S_MSGS_RECEIVED, S_RATE, S_FREE_HEAP, S_FREE_PSRAM, S_TEMPERATURE,
     S_RUNNING, S_STOPPED, S_CONNECTED, S_DISCONNECTED,
-    S_START, S_STOP, S_REBOOT, S_REBOOT_CONFIRM, S_REBOOTING,
+    S_START, S_STOP, S_REBOOT, S_REBOOT_CONFIRM, S_REBOOTING, S_REBOOT_SLOW,
+    S_REBOOT_DENIED, S_UNSAVED_WARN, S_SAVE_NOCONN,
     S_POWEROFF, S_POWEROFF_CONFIRM, S_POWEROFF_BUSY, S_POWEROFF_OK, S_POWEROFF_FAIL,
     S_POWEROFF_DOWNLOAD,
     S_SNIFFER_LABEL, S_SNIFF_START, S_SNIFF_STOP, S_AUTO_REFRESH,
-    S_CONFIRM_NEEDED, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
+    S_CONFIRM_NEEDED, S_CONFIRM_NEEDED_NT, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
+    S_CONFIRM_AUTH, S_CONFIRM_NOCONN,
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW, S_COL_SENDER,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
     S_SET_GROUP_GENERAL, S_SET_GROUP_NETWORK, S_SET_GROUP_MQTT,
@@ -120,7 +122,7 @@ typedef enum {
     S_MAP_LATE, S_MAP_EARLY, S_MAP_ONTIME, S_EVT_TRAFFIC,
     S_BROADCAST_ONLY, S_BROADCAST_ONLY_HINT,
     S_LED_OVERRIDE, S_LED_OVERRIDE_HINT,
-    S_LED_BRIGHTNESS, S_SAVE, S_SAVED, S_SAVED_REJECTED, S_SET_BAD,
+    S_LED_BRIGHTNESS, S_SAVE, S_SAVE_REBOOT, S_SAVED, S_SAVED_REJECTED, S_SET_BAD,
     S_WEB_PASSWORD, S_WEB_PASSWORD_SET, S_WEB_PASSWORD_NONE, S_WEB_PASSWORD_CLEAR,
     S_REFRESH_SEC,
     S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
@@ -135,6 +137,7 @@ typedef enum {
     S_PEERS, S_PEERS_HINT, S_MAP_SEEN_BY, S_UNSAVED,
     S_TRACKS_ENABLE, S_TRACKS_DAYS, S_TRACKS_HINT,
     S_ETH_LEDS, S_ETH_LEDS_HINT,
+    S_BT_ENABLE, S_BT_HINT,
     S_PCAP_FILTER, S_PCAP_FILT_ALL, S_PCAP_FILT_THIN, S_PCAP_FILT_VEH, S_PCAP_FILT_HINT,
     S_UPD_INTRO, S_UPLOAD, S_UPLOADING, S_UPLOAD_OK, S_UPLOAD_FAIL, S_UPD_CHOOSE_FILE,
     S_UPD_NOT_CONFIRMED,
@@ -151,7 +154,7 @@ typedef enum {
     S_PEER_TITLE, S_PEER_NODE, S_PEER_RATE, S_PEER_UPTIME, S_PEER_MQTT,
     S_PEER_OFFLINE, S_PEER_OLDFW,
     S_LOSS_TITLE, S_LOSS_SNIFFER, S_LOSS_MQTT, S_LOSS_PCAP, S_LOSS_THINNED,
-    S_LOSS_HINT,
+    S_LOSS_HINT, S_LOSS_BT_PAUSED,
     S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
     S_SYS_IDF, S_SYS_RESET, S_SYS_FLASH, S_SYS_RAM_INT, S_SYS_RAM_PSRAM,
     S_SYS_TRIPLE, S_SYS_TASKS, S_SYS_COL_STATE, S_SYS_COL_PRIO, S_SYS_COL_CPU,
@@ -169,7 +172,7 @@ typedef enum {
     S_PT_PASSAGES, S_PT_WHEN, S_PT_COURSE, S_PT_DEST, S_PT_DEV, S_PT_INRANGE,
     S_NAV_TRAFFIC, S_TITLE_TRAFFIC, S_TRF_DAY, S_TRF_SENDERS, S_TRF_SENDERS_NOTE,
     S_TRF_SENDERS_DAY, S_TRF_SG, S_TRF_CYCLES, S_TRF_PH_WAIT, S_TRF_BUSY, S_TRF_IDENT_NOTE, S_TRF_INTRO, S_TRF_WINDOW, S_TRF_W_24H, S_TRF_W_7D,
-    S_TRF_W_30D, S_TRF_TOTAL, S_TRF_HOUR, S_TRF_SPEED, S_TRF_NODATA,
+    S_TRF_W_30D, S_TRF_STATS, S_TRF_TOTAL, S_TRF_HOUR, S_TRF_SPEED, S_TRF_NODATA,
     S_CAT_CAR, S_CAT_BUS, S_CAT_TRUCK, S_CAT_TWOWHEEL, S_CAT_PED, S_CAT_RSU, S_CAT_OTHER,
     S_EVT_TITLE, S_EVT_NONE, S_EVT_TIME, S_EVT_SENDER, S_EVT_WARNING, S_EVT_DENM,
     S_TRF_SPEED_BY_TYPE, S_TRF_SPEED_MIXED, S_EVT_CAPPED, S_MAP_TRACK_CAP, S_LOSS_TRACKS,
@@ -195,7 +198,7 @@ static const char *STR[S_COUNT][2] = {
     [S_NODEID]          = { "Node-ID",                  "Node ID" },
     [S_MAC]             = { "MAC-Adresse",              "MAC" },
     [S_FW_VERSION]      = { "Firmware-Version",         "Firmware version" },
-    [S_HW_VARIANT]      = { "HW-Variante",              "HW variant" },
+    [S_SD_CARD]         = { "SD-Karte",                 "SD card" },
     [S_UPTIME]          = { "Laufzeit",                 "Uptime" },
     [S_SNIFFER]         = { "Sniffer",                  "Sniffer" },
     [S_CHANNEL]         = { "Kanal",                    "Channel" },
@@ -216,6 +219,22 @@ static const char *STR[S_COUNT][2] = {
      * this uses a JS \u escape instead of &auml;. */
     [S_REBOOT_CONFIRM]  = { "Ger\\u00e4t neu starten?", "Reboot the device?" },
     [S_REBOOTING]       = { "Neustart l&auml;uft...",   "Rebooting..." },
+    /* &quot;, never an apostrophe: this goes into a single-quoted JS string
+     * inside a double-quoted onclick attribute. A bare ' ends the string. */
+    [S_REBOOT_SLOW]     = { "Das Ger&auml;t meldet sich nicht. "
+                            "<a href=&quot;/&quot;>Seite neu laden</a>",
+                            "The device is not answering. "
+                            "<a href=&quot;/&quot;>Reload the page</a>" },
+    /* These two go into alert()/confirm(): plain text, no entities. */
+    [S_REBOOT_DENIED]   = { "Neustart abgelehnt \u2013 Web-Passwort n\u00f6tig.",
+                            "Reboot refused - web password required." },
+    [S_UNSAVED_WARN]    = { "Es gibt ungespeicherte \u00c4nderungen. Diese gehen beim "
+                            "Neustart verloren. Trotzdem neu starten?",
+                            "There are unsaved changes. Rebooting discards them. "
+                            "Reboot anyway?" },
+    /* innerText, so literal UTF-8. A transport failure is not a bad value. */
+    [S_SAVE_NOCONN]     = { "Nicht gespeichert \u2013 keine Verbindung zum Ger\u00e4t:",
+                            "Not saved - no connection to the device:" },
     [S_POWEROFF]        = { "Zum Ausschalten vorbereiten",
                                                         "Prepare for power-off" },
     /* Shown in a JS confirm() dialog -> literal UTF-8, no HTML entity. */
@@ -242,6 +261,12 @@ static const char *STR[S_COUNT][2] = {
                             "Ohne Best&auml;tigung wird nach 30 Minuten automatisch zur&uuml;ckgerollt.",
                             "This firmware was installed via update and is not yet confirmed. "
                             "Without confirmation it will roll back automatically after 30 minutes." },
+    /* No rollback timer running: promising "30 minutes" would be untrue. */
+    [S_CONFIRM_NEEDED_NT] = { "Diese Firmware wurde per Update installiert und ist noch nicht "
+                              "best&auml;tigt. Solange sie unbest&auml;tigt ist, werden weitere "
+                              "Updates abgelehnt.",
+                              "This firmware was installed by an update and is not confirmed "
+                              "yet. While it stays unconfirmed, further updates are refused." },
     [S_CONFIRM_BTN]     = { "Update jetzt best&auml;tigen", "Confirm update now" },
     /* Sent as a plain-text response and shown via JS alert(); it is not parsed
      * as HTML, so this uses a literal UTF-8 "ä" (served with charset=utf-8)
@@ -251,6 +276,14 @@ static const char *STR[S_COUNT][2] = {
     /* Shown via alert(t) after fetch('/confirm').then(r=>r.text()) if
      * ota_confirm() itself fails (very rare -- was hardcoded English before). */
     [S_CONFIRM_ERROR]   = { "Fehler beim Bestätigen.", "Error confirming." },
+    /* alert() texts: literal UTF-8, no apostrophes (they sit in a JS string).
+     * No route named -- the browser may prompt for the password itself. */
+    [S_CONFIRM_AUTH]    = { "Anmeldung nötig. Bitte mit dem Web-Passwort anmelden "
+                            "und erneut bestätigen.",
+                            "Sign-in required. Please sign in with the web password "
+                            "and confirm again." },
+    [S_CONFIRM_NOCONN]  = { "Bestätigung nicht gesendet – keine Verbindung zum Gerät.",
+                            "Confirmation not sent – no connection to the device." },
     [S_MSG_INTRO]       = { "Die letzten %d empfangenen Frames, neueste zuerst, mit dem was sich "
                             "aus jedem dekodieren lie&szlig;.",
                             "Last %d received frames, newest first, with whatever could be decoded "
@@ -285,6 +318,7 @@ static const char *STR[S_COUNT][2] = {
                               "Overrides the normal status indication. Black = normal behaviour (off)." },
     [S_LED_BRIGHTNESS]  = { "LED-Helligkeit",           "LED brightness" },
     [S_SAVE]            = { "Speichern",                "Save" },
+    [S_SAVE_REBOOT]     = { "Speichern &amp; Neustart",  "Save &amp; reboot" },
     [S_UNSAVED]         = { "Nicht gespeicherte &Auml;nderungen",
                             "Unsaved changes" },
     [S_SAVED]           = { "%d Einstellung(en) gespeichert.", "Saved %d setting(s)." },
@@ -447,6 +481,17 @@ static const char *STR[S_COUNT][2] = {
                           "The two LEDs on the network socket show link and traffic. Switching "
                           "them off does not affect operation, it only makes the link state "
                           "unreadable on the device. Applies at once." },
+    [S_BT_ENABLE]       = { "Bluetooth",                 "Bluetooth" },
+    /* The two percentages are duty cycles -- recompute from s_cycle_ms and the
+     * slicing constants in bt_stream.c. Loss starts at BT on, not at connect. */
+    [S_BT_HINT]         = { "Wirkt erst nach einem Neustart. BLE teilt sich das Funkteil mit dem "
+                            "5,9-GHz-Empfang: ab dem Einschalten gehen rund 25&nbsp;% der Frames "
+                            "verloren, w&auml;hrend ein Handy verbunden ist rund 48&nbsp;%. Die "
+                            "Aufzeichnung auf SD und MQTT l&auml;uft weiter, nur mit L&uuml;cken.",
+                            "Takes effect only after a restart. BLE shares the radio with the "
+                            "5.9 GHz reception: from the moment it is on about 25&nbsp;% of frames "
+                            "are lost, and about 48&nbsp;% while a phone is connected. Recording "
+                            "to SD and MQTT keeps running, just with gaps." },
     [S_UPD_INTRO]   = { "Firmware-Datei (.bin) w&auml;hlen und hochladen. Das Ger&auml;t "
                         "flasht sie auf die inaktive OTA-Partition und startet neu. Danach im "
                         "Status best&auml;tigen, sonst wird zur&uuml;ckgerollt.",
@@ -592,12 +637,19 @@ static const char *STR[S_COUNT][2] = {
     [S_LOSS_PCAP]       = { "Aufzeichnung verloren (gesch&auml;tzt)",
                             "Recording lost (estimated)" },
     [S_LOSS_THINNED]    = { "Bewusst ausged&uuml;nnt",  "Thinned on purpose" },
-    [S_LOSS_HINT]       = { "Die Werte z&auml;hlen Frames seit dem Einschalten; bei der Aufzeichnung "
+    /* Sits in the loss table but is a duration, not a count -- said in the row
+     * label AND in the hint, because the table around it counts frames. */
+    [S_LOSS_BT_PAUSED]  = { "Empfang pausiert (Dauer)", "Reception paused (duration)" },
+    [S_LOSS_HINT]       = { "Die Werte z&auml;hlen Frames seit dem Einschalten, nur die Pausenzeile "
+                            "ist eine Dauer (Empfang angehalten, w&auml;hrend Bluetooth funkte); "
+                            "bei der Aufzeichnung "
                             "ist der Wert gesch&auml;tzt, weil dort ganze Puffer auf einmal verworfen "
                             "werden. Ausged&uuml;nnte sind "
                             "kein Fehler, sondern die eingestellte Filterung. Steigen die &uuml;brigen, "
                             "kommt das Ger&auml;t nicht nach &ndash; SD-Karte, Netzwerk oder Speicher.",
-                            "The values count frames since power-on; the recording row is an estimate, "
+                            "The values count frames since power-on, only the pause row is a duration "
+                            "(reception halted while Bluetooth was on air); "
+                            "the recording row is an estimate, "
                             "because whole buffers are discarded there at once. "
                             "Thinned ones are not an error but "
                             "the configured filtering. If the others keep rising, the device is not "
@@ -678,18 +730,25 @@ static const char *STR[S_COUNT][2] = {
     [S_PT_AVG]          = { "&Oslash; Abweichung",       "Avg. deviation" },
     [S_PT_LATE]         = { "max. Versp&auml;tung",      "Worst late" },
     [S_PT_EARLY]        = { "max. zu fr&uuml;h",         "Worst early" },
-    [S_PT_UNKNOWN]      = { "Null",                      "Zero" },
+    /* Not "Null": the value 0 means on time OR not transmitted, and the
+     * heading is what a reader of the table actually sees. */
+    [S_PT_UNKNOWN]      = { "ohne Wert",                 "no value" },
     [S_PT_LAST]         = { "Zuletzt",                   "Last" },
     /* The wire format cannot express more, and a reader would otherwise take
      * the numbers for a precise measurement. */
     [S_PT_LIMIT]    = { "Das Funkformat kennt nur &plusmn;7&nbsp;Minuten; Werte am Anschlag "
-                        "sind mit &ge; markiert. Eine Null hei&szlig;t <em>p&uuml;nktlich oder "
-                        "nicht mitgesendet</em> &ndash; nicht unterscheidbar, daher eigene "
-                        "Spalte statt Mittelwert.",
+                        "sind mit &ge; markiert. &bdquo;ohne Wert&ldquo; z&auml;hlt die "
+                        "Vorbeifahrten, deren zuletzt gesendete Abweichung&nbsp;0 war &ndash; das "
+                        "hei&szlig;t <em>p&uuml;nktlich "
+                        "oder gar nicht mitgesendet</em> und ist nicht unterscheidbar, daher eigene "
+                        "Spalte statt Mittelwert. Landen alle Sichtungen einer Linie in "
+                        "dieser Spalte, sendet sie die Abweichung gar nicht mit.",
                         "The radio format only carries &plusmn;7&nbsp;minutes; values at that "
-                        "limit are marked &ge;. A zero means <em>on time or not "
-                        "transmitted</em> &ndash; indistinguishable, hence its own column "
-                        "instead of the average." },
+                        "limit are marked &ge;. &ldquo;no value&rdquo; counts the passages whose "
+                        "last transmitted deviation was&nbsp;0 &ndash; meaning <em>on time or not sent at "
+                        "all</em>, which cannot be told apart, hence its own column instead of the "
+                        "average. If every sighting of a line ends up in this column, it does "
+                        "not transmit the deviation at all." },
     [S_PT_ACTIVE]       = { "Offene Vorbeifahrten: %d (eine gilt bis 90 s nach der letzten Nachricht).",
                             "Open passages: %d (one stays open until 90 s after the last message)." },
     [S_PT_PASSAGES]     = { "Letzte Vorbeifahrten",     "Recent passages" },
@@ -741,6 +800,7 @@ static const char *STR[S_COUNT][2] = {
     [S_TRF_W_24H]       = { "24 Stunden",               "24 hours" },
     [S_TRF_W_7D]        = { "7 Tage",                   "7 days" },
     [S_TRF_W_30D]       = { "30 Tage",                  "30 days" },
+    [S_TRF_STATS]       = { "Verkehrsstatistik",        "Traffic statistics" },
     [S_TRF_TOTAL]       = { "Gesamt",                   "Total" },
     [S_TRF_HOUR]        = { "Stunde",                   "Hour" },
     [S_TRF_SPEED]       = { "&Oslash;/max km/h (Fahrzeuge)", "avg/max km/h (vehicles)" },
@@ -1214,6 +1274,8 @@ static void format_uptime(uint64_t total_sec, char *out, size_t out_size)
 }
 
 /* Format a byte count as KiB or MiB for readability. */
+static void format_bytes64(uint64_t bytes, char *out, size_t out_size);
+
 static void format_bytes(uint32_t bytes, char *out, size_t out_size)
 {
     if (bytes >= 1024 * 1024)
@@ -1439,6 +1501,16 @@ static const char PAGE_HEADER_FMT[] =
     ".card{background:#15191d;border:1px solid #2a2f34;border-radius:10px;padding:12px 14px}"
     ".card .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#94a0a8;margin-bottom:5px}"
     ".card .v{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}"
+    /* Section box: one visual group per topic; cards inside go a step darker
+     * so they still stand out against the section background. */
+    ".sect{background:#15191d;border:1px solid #2a2f34;border-radius:10px;padding:14px 16px;margin:16px 0}"
+    ".sect>h2{margin:0 0 10px}"
+    ".sect .card,.sect table,.sect .scroll{background:#0f1317;border-color:#232830}"
+    /* .isec sits inside .sect and is darker, so its tables go back up a step. */
+    ".isec table,.isec .scroll{background:#15191d;border-color:#2a2f34}"
+    ".isec{background:#0f1317;border:1px solid #232830;border-radius:8px;padding:10px 12px;margin:12px 0}"
+    ".foot{text-align:center;font-size:12px;color:#5c6770;margin-top:34px}"
+    ".foot a{color:#5c6770}.foot a:hover{color:#94a0a8}"
     "pre{background:#0a0d0f;border:1px solid #2a2f34;border-radius:9px;color:#cfe8f0}"
     "</style><title>%s</title></head><body><div class='wrap'>"
     /* .navlinks is a separate flex item from .lang (see CSS) so the page
@@ -1479,10 +1551,69 @@ static const char PAGE_HEADER_FMT[] =
     "<h1>%s</h1>";
 
 static const char PAGE_FOOTER[] =
+    /* Deliberately no (c): the tree carries third-party parts (see NOTICE),
+     * a blanket claim would overreach. Name and source link only. */
+    "<div class='foot'><a href='https://codeberg.org/datom/its-g5-receiver-firmware-webinterface'"
+    " target='_blank' rel='noopener'>datom &middot; Codeberg</a></div>"
     "<script>document.querySelectorAll('nav a').forEach(function(a){"
     "var h=(a.getAttribute('href')||'').split('?')[0];"
-    "if(h&&h===location.pathname)a.className='active';});</script>"
+    "if(h&&h===location.pathname)a.className='active';});"
+    /* Shared reboot: poll until the device answers, then reload. First poll
+     * delayed so a not-yet-rebooted device cannot "succeed". */
+    /* (ask, msg, slow) -- the order the callers already pass them in. */
+    /* Returns a promise: false means no restart was started, and the caller
+     * has to undo whatever it did in anticipation (a disabled button). */
+    "window.itsReboot=function(ask,msg,slow,denied){"
+    "if(ask&&!confirm(ask))return Promise.resolve(false);"
+    /* r.ok first: /reboot is password-gated, and a refused request must not
+     * look like a running restart. */
+    "function w(){"
+    "document.body.innerHTML=\"<div class='wrap'><p id='itsrb'></p></div>\";"
+    "var t0=Date.now(),e=document.getElementById('itsrb');"
+    "e.innerHTML=msg;"   /* entities, not textContent */
+    "setTimeout(function(){var iv=setInterval(function(){"
+    "var n=Math.round((Date.now()-t0)/1000);"
+    /* Bounded: without this the page counts up forever on a device that never
+     * comes back, and the operator has nothing but a growing number. */
+    "if(n>120){clearInterval(iv);e.innerHTML=slow;return;}"
+    "e.innerHTML=msg+' ('+n+' s)';"
+    "fetch('/favicon.png?x='+Date.now(),{cache:'no-store'}).then(function(ok){"
+    "if(!ok.ok)return;clearInterval(iv);location.reload();}).catch(function(){});"
+    "},2000);},6000);}"
+    /* A POST that dies in flight usually means the device restarted before it
+     * could answer -- so wait either way rather than leaving a dead page. */
+    "return fetch('/reboot',{method:'POST'}).then(function(r){"
+    "if(!r.ok){alert(denied);return false;}w();return true;})"
+    ".catch(function(){w();return true;});};"
+    "</script>"
     "</div></body></html>";
+
+/* On every page, not just /status: an unconfirmed update rolls back after 30
+ * minutes, and whoever lands elsewhere never sees the warning. */
+static void send_pending_verify_banner(httpd_req_t *req)
+{
+    if (!ota_is_pending_verify())
+        return;
+    /* The POST carries no query string of its own; without ?lang= here,
+     * resolve_language() on that request defaults to German. */
+    const char *lc = current_lang == LANG_DE ? "de" : "en";
+    static EXT_RAM_BSS_ATTR char banner[1280];
+    snprintf(banner, sizeof(banner),
+        "<div class='warn'><p>%s</p>"
+        /* The banner now sits on /settings too, where a reload would drop
+         * unsaved edits; the guard tolerates pages without that variable. */
+        "<button onclick=\"if(document.body.classList.contains('dirty')&&"
+        "typeof ITS_UNSAVED_WARN!=='undefined'&&!confirm(ITS_UNSAVED_WARN))return;"
+        "fetch('/confirm?lang=%s',{method:'POST'}).then(function(r){"
+        "if(r.status===401){alert('%s');return null;}return r.text();})"
+        ".then(function(t){if(t===null)return;alert(t);location.reload();})"
+        /* Without the catch a network error left the button looking dead. */
+        ".catch(function(){alert('%s');})\">%s</button>"
+        "</div>",
+        T(ota_rollback_armed() ? S_CONFIRM_NEEDED : S_CONFIRM_NEEDED_NT),
+        lc, T(S_CONFIRM_AUTH), T(S_CONFIRM_NOCONN), T(S_CONFIRM_BTN));
+    httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
+}
 
 /* `json_url` enables the pause/resume button + polling loop feeding
  * window.arApply -- no full reload, so CSS animations never restart. */
@@ -1570,6 +1701,7 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
              heading);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send_chunk(req, header, HTTPD_RESP_USE_STRLEN);
+    send_pending_verify_banner(req);
 }
 
 static void send_page_header(httpd_req_t *req, const char *heading)
@@ -1732,24 +1864,29 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 
     send_page_header_refresh(req, T(S_TITLE_STATUS), "/status.json");
 
-    /* Confirm banner if this firmware is pending verification */
-    if (ota_is_pending_verify())
+    /* SD usage instead of the static hardware variant that stood here: it
+     * answers "is the card filling up" at a glance. */
+    char sdbuf[128];
+#if CONFIG_ENABLE_SD
     {
-        /* The POST carries no query string of its own; without ?lang= here,
-         * resolve_language() on that request defaults to German regardless
-         * of the page's actual language (same class of bug as /update). */
-        const char *lc = current_lang == LANG_DE ? "de" : "en";
-        char banner[512];
-        snprintf(banner, sizeof(banner),
-            "<div class='warn'><p>%s</p>"
-            "<button onclick=\"fetch('/confirm?lang=%s',{method:'POST'}).then(r=>r.text()).then(t=>{alert(t);location.reload();})\">%s</button>"
-            "</div>",
-            T(S_CONFIRM_NEEDED), lc, T(S_CONFIRM_BTN));
-        httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
+        uint64_t sd_total = 0, sd_free = 0;
+        if (sdcard_usage(&sd_total, &sd_free) == ESP_OK && sd_total)
+        {
+            char u[24], t[24], f[24];
+            format_bytes64(sd_total - sd_free, u, sizeof(u));
+            format_bytes64(sd_total, t, sizeof(t));
+            format_bytes64(sd_free, f, sizeof(f));
+            snprintf(sdbuf, sizeof(sdbuf), T(S_SD_USED_OF), u, t, f);
+        }
+        else
+            snprintf(sdbuf, sizeof(sdbuf), "%s", T(S_SD_NOT_MOUNTED));
     }
+#else
+    snprintf(sdbuf, sizeof(sdbuf), "-");
+#endif
 
     /* id='st-*' on every cell that /status.json can update -- see arApply
-     * below. Node ID/MAC/firmware/hardware never change without a reboot
+     * below. Node ID/MAC/firmware never change without a reboot
      * (a full page load already happens then), so those stay static. */
     char body[3584];
     snprintf(body, sizeof(body),
@@ -1776,7 +1913,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         T(S_NODEID), nodeid_esc,
         T(S_MAC), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         T(S_FW_VERSION), app_desc->version,
-        T(S_HW_VARIANT), CONFIG_HW_VARIANT,
+        T(S_SD_CARD), sdbuf,
         T(S_SNIFFER), running ? "ok" : "bad", running ? T(S_RUNNING) : T(S_STOPPED),
         T(S_CHANNEL), chan_str,
         T(S_MQTT), mqtt_connected_state ? "ok" : "bad",
@@ -1802,7 +1939,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         /* r.ok, not "it returned": /sniffer is password-gated, and a rejected
          * request must not flip the label. The status poll re-asserts the truth. */
         "fetch('/sniffer?action='+a,{method:'POST'}).then(function(r){if(r.ok&&window.stSetSniff)window.stSetSniff(a==='start');})\">%s</button> "
-        "<button onclick=\"if(confirm('%s'))fetch('/reboot',{method:'POST'}).then(()=>{document.body.innerHTML='<p>%s</p>';})\">%s</button>"
+        "<button onclick=\"itsReboot('%s','%s','%s','%s')\">%s</button>"
 #if CONFIG_ENABLE_SD
         /* Result goes into its own span rather than replacing the page: if the
          * unmount fails the operator has to stay on the page and see why. */
@@ -1815,7 +1952,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         "</p>",
         running ? "stop" : "start",
         running ? T(S_SNIFF_STOP) : T(S_SNIFF_START),
-        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT)
+        T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT_SLOW), T(S_REBOOT_DENIED), T(S_REBOOT)
 #if CONFIG_ENABLE_SD
         , T(S_POWEROFF_CONFIRM), T(S_POWEROFF_BUSY), T(S_POWEROFF_FAIL), T(S_POWEROFF)
 #endif
@@ -3728,14 +3865,15 @@ static void emit_traffic_lights(httpd_req_t *req)
     static spatem_intersection_t ints[SPATEM_MAX_INT];
     int ni = spatem_snapshot(ints, SPATEM_MAX_INT);
 
-    char h[96];
-    snprintf(h, sizeof(h), "<h2>&#128678; %s</h2>", T(S_TRF_LIGHTS));
+    char h[128];
+    snprintf(h, sizeof(h), "<div class='sect'><h2>&#128678; %s</h2>", T(S_TRF_LIGHTS));
     httpd_resp_send_chunk(req, h, HTTPD_RESP_USE_STRLEN);
 
     if (ni == 0)
     {
-        char none[160];
-        snprintf(none, sizeof(none), "<p><small>%s</small></p>", T(S_TRF_LIGHTS_NONE));
+        /* The section div is open -- every exit below must close it. */
+        char none[192];
+        snprintf(none, sizeof(none), "<p><small>%s</small></p></div>", T(S_TRF_LIGHTS_NONE));
         httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
         return;
     }
@@ -3776,14 +3914,14 @@ static void emit_traffic_lights(httpd_req_t *req)
         char head[512];
         if (e->name[0])
             snprintf(head, sizeof(head),
-                "<p style='margin-bottom:4px'><b>%s %s</b> "
+                "<div class='isec'><p style='margin:0 0 4px'><b>%s %s</b> "
                 "<small>(%u/%u &middot; Rev %u &middot; %s)</small></p>"
                 "<div style='margin-bottom:10px'>",
                 T(S_TRF_INTERSECTION), nameesc, (unsigned)e->region,
                 (unsigned)e->id, (unsigned)e->revision, agebuf);
         else
             snprintf(head, sizeof(head),
-                "<p style='margin-bottom:4px'><b>%s %u/%u</b> "
+                "<div class='isec'><p style='margin:0 0 4px'><b>%s %u/%u</b> "
                 "<small>(Rev %u &middot; %s)</small></p><div style='margin-bottom:10px'>",
                 T(S_TRF_INTERSECTION), (unsigned)e->region, (unsigned)e->id,
                 (unsigned)e->revision, agebuf);
@@ -3908,7 +4046,11 @@ static void emit_traffic_lights(httpd_req_t *req)
             HTML_PRINTF(waitmsg, "<p><small>%s</small></p>", T(S_TRF_PH_WAIT));
             httpd_resp_send_chunk(req, waitmsg, HTTPD_RESP_USE_STRLEN);
         }
+        /* closes this intersection's .isec */
+        httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
     }
+    /* closes the traffic-lights .sect */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
 }
 
 /* Closes #trf-body and emits the auto-refresh script + footer. Unlike the
@@ -4004,8 +4146,11 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
 
     if (n == 0)
     {
-        char nd[256];
-        snprintf(nd, sizeof(nd), "<div class='warn'>%s</div>", T(S_TRF_NODATA));
+        char nd[384];
+        snprintf(nd, sizeof(nd),
+                 "<div class='sect'><h2>&#128202; %s</h2>"
+                 "<div class='warn'>%s</div></div>",
+                 T(S_TRF_STATS), T(S_TRF_NODATA));
         httpd_resp_send_chunk(req, nd, HTTPD_RESP_USE_STRLEN);
         traffic_refresh_footer(req, ri);
         return ESP_OK;
@@ -4041,12 +4186,14 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
             if (rows[i].speed_legacy && rows[i].sp_cnt[c]) speed_mixed = true;
     }
 
-    char summary[512];
+    char summary[640];
     snprintf(summary, sizeof(summary),
+        "<div class='sect'><h2>&#128202; %s</h2>"
         "<div class='cards'>"
         "<div class='card'><div class='l'>%s</div><div class='v'>%llu</div></div>"
         "<div class='card'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>"
         "</div>",
+        T(S_TRF_STATS),
         T(S_TRF_TOTAL), (unsigned long long)tot,
         T(S_TRF_SPEED), (unsigned long)(osp_cnt ? osp_sum / osp_cnt : 0), (unsigned long)osp_max);
     httpd_resp_send_chunk(req, summary, HTTPD_RESP_USE_STRLEN);
@@ -4188,13 +4335,13 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
 
     char snote[1024];
-    HTML_PRINTF(snote, "<p><small>%s%s%s %s</small></p>", T(S_TRF_SENDERS_NOTE),
+    HTML_PRINTF(snote, "<p><small>%s%s%s %s</small></p></div>", T(S_TRF_SENDERS_NOTE),
                 daily ? " " : "", daily ? T(S_TRF_SENDERS_DAY) : "", T(S_TRF_IDENT_NOTE));
     httpd_resp_send_chunk(req, snote, HTTPD_RESP_USE_STRLEN);
 
     /* --- Warning events (DENM) for the same window, newest first. --- */
-    char etitle[64];
-    snprintf(etitle, sizeof(etitle), "<h2>%s</h2>", T(S_EVT_TITLE));
+    char etitle[96];
+    snprintf(etitle, sizeof(etitle), "<div class='sect'><h2>&#9888;&#65039; %s</h2>", T(S_EVT_TITLE));
     httpd_resp_send_chunk(req, etitle, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR event_rec_t evs[256];
@@ -4278,6 +4425,8 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         }
         httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
     }
+    /* closes the warnings .sect (both branches above end here) */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
 
     traffic_refresh_footer(req, ri);
     return ESP_OK;
@@ -4963,6 +5112,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     config_get_u32(CONFIG_INDEX_MAP_STALE_SEC, &map_stale_sec);
     char peers_esc[CONFIG_PEERS_BUFFER_SIZE * 6];
     settings_get_str(CONFIG_INDEX_PEERS, peers_esc, sizeof(peers_esc));
+    uint8_t bt_en = 0;
+    config_get_u8(CONFIG_INDEX_BT_ENABLE, &bt_en);
 
     /* Whether a web password is currently set. We never echo the password
      * itself back into the page, only whether one exists. */
@@ -5048,7 +5199,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
      * httpd task's stack. */
 
     /* --- General: identity, sniffer filtering, LED, UI refresh --- */
-    static EXT_RAM_BSS_ATTR char general[4096];
+    /* 6144 against a measured worst case of 3658 B (escaped peer list 954,
+     * node ID 378); HTML_PRINTF only logs a truncation, so headroom is cheap. */
+    static EXT_RAM_BSS_ATTR char general[6144];
     HTML_PRINTF(general,
         "<h2>%s</h2><table class='kv'>"
         /* size='16', not the field's full width: the HTML size attribute
@@ -5076,6 +5229,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='peers' value='%s' maxlength='159' placeholder='its-node344.local, 192.168.178.40'>"
         "<br><small>%s</small></td></tr>"
+        /* Size new rows against general[] at its declaration, not from here. */
+        "<tr><th>%s</th><td><input type='checkbox' id='bten'%s>"
+        "<br><small>%s</small></td></tr>"
         "</table>",
         T(S_SET_GROUP_GENERAL),
         T(S_NODEID), nodeid,
@@ -5091,7 +5247,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         T(S_LED_OVERRIDE), led_color, T(S_LED_OVERRIDE_HINT),
         T(S_REFRESH_SEC), (unsigned long)refresh_sec,
         T(S_MAP_STALE_SEC), (unsigned long)map_stale_sec, T(S_MAP_STALE_HINT),
-        T(S_PEERS), peers_esc, T(S_PEERS_HINT));
+        T(S_PEERS), peers_esc, T(S_PEERS_HINT),
+        T(S_BT_ENABLE), bt_en ? " checked" : "", T(S_BT_HINT));
     httpd_resp_send_chunk(req, general, HTTPD_RESP_USE_STRLEN);
 
     /* --- Network --- */
@@ -5213,7 +5370,15 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
      * so the size is cheap; -Wformat-truncation is what caught the last bump. */
     static EXT_RAM_BSS_ATTR char save_block[6144];
     HTML_PRINTF(save_block,
-        "<p><button onclick=\"save()\">%s</button> <span id='result'></span></p>"
+        /* Several settings only take effect after a reboot (network,
+         * Bluetooth); itsReboot() lives in PAGE_FOOTER. */
+        "<p><button onclick=\"save()\">%s</button> "
+        /* Dirty asks about the lost edits, clean asks the plain question --
+         * never both, so itsReboot gets null once we already confirmed. */
+        "<button onclick=\"var d=document.body.classList.contains('dirty');"
+        "if(d&&!confirm(ITS_UNSAVED_WARN))return;"
+        "itsReboot(d?null:'%s','%s','%s','%s')\">%s</button> "
+        "<span id='result'></span></p>"
         /* Floating save bar: appears once anything is edited and doubles as the
          * unsaved-changes indicator; the top button stays. */
         "<style>#savebar{position:fixed;left:0;right:0;bottom:0;z-index:900;"
@@ -5224,9 +5389,16 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "align-items:center;gap:12px;flex-wrap:wrap}"
         "#savebar small{color:#f2b134}"
         "body.dirty{padding-bottom:64px}</style>"
+        /* No confirm: the click IS the intent. Reboots only on success --
+         * answered is not succeeded. */
         "<div id='savebar'><div class='in'><button onclick=\"save()\">%s</button>"
+        "<button onclick=\"var b=this;if(b.disabled)return;b.disabled=true;"
+        "var pr=save();if(!pr){b.disabled=false;return;}"
+        "pr.then(function(res){if(!res||!res.ok){b.disabled=false;return;}"
+        "itsReboot(null,'%s','%s','%s').then(function(go){if(!go)b.disabled=false;});"
+        "});\">%s</button>"
         "<small>%s</small> <span id='result2'></span></div></div>"
-        "<script>var ITS_SET_BAD=\"%s\";"
+        "<script>var ITS_SET_BAD=\"%s\",ITS_UNSAVED_WARN=\"%s\",ITS_SAVE_NOCONN=\"%s\";"
         /* Show every number field's allowed range, read from the field's OWN
          * min/max so the hint can never drift from what the device enforces.
          * Without it a value outside the range was simply refused and the
@@ -5249,7 +5421,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "var r=i.closest('tr'),h=r?r.querySelector('th'):null;"
         "bad.push(h?h.textContent.trim():i.id);}});"
         "if(bad.length){document.getElementById('result2').textContent="
-        "ITS_SET_BAD+' '+bad.join(', ');return;}"
+        "ITS_SET_BAD+' '+bad.join(', ');return null;}"
         "var p=new URLSearchParams();"
         "p.append('nodeid',document.getElementById('nodeid').value);"
         "p.append('mqtturi',document.getElementById('mqtturi').value);"
@@ -5260,6 +5432,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "p.append('refreshsec',document.getElementById('refreshsec').value);"
         "p.append('mapstale',document.getElementById('mapstale').value);"
         "p.append('peers',document.getElementById('peers').value);"
+        "p.append('bten',document.getElementById('bten').checked?'1':'0');"
         "p.append('ntpserver',document.getElementById('ntpserver').value);"
         "p.append('webpasswd',document.getElementById('webpasswd').value);"
         "if(document.getElementById('webpwclear').checked)p.append('webpwclear','1');"
@@ -5287,10 +5460,17 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 #if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
         "p.append('ethleds',document.getElementById('ethleds').checked?'1':'0');"
 #endif
-        "fetch('/settings?lang=%s',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
-        ".then(r=>r.text()).then(t=>{document.getElementById('result').innerText=t;"
-        "var r2=document.getElementById('result2');if(r2)r2.innerText=t;"
-        "markClean();});"
+        /* Resolves {ok,t}: a fetch fulfils on 401 and on the 422 a rejection
+         * returns, so only r.ok may clear the bar or trigger a reboot. */
+        "return fetch('/settings?lang=%s',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})"
+        ".then(function(r){return r.text().then(function(t){return {ok:r.ok,t:t};});})"
+        ".then(function(res){document.getElementById('result').innerText=res.t;"
+        "var r2=document.getElementById('result2');if(r2)r2.innerText=res.t;"
+        "if(res.ok)markClean();return res;})"
+        ".catch(function(e){var m=ITS_SAVE_NOCONN+' '+e;"
+        "document.getElementById('result').innerText=m;"
+        "var r2=document.getElementById('result2');if(r2)r2.innerText=m;"
+        "return {ok:false,t:m};});"
         "}"
         /* Any edit anywhere in the page arms the bar. Bound with capture on
          * the document so fields added later are covered too, and so this
@@ -5311,7 +5491,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "['ethip','ethnm','ethgw'].forEach(function(i){document.getElementById(i).disabled=d;});}"
         "dhcpToggle();"
         "</script>",
-        T(S_SAVE), T(S_SAVE), T(S_UNSAVED), T(S_SET_BAD), lc);
+        T(S_SAVE), T(S_REBOOT_CONFIRM), T(S_REBOOTING), T(S_REBOOT_SLOW), T(S_REBOOT_DENIED),
+        T(S_REBOOT), T(S_SAVE), T(S_REBOOTING), T(S_REBOOT_SLOW), T(S_REBOOT_DENIED),
+        T(S_SAVE_REBOOT), T(S_UNSAVED), T(S_SET_BAD), T(S_UNSAVED_WARN), T(S_SAVE_NOCONN), lc);
     httpd_resp_send_chunk(req, save_block, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -5447,6 +5629,12 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         }
     }
 #endif
+    /* No 'rejected' branch: a checkbox only ever sends "1" or "0", so unlike the
+     * number fields there is no out-of-range case to report. */
+    if (httpd_query_key_value(buf, "bten", value, sizeof(value)) == ESP_OK)
+    {
+        if (config_set_u8(CONFIG_INDEX_BT_ENABLE, value[0] == '1' ? 1 : 0) == ESP_OK) saved++;
+    }
     if (httpd_query_key_value(buf, "peers", value, sizeof(value)) == ESP_OK)
     {
         url_decode(value);
@@ -5601,6 +5789,10 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         snprintf(msg, sizeof(msg), T(S_SAVED_REJECTED), saved, rejected);
     else
         snprintf(msg, sizeof(msg), T(S_SAVED), saved);
+    /* Lets the browser tell "saved" from "partly rejected" without parsing a
+     * translated sentence. Text unchanged either way. */
+    if (rejected)
+        httpd_resp_set_status(req, "422 Unprocessable Entity");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, msg);
     return ESP_OK;
@@ -5655,6 +5847,10 @@ static void reboot_timer_cb(void *arg)
 
 static esp_err_t reboot_post_handler(httpd_req_t *req)
 {
+    /* Same gate as /poweroff and /sniffer: one unauthenticated POST used to be
+     * enough to restart a mounted receiver from anywhere on the network. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
     /* Before the restart, not after the reply: esp_restart() is as abrupt for
      * the SD card as pulling the plug, so without this a reboot silently
      * discards whatever the PCAP ring had not written yet (minutes of it). */
@@ -5705,6 +5901,10 @@ static esp_err_t poweroff_post_handler(httpd_req_t *req)
 static esp_err_t confirm_post_handler(httpd_req_t *req)
 {
     resolve_language(req);
+    /* Cancels the rollback, so it closes the only way back after a bad
+     * update -- same gate as /update and /reboot. */
+    if (!check_update_auth(req))
+        return send_auth_required(req);
     bool ok = ota_confirm();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, ok ? T(S_CONFIRMED) : T(S_CONFIRM_ERROR));
@@ -5811,7 +6011,7 @@ static const char *reset_reason_str(esp_reset_reason_t r)
     }
 }
 
-/* Same auth model as reboot_post_handler -- /system itself is unauthenticated,
+/* Open like the other /system POSTs -- the page itself is unauthenticated,
  * and this only discards diagnostic data, not user data. */
 static esp_err_t coredump_clear_post_handler(httpd_req_t *req)
 {
@@ -6048,11 +6248,21 @@ static esp_err_t system_get_handler(httpd_req_t *req)
 #if CONFIG_ENABLE_SD
         tracklog_losses(&trk_evicted, &trk_dropped, NULL);
 #endif
-        char loss[1024];
+        /* Rendered as seconds with three decimals and a unit, because every
+         * other row in this table is a frame count and would be misread. */
+        uint64_t paused_ms = (uint64_t)sniffer_paused_ms();
+        char paused_str[32];
+        snprintf(paused_str, sizeof(paused_str), "%llu%s%03llu s",
+                 (unsigned long long)(paused_ms / 1000),
+                 current_lang == LANG_DE ? "," : ".",
+                 (unsigned long long)(paused_ms % 1000));
+        /* 1280, not 1024: the pause row and its German hint overran the old size. */
+        char loss[1280];
         HTML_PRINTF(loss,
             "<h2>%s</h2><div class='scroll'><table class='kv'>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%s</td></tr>"
 #if CONFIG_ENABLE_SD
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
@@ -6062,6 +6272,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
             T(S_LOSS_TITLE),
             T(S_LOSS_SNIFFER), (unsigned long)sniffer_dropped(),
             T(S_LOSS_MQTT), (unsigned long)mqtt_tx_dropped(),
+            T(S_LOSS_BT_PAUSED), paused_str,
 #if CONFIG_ENABLE_SD
             T(S_LOSS_PCAP), (unsigned long)sdpcap_dropped(),
             T(S_LOSS_THINNED), (unsigned long)sdpcap_filtered(),

@@ -70,6 +70,15 @@ uint32_t sniffer_get_heartbeat(void);
 /* Frames dropped because the work queue was full, since boot. */
 uint32_t sniffer_dropped(void);
 
+/* Time-slice the radio with the BLE stream. The sniffer task keeps running (its
+ * heartbeat feeds the watchdog); no-ops unless WLAN capture, safe to repeat. */
+void sniffer_pause(void);
+void sniffer_resume(void);
+
+/* Total ms paused for BLE since boot, pause in flight included. A duration, not
+ * a frame count -- frames missed during a pause are uncountable by design. */
+uint64_t sniffer_paused_ms(void);
+
 
 #ifdef __cplusplus
 }

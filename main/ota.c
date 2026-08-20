@@ -6,6 +6,7 @@
 #include "esp_console.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
@@ -41,15 +42,18 @@ static bool reboot_after_update;
 
 static esp_timer_handle_t invalidate_and_reboot_timer;
 
-esp_http_client_config_t http_client_config = {
+/* static: both were globally visible and would collide at link time. */
+static esp_http_client_config_t http_client_config = {
     .url = https_url,
     .crt_bundle_attach = esp_crt_bundle_attach
 };
 
-esp_https_ota_config_t ota_config = {
+static esp_https_ota_config_t ota_config = {
     .http_config = &http_client_config,
     .bulk_flash_erase = true,
-    .buffer_caps = MALLOC_CAP_SPIRAM
+    /* DRAM, not PSRAM: esp_flash_write splits a PSRAM source into 32-byte
+     * pieces, which is ~66000 cache-off windows over a 2 MB image. */
+    .buffer_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
 };
 
 static void ota_task(void *)
@@ -380,6 +384,13 @@ bool ota_confirm(void)
 
     ESP_LOGI(TAG, "Running app confirmed, rollback cancelled");
     return true;
+}
+
+/* The 30-minute timer only arms when the other slot reads back as valid;
+ * without that, nothing rolls the update back on its own. */
+bool ota_rollback_armed(void)
+{
+    return invalidate_and_reboot_timer && esp_timer_is_active(invalidate_and_reboot_timer);
 }
 
 bool ota_is_pending_verify(void)

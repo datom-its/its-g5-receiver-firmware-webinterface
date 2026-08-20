@@ -14,6 +14,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 
+#include "bt_stream.h"
 #include "cmd_sniffer.h"
 #include "cmd_pcap.h"
 #include "config.h"
@@ -205,6 +206,10 @@ void app_main(void)
     register_ota_cmd();
 
     sniffer_autostart();
+
+    /* Must stay after sniffer_autostart(): the coex task opens with sniffer_pause(),
+     * a no-op if the sniffer is not up, so the first BLE window stays on 802.11p. */
+    bt_stream_init();
 
     /* Supervisory monitor task (watchdog recovery, SD remount, low-heap guard).
      * Only the task starts here; its event handlers are registered above. */

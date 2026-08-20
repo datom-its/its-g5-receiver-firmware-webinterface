@@ -59,7 +59,8 @@ static void sd_mark_held(void) { s_held_since_us = esp_timer_get_time(); }
 /* Mount, format and archive reads hold the lock for minutes; masked from the
  * watchdog, but only bounded -- a wedge inside one must not disable it for good. */
 #define LONG_OP_MAX_US (10 * 60 * 1000000LL)
-static volatile bool s_long_op;
+static portMUX_TYPE s_long_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int s_long_op;
 static volatile int64_t s_long_since_us;
 
 static bool long_op_active(void)
@@ -131,13 +132,21 @@ void sdcard_io_end(void)
 
 void sdcard_io_long_begin(void)
 {
-    s_long_since_us = esp_timer_get_time();
-    s_long_op = true;
+    /* Counted as a precaution: sd_lock serialises every long operation today,
+     * but a caller without that lock would unmask the others too early. */
+    portENTER_CRITICAL(&s_long_mux);
+    if (s_long_op++ == 0)
+        s_long_since_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_long_mux);
 }
 
 void sdcard_io_long_end(void)
 {
-    s_long_op = false;
+    portENTER_CRITICAL(&s_long_mux);
+    bool last = (s_long_op > 0 && --s_long_op == 0);
+    portEXIT_CRITICAL(&s_long_mux);
+    if (!last)
+        return;
     s_fail_streak = 0;   /* the misses during it were expected, not a wedge */
     /* Re-stamp only an existing writer hold, so held_ms does not report the whole
      * masked span. NOT for mount/format (stamp 0): a stamp would outlive the hold. */

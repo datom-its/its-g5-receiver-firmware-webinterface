@@ -48,10 +48,10 @@ notice
 `apple-touch-icon.png` are original artwork for this fork and fall under
 section 1.
 
-## 5. BLE streaming — MIT (experimental branch)
+## 5. BLE streaming — MIT
 
-On the `experimental` branch, `main/bt_stream.c`, `main/bt_stream.h`,
-`main/ble_cache.c` and `main/ble_cache.h` are derived from V2Xtend
+`main/bt_stream.c`, `main/bt_stream.h`, `main/ble_cache.c` and
+`main/ble_cache.h` are derived from V2Xtend
 (https://github.com/githubapache2/V2Xtend), which is in turn a fork of V2X2MAP
 (https://github.com/pit711/V2X2MAP). Both are MIT-licensed:
 

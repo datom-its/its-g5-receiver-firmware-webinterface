@@ -75,6 +75,7 @@ static esp_err_t config_get_pcap_filter(uint8_t *out);
 static esp_err_t config_get_tracks_enable(uint8_t *out);
 static esp_err_t config_get_tracks_days(uint32_t *out);
 static esp_err_t config_get_eth_leds(uint8_t *out);
+static esp_err_t config_get_bt_enable(uint8_t *out);
 static esp_err_t config_set_web_password(const char *value);
 
 static const config_key_t config_keys[] = {
@@ -110,6 +111,7 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_TRACKS_ENABLE]      = { "trkon",         NVS_TYPE_U8,  0,                           config_get_tracks_enable,      NULL },
     [CONFIG_INDEX_TRACKS_DAYS]        = { "trkdays",       NVS_TYPE_U32, 0,                           config_get_tracks_days,        NULL },
     [CONFIG_INDEX_ETH_LEDS]           = { "ethleds",       NVS_TYPE_U8,  0,                           config_get_eth_leds,           NULL },
+    [CONFIG_INDEX_BT_ENABLE]          = { "bten",          NVS_TYPE_U8,  0,                           config_get_bt_enable,          NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -385,6 +387,22 @@ static esp_err_t config_get_eth_leds(uint8_t *out_val)
         if (res != ESP_ERR_NVS_NOT_FOUND)
             ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
         out = 1;
+    }
+    *out_val = out ? 1 : 0;
+    return ESP_OK;
+}
+
+/* Off by default: BLE costs internal heap for good and shares the radio with
+ * the 5.9 GHz receive path, so switching it on is the deliberate choice. */
+static esp_err_t config_get_bt_enable(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "bten", &out);
+    if (res != ESP_OK)
+    {
+        if (res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 0;
     }
     *out_val = out ? 1 : 0;
     return ESP_OK;

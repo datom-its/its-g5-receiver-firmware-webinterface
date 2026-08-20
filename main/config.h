@@ -48,6 +48,9 @@ typedef enum {
     CONFIG_INDEX_TRACKS_ENABLE,     /* u8  record vehicle tracks for the map overlay (0 = off) */
     CONFIG_INDEX_TRACKS_DAYS,       /* u32 how long to keep them, days (1..7) */
     CONFIG_INDEX_ETH_LEDS,          /* u8  bool: Ethernet port's link/activity LEDs (1 = on, default) */
+    /* Append only: config.c posts esp_event_post(CONFIG_EVENT_BASE, index, ...),
+     * so these values ARE the event IDs -- reordering rewires every handler. */
+    CONFIG_INDEX_BT_ENABLE,         /* u8  bool: BLE frame streaming, read once at boot (0 = off, default) */
 } config_index_t;
 
 /* Hashes a raw password exactly the way CONFIG_INDEX_WEB_PASSWORD is stored,

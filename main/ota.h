@@ -12,3 +12,6 @@ bool ota_confirm(void);
 /* True if the running app was booted from an OTA update and has not yet been
  * confirmed (i.e. a rollback is still pending). */
 bool ota_is_pending_verify(void);
+
+/* True while the automatic 30-minute rollback timer is actually running. */
+bool ota_rollback_armed(void);
