@@ -1,8 +1,7 @@
 # Changelog
 
-Every version of this fork, newest first. The app version comes from
-`version.txt` (scheme `<base>-webui`). The most recent entries are also in the
-[README](README.md).
+Every version of this fork, newest first. The most recent entries are also in
+the [README](README.md).
 
 | Version       | Changes |
 |---------------|---------|

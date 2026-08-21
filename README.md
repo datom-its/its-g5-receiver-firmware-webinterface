@@ -35,7 +35,7 @@ each release.
 
 ## Version history
 
-Newest first. The app version comes from `version.txt` (scheme `<base>-webui`).
+Newest first.
 
 | Version       | Changes |
 |---------------|---------|
