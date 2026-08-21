@@ -24,7 +24,6 @@ static const char TAG[] = "PTLOG";
 #define PT_TMP PT_DIR "/transit.tmp"
 #define PT_PASS PT_DIR "/passages.csv"
 #define PT_PASS_TMP PT_DIR "/passages.tmp"
-#define PT_PASS_KEEP 2000   /* rows kept; ~40 per row, so ~80 KB */
 #define PT_SAVE_TICKS 60        /* sysmon runs every 5 s -> save every 5 min */
 #endif
 
@@ -185,6 +184,8 @@ int ptlog_snapshot(pt_line_t *out)
     }
     return n;
 }
+
+uint32_t ptlog_passages_dropped(void) { return s_pass_dropped; }
 
 int ptlog_open_count(void)
 {
@@ -439,6 +440,15 @@ static void pass_flush(void)
     sdcard_io_end();
 }
 
+static void pt_pass_reverse(pt_pass_t *a, int lo, int hi)
+{
+    while (lo < hi)
+    {
+        pt_pass_t t = a[lo]; a[lo] = a[hi]; a[hi] = t;
+        lo++; hi--;
+    }
+}
+
 int ptlog_read_passages(pt_pass_t *out, int max)
 {
     if (!out || max <= 0 || !sdcard_io_begin_timeout(2000))
@@ -451,7 +461,7 @@ int ptlog_read_passages(pt_pass_t *out, int max)
         sdcard_io_end();
         return 0;
     }
-    int count = 0;
+    int count = 0, head = 0;
     char line[96];
     while (fgets(line, sizeof(line), f))
     {
@@ -466,19 +476,24 @@ int ptlog_read_passages(pt_pass_t *out, int max)
             out[count++] = r;
         else
         {
-            memmove(out, out + 1, (size_t)(max - 1) * sizeof(*out));
-            out[max - 1] = r;      /* keep the newest `max` rows */
+            /* Ring, not a per-row shift: between trims the file can sit
+             * thousands of rows above PT_PASS_KEEP. As in tracklog_read. */
+            out[head] = r;                 /* overwrite the oldest, O(1) */
+            head = (head + 1) % max;
         }
     }
     fclose(f);
     sdcard_io_end();
 
-    for (int i = 0; i < count / 2; i++)   /* newest first */
+    /* Rotate the ring back into file order, then reverse the whole thing:
+     * out[] ends up newest first, which is what the callers render. */
+    if (count == max && head > 0)
     {
-        pt_pass_t t = out[i];
-        out[i] = out[count - 1 - i];
-        out[count - 1 - i] = t;
+        pt_pass_reverse(out, 0, head - 1);
+        pt_pass_reverse(out, head, count - 1);
     }
+    else
+        pt_pass_reverse(out, 0, count - 1);
     return count;
 }
 

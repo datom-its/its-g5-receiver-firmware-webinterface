@@ -61,6 +61,7 @@
 #include "inventory.h"
 #include "ptlog.h"
 #include "spatem.h"
+#include "bt_stream.h"
 
 #include "webserver.h"
 
@@ -80,6 +81,10 @@ extern const uint8_t leaflet_js_start[]           asm("_binary_leaflet_js_start"
 extern const uint8_t leaflet_js_end[]             asm("_binary_leaflet_js_end");
 extern const uint8_t leaflet_css_start[]          asm("_binary_leaflet_css_start");
 extern const uint8_t leaflet_css_end[]            asm("_binary_leaflet_css_end");
+/* Shared page stylesheet, out of the HTML so the browser caches it once
+ * instead of re-reading it in the head of every page. */
+extern const uint8_t s_css_start[]                asm("_binary_s_css_start");
+extern const uint8_t s_css_end[]                  asm("_binary_s_css_end");
 
 static const char TAG[] = "WEBSERVER";
 
@@ -112,7 +117,7 @@ typedef enum {
     S_POWEROFF_DOWNLOAD,
     S_SNIFFER_LABEL, S_SNIFF_START, S_SNIFF_STOP, S_AUTO_REFRESH,
     S_CONFIRM_NEEDED, S_CONFIRM_NEEDED_NT, S_CONFIRM_BTN, S_CONFIRMED, S_CONFIRM_ERROR,
-    S_CONFIRM_AUTH, S_CONFIRM_NOCONN,
+    S_CONFIRM_AUTH, S_CONFIRM_NOCONN, S_SD_ACTION_FAILED,
     S_MSG_INTRO, S_COL_NUM, S_COL_TIME, S_COL_RSSI, S_COL_LENGTH, S_COL_PREVIEW, S_COL_SENDER,
     S_SET_INTRO, S_MQTT_URI, S_AUTOSTART_CHAN, S_CHAN_NONE,
     S_SET_GROUP_GENERAL, S_SET_GROUP_NETWORK, S_SET_GROUP_MQTT,
@@ -128,7 +133,7 @@ typedef enum {
     S_ETH_DHCP, S_ETH_IP, S_ETH_NETMASK, S_ETH_GATEWAY, S_ETH_DNS, S_ETH_NET_NOTE,
     S_ETH_CURRENT, S_ETH_CUR_NOT_UP,
     S_NTP_SERVER, S_COL_TYPE, S_ACTIVITY_TITLE, S_ACTIVITY_SPARK, S_ACTIVITY_TYPES,
-    S_ACTIVITY_NONE, S_TYPE_HINT,
+    S_ACTIVITY_NONE, S_TYPE_HINT, S_ACTIVITY_SCALE,
     S_LOG_SYS, S_LOG_BUDGET, S_LOG_HINT,
     S_PCAP_ENABLE, S_PCAP_RETAIN_HOURS, S_PCAP_MAX_MB, S_PCAP_HINT,
     S_PCAP_BUF_MB, S_PCAP_BUF_HINT, S_PCAP_FLUSH_SEC,
@@ -152,20 +157,25 @@ typedef enum {
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
     S_PEER_TITLE, S_PEER_NODE, S_PEER_RATE, S_PEER_UPTIME, S_PEER_MQTT,
-    S_PEER_OFFLINE, S_PEER_OLDFW,
+    S_PEER_OFFLINE, S_PEER_OLDFW, S_PEER_NODATA,
     S_LOSS_TITLE, S_LOSS_SNIFFER, S_LOSS_MQTT, S_LOSS_PCAP, S_LOSS_THINNED,
     S_LOSS_HINT, S_LOSS_BT_PAUSED,
     S_NAV_SYSTEM, S_TITLE_SYSTEM, S_SYS_CHIP, S_SYS_CORES, S_SYS_CPU_FREQ,
     S_SYS_IDF, S_SYS_RESET, S_SYS_FLASH, S_SYS_RAM_INT, S_SYS_RAM_PSRAM,
     S_SYS_TRIPLE, S_SYS_TASKS, S_SYS_COL_STATE, S_SYS_COL_PRIO, S_SYS_COL_CPU,
     S_SYS_COL_STACK,
+    S_SYS_GRP_DEVICE, S_SYS_GRP_STABILITY, S_SYS_GRP_LOAD, S_SYS_LOAD,
+    S_SYS_CRASH_HINT, S_TH_WARN, S_TH_ALARM,
     S_STAT_BOOTS, S_STAT_CRASHES, S_STAT_LASTCRASH, S_STAT_MAXUP, S_STAT_NEVER,
     S_STAT_RESET, S_STAT_RESET_CONFIRM,
     S_NAV_LOGS, S_TITLE_LOGS, S_LOGS_SYS, S_LOGS_REFRESH,
-    S_LOGS_NONE, S_LOGS_TAIL,
+    S_LOGS_NONE, S_LOGS_TAIL, S_LOGS_OLD, S_LOGS_DOWNLOAD,
+    S_LOGS_F_ALL, S_LOGS_F_PROB, S_LOGS_SEARCH, S_LOGS_LINES, S_LOGS_FILTER_HINT,
+    S_LOGS_LOADING,
     S_NAV_SENDERS, S_TITLE_SENDERS, S_SND_INTRO, S_SND_NONE, S_SND_ID, S_SND_NAME,
     S_SND_TYPES, S_SND_FRAMES, S_SND_FIRST, S_SND_LAST, S_SND_POS, S_SND_VEHICLES,
     S_SND_FULL, S_SND_CLEAR, S_SND_CLEAR_CONFIRM, S_SND_RSSI,
+    S_SND_STATION, S_SND_SINCE,
     S_NAV_TRANSIT, S_TITLE_TRANSIT, S_PT_INTRO, S_PT_NONE, S_PT_LINE,
     S_PT_SIGHTINGS, S_PT_AVG, S_PT_LATE, S_PT_EARLY, S_PT_UNKNOWN, S_PT_LAST,
     S_PT_LIMIT, S_PT_ACTIVE, S_PT_CLEAR, S_PT_CLEAR_CONFIRM,
@@ -174,14 +184,23 @@ typedef enum {
     S_TRF_SENDERS_DAY, S_TRF_SG, S_TRF_CYCLES, S_TRF_PH_WAIT, S_TRF_BUSY, S_TRF_IDENT_NOTE, S_TRF_INTRO, S_TRF_WINDOW, S_TRF_W_24H, S_TRF_W_7D,
     S_TRF_W_30D, S_TRF_STATS, S_TRF_TOTAL, S_TRF_HOUR, S_TRF_SPEED, S_TRF_NODATA,
     S_CAT_CAR, S_CAT_BUS, S_CAT_TRUCK, S_CAT_TWOWHEEL, S_CAT_PED, S_CAT_RSU, S_CAT_OTHER,
-    S_EVT_TITLE, S_EVT_NONE, S_EVT_TIME, S_EVT_SENDER, S_EVT_WARNING, S_EVT_DENM,
+    S_EVT_TITLE, S_EVT_NONE, S_EVT_TIME, S_EVT_SENDER, S_EVT_WARNING, S_EVT_DENM, S_EVT_MULTI,
     S_TRF_SPEED_BY_TYPE, S_TRF_SPEED_MIXED, S_EVT_CAPPED, S_MAP_TRACK_CAP, S_LOSS_TRACKS,
+    S_TRF_JUMP, S_TRF_SILENT, S_TRF_WEAKHOURS, S_TRF_AVAIL_HINT, S_EVT_SHOWPOS,
     S_TRF_LIGHTS, S_TRF_LIGHTS_NONE, S_TRF_INTERSECTION,
     S_TRF_LIGHTS_INTRO, S_TRF_PH_GREEN, S_TRF_PH_AMBER, S_TRF_PH_RED, S_TRF_PH_OTHER,
+    S_TRF_PH_REDAMBER, S_TRF_PH_SINCE,
     S_DIR_STRAIGHT, S_DIR_LEFT, S_DIR_RIGHT, S_DIR_UTURN, S_DIR_PED,
     S_NAV_MAP, S_TITLE_MAP, S_MAP_HINT, S_MAP_HELP, S_MAP_LAYER_STREETS, S_MAP_LAYER_SATELLITE,
     S_MAP_DENM,
     S_SYS_COREDUMP, S_SYS_COREDUMP_DOWNLOAD, S_SYS_COREDUMP_CLEAR, S_SYS_COREDUMP_CLEAR_CONFIRM,
+    S_LOSS_BT_NOTIFY, S_LOSS_BT_QUEUE, S_LOSS_PASSAGES, S_LOSS_EVENTS,
+    S_LOSS_SD_FAILS, S_LOSS_SD_HELD,
+    S_EVT_RELAYED, S_EVT_RELAY_VIA, S_EVT_RELAY_UNKNOWN, S_EVT_RELAY_AFTER,
+    S_EVT_RELAY_HINT,
+    S_EVT_BYHOUR, S_EVT_BYWDAY, S_EVT_PERHOUR, S_EVT_PROFILE_HINT, S_TRF_WDAYS,
+    S_PT_HEADWAY, S_PT_HEADWAY_NONE, S_PT_DIR, S_PT_OPS_FIRST, S_PT_OPS_HINT,
+    S_MAP_BUSY, S_MAP_TRACK_DUR, S_SINCE_BOOT,
     S_COUNT
 } str_id_t;
 
@@ -284,6 +303,8 @@ static const char *STR[S_COUNT][2] = {
                             "and confirm again." },
     [S_CONFIRM_NOCONN]  = { "Bestätigung nicht gesendet – keine Verbindung zum Gerät.",
                             "Confirmation not sent – no connection to the device." },
+    [S_SD_ACTION_FAILED] = { "Der Vorgang ist fehlgeschlagen.",
+                             "The operation failed." },
     [S_MSG_INTRO]       = { "Die letzten %d empfangenen Frames, neueste zuerst, mit dem was sich "
                             "aus jedem dekodieren lie&szlig;.",
                             "Last %d received frames, newest first, with whatever could be decoded "
@@ -364,9 +385,15 @@ static const char *STR[S_COUNT][2] = {
     [S_NTP_SERVER]      = { "NTP-Server",                "NTP server" },
     [S_COL_TYPE]        = { "Typ",                       "Type" },
     [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t",            "Activity" },
-    [S_ACTIVITY_SPARK]  = { "Letzte 60 Sekunden",       "Last 60 seconds" },
+    [S_ACTIVITY_SPARK]  = { "Letzte Minute",            "Last minute" },
+    /* Two sinks: an HTML chunk AND a single-quoted JS literal set via
+     * textContent -- so no apostrophes, no umlauts, no entities. */
+    [S_ACTIVITY_SCALE]  = { "Skala bis",                "scale to" },
     [S_ACTIVITY_TYPES]  = { "Nachrichtentypen seit dem Einschalten",
                             "Message types since power-on" },
+    /* Detail line under the message counter; a substring of S_ACTIVITY_TYPES
+     * on purpose, so both name the same period in the same words. */
+    [S_SINCE_BOOT]      = { "seit dem Einschalten",      "since power-on" },
     [S_ACTIVITY_NONE]   = { "(noch keine Nachrichten)",  "(no messages yet)" },
     [S_TYPE_HINT]       = { "Typ = Absender + Nachricht. Absender: Car, Bus, Ped, Tram, "
                             "RSU (Stra&szlig;enrand-Einheit, z.B. Ampel). Nachricht: CAM=Fahrzeug-Status, "
@@ -420,6 +447,11 @@ static const char *STR[S_COUNT][2] = {
     [S_MAP_TRACK_CAP]   = { "Spuren gekürzt – die ältesten Punkte des Zeitraums fehlen",
                             "tracks shortened – the oldest points of the period are missing" },
     [S_MAP_SEEN_BY]     = { "empfangen von",             "received by" },
+    [S_MAP_TRACK_DUR]   = { "Dauer",                     "duration" },
+    /* Shown via alert(), which does NOT decode entities -- plain UTF-8, and no
+     * apostrophe, because it travels as a JS string literal. */
+    [S_MAP_BUSY]        = { "Ein anderer Abruf läuft gerade. Bitte gleich noch einmal einschalten.",
+                            "Another transfer is running. Switch the layer on again in a moment." },
     [S_PEERS]           = { "Weitere Empf&auml;nger",    "Other receivers" },
     [S_PEERS_HINT]  = { "Hostnamen oder IP-Adressen weiterer Empf&auml;nger, mit Komma "
                         "getrennt &ndash; z.&nbsp;B. <code>its-node344.local, "
@@ -621,6 +653,8 @@ static const char *STR[S_COUNT][2] = {
     [S_PEER_UPTIME]     = { "Laufzeit",                 "Uptime" },
     [S_PEER_MQTT]       = { "MQTT",                     "MQTT" },
     [S_PEER_OFFLINE]    = { "nicht erreichbar",         "unreachable" },
+    /* Single-quoted JS literal concatenated into innerHTML: no apostrophes. */
+    [S_PEER_NODATA]     = { "keine Daten seit",         "no data for" },
     [S_PEER_OLDFW]      = { "antwortet, aber nicht mit Statusdaten &ndash; alte Firmware, "
                             "Passwortschutz oder ein fremder Server",
                             "answers, but not with status data &ndash; old firmware, password "
@@ -640,20 +674,32 @@ static const char *STR[S_COUNT][2] = {
     /* Sits in the loss table but is a duration, not a count -- said in the row
      * label AND in the hint, because the table around it counts frames. */
     [S_LOSS_BT_PAUSED]  = { "Empfang pausiert (Dauer)", "Reception paused (duration)" },
+    [S_LOSS_BT_NOTIFY]  = { "BLE-Meldungen verworfen",  "BLE notifications dropped" },
+    [S_LOSS_BT_QUEUE]   = { "BLE-Warteschlange voll",   "BLE queue full" },
+    [S_LOSS_PASSAGES]   = { "Durchfahrtszeilen verloren", "Passage rows lost" },
+    [S_LOSS_EVENTS]     = { "Warnungen verdr&auml;ngt", "Warnings displaced" },
+    [S_LOSS_SD_FAILS]   = { "SD: l&auml;ngste Fehlserie", "SD: longest failure run" },
+    [S_LOSS_SD_HELD]    = { "SD: l&auml;ngste Haltezeit", "SD: longest hold" },
     [S_LOSS_HINT]       = { "Die Werte z&auml;hlen Frames seit dem Einschalten, nur die Pausenzeile "
                             "ist eine Dauer (Empfang angehalten, w&auml;hrend Bluetooth funkte); "
                             "bei der Aufzeichnung "
                             "ist der Wert gesch&auml;tzt, weil dort ganze Puffer auf einmal verworfen "
                             "werden. Ausged&uuml;nnte sind "
                             "kein Fehler, sondern die eingestellte Filterung. Steigen die &uuml;brigen, "
-                            "kommt das Ger&auml;t nicht nach &ndash; SD-Karte, Netzwerk oder Speicher.",
+                            "kommt das Ger&auml;t nicht nach &ndash; SD-Karte, Netzwerk oder Speicher. "
+                            "Die beiden SD-Zeilen sind H&ouml;chstst&auml;nde seit dem Einschalten, "
+                            "keine Momentanwerte: der laufende Wert ist fast immer 0, weil jeder "
+                            "gegl&uuml;ckte Zugriff ihn zur&uuml;cksetzt.",
                             "The values count frames since power-on, only the pause row is a duration "
                             "(reception halted while Bluetooth was on air); "
                             "the recording row is an estimate, "
                             "because whole buffers are discarded there at once. "
                             "Thinned ones are not an error but "
                             "the configured filtering. If the others keep rising, the device is not "
-                            "keeping up &ndash; SD card, network or memory." },
+                            "keeping up &ndash; SD card, network or memory. "
+                            "The two SD rows are peaks since power-on, not current values: the "
+                            "live figure is almost always 0 because every successful access "
+                            "clears it." },
     [S_NAV_SYSTEM]      = { "System",                   "System" },
     [S_TITLE_SYSTEM]    = { "System-Info",              "System info" },
     [S_SYS_CHIP]        = { "Chip",                     "Chip" },
@@ -670,8 +716,22 @@ static const char *STR[S_COUNT][2] = {
     [S_SYS_COL_PRIO]    = { "Prio",                     "Prio" },
     [S_SYS_COL_CPU]     = { "CPU %",                    "CPU %" },
     [S_SYS_COL_STACK]   = { "Stack frei (min)",         "Stack free (min)" },
+    [S_SYS_GRP_DEVICE]  = { "Ger&auml;t",               "Device" },
+    [S_SYS_GRP_STABILITY] = { "Stabilit&auml;t",        "Stability" },
+    [S_SYS_GRP_LOAD]    = { "Auslastung",               "Load" },
+    [S_SYS_LOAD]        = { "CPU-Last",                 "CPU load" },
+    /* Without this the crash count reads as "crashing right now". */
+    [S_SYS_CRASH_HINT]  = { "Die Z&auml;hler laufen seit dem letzten Zur&uuml;cksetzen, "
+                            "nicht seit dem letzten Neustart &ndash; ein alter Absturz "
+                            "bleibt in der Zahl stehen. Das Datum daneben sagt, wann er war.",
+                            "The counters run since the last reset, not since the last "
+                            "reboot &ndash; an old crash stays in the number. The date "
+                            "beside it says when it happened." },
+    /* Both go into title='...' -- must stay free of apostrophes. */
+    [S_TH_WARN]         = { "Warnschwelle erreicht",    "Warning threshold reached" },
+    [S_TH_ALARM]        = { "Kritischer Wert",          "Critical value" },
     [S_STAT_BOOTS]      = { "Neustarts gesamt",         "Reboots total" },
-    [S_STAT_CRASHES]    = { "davon Abst&uuml;rze",      "of which crashes" },
+    [S_STAT_CRASHES]    = { "Abst&uuml;rze",            "Crashes" },
     [S_STAT_LASTCRASH]  = { "Letzter Absturz",          "Last crash" },
     [S_STAT_MAXUP]      = { "L&auml;ngste Laufzeit",    "Longest uptime" },
     [S_STAT_NEVER]      = { "noch keiner",              "none yet" },
@@ -686,6 +746,24 @@ static const char *STR[S_COUNT][2] = {
                             "No log file yet (logging enabled? SD mounted?)." },
     [S_LOGS_TAIL]       = { "Letzte %d KB, neueste Zeilen unten.",
                             "Last %d KB, newest lines at the bottom." },
+    [S_LOGS_OLD]        = { "Vorheriges Log",           "Previous log" },
+    [S_LOGS_DOWNLOAD]   = { "Ganze Datei",              "Full file" },
+    [S_LOGS_F_ALL]      = { "Alle",                     "All" },
+    [S_LOGS_F_PROB]     = { "Nur Warnungen und Fehler", "Warnings and errors only" },
+    /* Goes into placeholder='...' -- must stay free of apostrophes. */
+    [S_LOGS_SEARCH]     = { "Suchen",                   "Search" },
+    /* "Meldungen", not "Zeilen": the counter keys off the "W (05:12:44)"
+     * prefix, so day markers and backtrace continuations show but never count. */
+    [S_LOGS_LINES]      = { "Meldungen (gefiltert / gesamt)",
+                            "messages (filtered / total)" },
+    /* Holds the counter slot until the tail is in and lgf() exists. */
+    [S_LOGS_LOADING]    = { "l&auml;dt &hellip;",         "loading &hellip;" },
+    /* Without this the empty filter result reads as "no errors on this device". */
+    [S_LOGS_FILTER_HINT] = { "Filter und Suche arbeiten nur auf den hier geladenen "
+                             "letzten %d KB &ndash; &auml;ltere Zeilen stehen nur in "
+                             "der ganzen Datei.",
+                             "Filter and search only work on the last %d KB loaded "
+                             "here &ndash; older lines are only in the full file." },
     [S_NAV_SENDERS]     = { "Sender",                   "Senders" },
     [S_TITLE_SENDERS]   = { "Ortsfeste Sender, die geh&ouml;rt wurden",
                             "Stationary senders heard" },
@@ -705,6 +783,9 @@ static const char *STR[S_COUNT][2] = {
     [S_SND_LAST]        = { "Zuletzt",                  "Last" },
     [S_SND_POS]         = { "Position",                 "Position" },
     [S_SND_RSSI]        = { "Pegel dBm",                "Level dBm" },
+    /* One column now holds name, id and MAC -- "Kennung" would be a lie. */
+    [S_SND_STATION]     = { "Sender",                   "Sender" },
+    [S_SND_SINCE]       = { "seit",                     "since" },
     [S_SND_VEHICLES]    = { "Dazu %lu Frames von Fahrzeugen <b>seit dem letzten Neustart</b> "
                             "&ndash; die Tabelle oben z&auml;hlt mit SD-Karte &uuml;ber Neustarts weiter. "
                             "Wie viele Fahrzeuge das waren, l&auml;sst sich nicht sagen: die "
@@ -757,6 +838,28 @@ static const char *STR[S_COUNT][2] = {
     [S_PT_DEST]         = { "Ziel",                     "Destination" },
     [S_PT_DEV]          = { "Abweichung",               "Deviation" },
     [S_PT_INRANGE]      = { "in Reichweite",            "In range" },
+    [S_PT_HEADWAY]      = { "Takt",                     "Headway" },
+    [S_PT_HEADWAY_NONE] = { "kein regelm&auml;&szlig;iger Takt", "no regular service" },
+    /* "Ziel", not "Richtung": the field is the VDV destination number, and some
+     * of those numbers turn up across many lines as depot runs. */
+    [S_PT_DIR]          = { "Ziel",                     "Destination" },
+    [S_PT_OPS_FIRST]    = { "erste Fahrt",              "first trip" },
+    [S_PT_OPS_HINT]     = { "Takt, Betriebszeiten und Ziele sind aus den gespeicherten "
+                            "Durchfahrten gerechnet, nicht aus einem Fahrplan &ndash; sie zeigen, "
+                            "was hier vorbeigekommen ist. Der Betriebstag beginnt um 03:00 Uhr, "
+                            "damit eine Fahrt nach Mitternacht nicht zum Betriebsbeginn des "
+                            "n&auml;chsten Tages wird. Der Takt ist der Median &uuml;ber beide "
+                            "Richtungen an diesem Punkt, auf ganze Minuten abgerundet: "
+                            "einzelne sehr kurze Abst&auml;nde entstehen, wenn ein "
+                            "Fahrzeug seine Kennung wechselt oder eine Vorbeifahrt zerschnitten "
+                            "wird.",
+                            "Headway, operating hours and destinations are computed from the stored "
+                            "passages, not from a timetable &ndash; they show what actually came "
+                            "past. The operating day starts at 03:00 so that a trip after midnight "
+                            "is not counted as the next day's first. The headway is the median over "
+                            "both directions at this point, rounded down to whole minutes: "
+                            "single very short gaps appear when a vehicle "
+                            "changes its pseudonym or a passage is cut in two." },
     [S_PT_CLEAR]        = { "Statistik zur&uuml;cksetzen", "Reset statistics" },
     [S_PT_CLEAR_CONFIRM] = { "Öffi-Statistik wirklich zurücksetzen?",
                              "Really reset the transit statistics?" },
@@ -775,15 +878,17 @@ static const char *STR[S_COUNT][2] = {
                             "long time." },
     [S_TRF_CYCLES]      = { "Gr&uuml;nphasen",          "Green phases" },
     [S_TRF_SENDERS]     = { "Kennungen",                "Identifiers" },
-    [S_TRF_SENDERS_NOTE] = { "&bdquo;Kennungen&ldquo; z&auml;hlt verschiedene Funkkennungen, "
+    [S_TRF_SENDERS_NOTE] = { "Die Fahrzeugspalten z&auml;hlen verschiedene Funkkennungen, "
                              "nicht Nachrichten &ndash; an einer Durchfahrtsstelle also grob "
-                             "die Fahrzeugzahl, genau ist sie nicht: Fahrzeuge wechseln ihre "
-                             "Kennung alle paar Minuten. &ge; hei&szlig;t, die "
-                             "Z&auml;hltabelle der Stunde war voll.",
-                             "\"Identifiers\" counts distinct radio identifiers, not messages "
+                             "die Fahrzeugzahl, genau ist sie nicht: nach der ETSI-Norm k&ouml;nnen "
+                             "Fahrzeuge ihre Kennung wechseln. &ge; hei&szlig;t, der Wert ist eine "
+                             "Untergrenze: die Z&auml;hltabelle der Stunde war voll, oder ein "
+                             "Neustart hat die Stunde geteilt.",
+                             "The vehicle columns count distinct radio identifiers, not messages "
                              "&ndash; at a through road roughly the vehicle count, but not "
-                             "exact: vehicles change their identifier every few minutes. &ge; "
-                             "means the hour's counting table was full." },
+                             "exact: the ETSI standard lets vehicles change their identifier. &ge; "
+                             "means the value is a lower bound: the hour's counting table was "
+                             "full, or a restart split the hour." },
     [S_TRF_IDENT_NOTE]  = { "Nicht zu verwechseln mit der Seite &bdquo;Sender&ldquo;: die listet "
                             "ortsfeste Anlagen, diese Spalte z&auml;hlt alle Funkkennungen der Stunde.",
                             "Not to be confused with the \"Senders\" page: that lists "
@@ -822,6 +927,42 @@ static const char *STR[S_COUNT][2] = {
     [S_EVT_SENDER]      = { "Absender",                 "Sender" },
     [S_EVT_WARNING]     = { "Warnung",                  "Warning" },
     [S_EVT_DENM]        = { "Gefahrenmeldung",          "Hazard notification" },
+    [S_EVT_MULTI]       = { "auch von anderen Sendern", "also from other senders" },
+    [S_EVT_RELAYED]     = { "weitergereicht",           "relayed" },
+    [S_EVT_RELAY_VIA]   = { "&uuml;ber",                "via" },
+    [S_EVT_RELAY_UNKNOWN] = { "eine andere Funkquelle", "another radio source" },
+    [S_EVT_RELAY_AFTER] = { "Abstand",                  "gap" },
+    [S_EVT_RELAY_HINT]  = { "Zwei verschiedene Funkadressen auf dieselbe Warnung hei&szlig;t: "
+                            "jemand hat sie weitergereicht. Die Kennung im Datensatz bleibt dabei "
+                            "die des Urhebers, deshalb ist das an der Kennung allein nicht zu sehen. "
+                            "Wer weitergereicht hat, steht nur da, wenn die Funkadresse in der "
+                            "Senderliste gef&uuml;hrt wird. Der Bruch x/y z&auml;hlt, wie viele der "
+                            "Aussendungen &uuml;ber diese Quelle kamen.",
+                            "Two different radio addresses for one warning mean somebody "
+                            "re-broadcast it. The station id stays the originator's, which is why "
+                            "the id alone never shows this. Who relayed it is named only when that "
+                            "radio address is in the sender list. The x/y ratio counts how many "
+                            "broadcasts came via that source." },
+    [S_EVT_BYHOUR]      = { "Warnungen je Tagesstunde", "Warnings by hour of day" },
+    [S_EVT_BYWDAY]      = { "Warnungen je Wochentag",   "Warnings by weekday" },
+    [S_EVT_PERHOUR]     = { "je beobachteter Stunde",   "per observed hour" },
+    [S_EVT_PROFILE_HINT] = { "Die Balken sind auf die tats&auml;chlich beobachteten Stunden "
+                            "normiert &ndash; ein Wochentag, der im Fenster h&auml;ufiger vorkommt, "
+                            "bekommt sonst allein deshalb den l&auml;ngeren Balken. In Klammern "
+                            "stehen die gez&auml;hlten Warnungen und die Zahl der beobachteten "
+                            "Stunden. Gez&auml;hlt werden gemeldete Warnungen, nicht Ereignisse: "
+                            "derselbe Stau kann von mehreren Fahrzeugen gemeldet werden. Der "
+                            "Zeitraum ist der, den die gespeicherten Warnungen abdecken; er kann "
+                            "k&uuml;rzer sein als das gew&auml;hlte Fenster.",
+                            "Bars are normalised to the hours actually observed &ndash; otherwise a "
+                            "weekday that occurs more often in the window gets the longer bar for "
+                            "that reason alone. In brackets: the warnings counted and the number of "
+                            "observed hours. What is counted are reported warnings, not incidents: "
+                            "one jam can be reported by several vehicles. The period is the one the "
+                            "stored warnings cover; it can be shorter than the selected window." },
+    /* One entry, not seven: the labels are only ever needed together. tm_wday
+     * order, Sunday first, comma-separated. */
+    [S_TRF_WDAYS]       = { "So,Mo,Di,Mi,Do,Fr,Sa",     "Sun,Mon,Tue,Wed,Thu,Fri,Sat" },
     [S_EVT_TRAFFIC]     = { "Verkehrslage / Stau",      "Traffic condition / queue" },
     [S_EVT_CAPPED]      = { "Nur die neuesten 256 Warnungen &ndash; im Zeitraum waren es mehr.",
                             "Only the newest 256 warnings &ndash; the period held more." },
@@ -831,6 +972,19 @@ static const char *STR[S_COUNT][2] = {
                             "the average is not directly comparable there." },
     [S_TRF_SPEED_BY_TYPE] = { "Geschwindigkeit nach Typ (&Oslash;/max km/h)",
                               "Speed by type (avg/max km/h)" },
+    [S_TRF_JUMP]        = { "Springe zu",                "Jump to" },
+    [S_TRF_SILENT]      = { "Stunden ohne Empfang",      "Hours with no reception" },
+    [S_TRF_WEAKHOURS]   = { "Stunden weit unter dem Schnitt", "Hours far below average" },
+    [S_TRF_AVAIL_HINT]  = { "Gemessen wird, ob DIESES Ger&auml;t aufgezeichnet hat &ndash; nicht, ob der "
+                            "Empfang gest&ouml;rt war: eigene Neustarts und Updates sehen hier aus wie ein "
+                            "Ausfall, und eine Stunde ohne jeden Empfang schreibt gar keine Zeile. "
+                            "Verglichen wird mit dem Median dieses Zeitraums; schwankt die Stundensumme "
+                            "von Natur aus stark, entf&auml;llt die zweite Zahl.",
+                            "This measures whether THIS device recorded &ndash; not whether reception was "
+                            "disturbed: your own reboots and updates look like an outage here, and an hour "
+                            "with no reception at all writes no row. The yardstick is the median of this "
+                            "window; where the hourly total varies by itself, the second figure is left out." },
+    [S_EVT_SHOWPOS]     = { "Ort auf der Karte zeigen",  "Show location on the map" },
     [S_TRF_LIGHTS]      = { "Ampeln (live)",            "Traffic lights (live)" },
     [S_TRF_LIGHTS_NONE] = { "Keine Ampeldaten (SPATEM) empfangen.",
                             "No traffic-light data (SPATEM) received." },
@@ -847,6 +1001,8 @@ static const char *STR[S_COUNT][2] = {
         "and only where the light transmits it. Colour = current phase:" },
     [S_TRF_PH_GREEN]    = { "Gr&uuml;n (frei)",        "Green (go)" },
     [S_TRF_PH_AMBER]    = { "Gelb (&Uuml;bergang)",    "Amber (change)" },
+    [S_TRF_PH_REDAMBER] = { "Rot-Gelb",                "Red-amber" },
+    [S_TRF_PH_SINCE]    = { "l&auml;uft seit",         "running for" },
     [S_TRF_PH_RED]      = { "Rot (Halt)",              "Red (stop)" },
     [S_TRF_PH_OTHER]    = { "Aus/unbekannt",           "Off/unknown" },
     [S_DIR_STRAIGHT]    = { "geradeaus",               "straight" },
@@ -1024,6 +1180,9 @@ static EXT_RAM_BSS_ATTR web_msg_entry_t msg_ring[WEB_MSG_RING_SIZE];
 static size_t msg_ring_head;
 static size_t msg_ring_count;
 static uint32_t msg_total_count;
+/* Uptime second of the last message, biased by 1 so 0 means "none yet".
+ * 32 bit keeps the lockless read on the httpd task free of torn values. */
+static uint32_t msg_last_sec1;
 static SemaphoreHandle_t msg_ring_mutex;
 
 /* Recent-DENM tracker so /map can flag senders for ~60 s. Lockless: 32-bit
@@ -1133,6 +1292,7 @@ static void rate_record_packet(void)
         b->count = 0;
     }
     b->count++;
+    msg_last_sec1 = (uint32_t)now_sec + 1;
 }
 
 static uint32_t rate_packets_last_minute(void)
@@ -1217,11 +1377,16 @@ void webserver_handle_packet(sniffer_packet_info_t *packet)
     ptlog_note(e->seconds, e->station_id, &d);
     /* Log the hazard where it IS, not where the sender is -- the DENM's own
      * eventPosition when it carried one, the sender's position otherwise. */
-    events_note(e->seconds, st_code, e->station_id, msg_id, d.denm_cause, d.denm_subcause,
+    /* station_id is only set with a position; without one the ActionID carries
+     * the originator -- otherwise 0 would land in the row and fold alien levels. */
+    events_note(e->seconds, st_code,
+                e->station_id ? e->station_id : d.denm_station, e->rssi,
+                msg_id, d.denm_cause, d.denm_subcause,
                 d.denm_station, d.denm_seq,
                 d.has_denm_pos || e->has_position,
                 d.has_denm_pos ? d.denm_lat_e7 : e->lat_e7,
-                d.has_denm_pos ? d.denm_lon_e7 : e->lon_e7);
+                d.has_denm_pos ? d.denm_lon_e7 : e->lon_e7,
+                d.has_src_mac ? d.src_mac : NULL);
     /* Vehicle track for the map overlay. Skipped internally when disabled,
      * for RSUs, and for a vehicle that hasn't moved far enough yet. */
     if (e->has_position)
@@ -1272,6 +1437,36 @@ static void format_uptime(uint64_t total_sec, char *out, size_t out_size)
     else
         snprintf(out, out_size, "%lus", (unsigned long)secs);
 }
+
+/* Threshold -> CSS class (see .v-* in s.css). One place, so two pages
+ * showing the same value cannot end up disagreeing about its colour. */
+static const char *lvl_class(unsigned v, unsigned warn, unsigned alarm)
+{
+    if (v >= alarm) return "v-bad";
+    if (v >= warn)  return "v-warn";
+    return "";
+}
+
+/* Free internal RAM as a share of the total: the byte count alone says
+ * nothing, and the total differs per chip variant. */
+static const char *ram_int_class(void)
+{
+    size_t tot = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    size_t fre = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (!tot || fre > tot) return "";
+    return lvl_class((unsigned)(((uint64_t)(tot - fre) * 100) / tot), 85, 92);
+}
+
+#ifdef CONFIG_ENABLE_TEMPERATURE
+/* Enclosure temperature, not a chip limit: the LM75 sits on the board next
+ * to it, so these are the values at which the operator should look. */
+static const char *temp_class(float tc)
+{
+    if (tc != tc) return "v-off"; /* NaN = sensor not answering */
+    if (tc < 0.0f) return "";
+    return lvl_class((unsigned)tc, 60, 75);
+}
+#endif
 
 /* Format a byte count as KiB or MiB for readability. */
 static void format_bytes64(uint64_t bytes, char *out, size_t out_size);
@@ -1357,11 +1552,12 @@ static void url_decode(char *s)
 static void resolve_language(httpd_req_t *req)
 {
     current_lang = LANG_DE;
-    /* Full CONFIG_HTTPD_MAX_URI_LEN: at 64, long search URLs silently fell
-     * back to German although &lang=en was right there. */
+    /* 512, not the full 4096 URI limit -- that would not fit the httpd stack.
+     * A truncated query still carries lang=, which the flag links put first. */
     char query[512];
     char val[8];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+    esp_err_t qr = httpd_req_get_url_query_str(req, query, sizeof(query));
+    if ((qr == ESP_OK || qr == ESP_ERR_HTTPD_RESULT_TRUNC) &&
         httpd_query_key_value(query, "lang", val, sizeof(val)) == ESP_OK)
     {
         if (strcmp(val, "en") == 0)
@@ -1386,133 +1582,14 @@ static const char PAGE_HEADER_FMT[] =
     "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
     "<meta name='apple-mobile-web-app-title' content='%s'>"
     "%s"  /* optional auto-refresh script */
-    "<style>"
-    "*{box-sizing:border-box;accent-color:#f2b134}"
-    /* Amber accent (device's subject is vehicles/traffic lights), signal-
-     * blue kept distinct for links so they're never mistaken for buttons. */
-    /* min-height:100vh so short pages don't show bare layers below; deliberately
-     * no html{background} -- it would break canvas propagation and hide the radar sweep. */
-    "body{min-height:100vh;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;color:#edf0f2;line-height:1.5;position:relative;"
-    "background:"
-    "radial-gradient(circle at 12%% -8%%,rgba(242,177,52,.13),transparent 42%%),"
-    "radial-gradient(circle at 100%% 12%%,rgba(79,184,224,.11),transparent 40%%),"
-    "repeating-linear-gradient(0deg,rgba(255,255,255,.018) 0 1px,transparent 1px 34px),"
-    "repeating-linear-gradient(90deg,rgba(255,255,255,.012) 0 1px,transparent 1px 34px),"
-    "#0c1013}"
-    "body::before{content:'';position:fixed;top:50%%;left:50%%;width:220vmax;height:220vmax;"
-    "margin:-110vmax 0 0 -110vmax;z-index:-1;pointer-events:none;"
-    "background:conic-gradient(from 0deg,transparent 0deg,rgba(242,177,52,.12) 8deg,transparent 30deg,transparent 360deg);"
-    "mix-blend-mode:screen;animation:sweep 22s linear infinite}"
-    "@keyframes sweep{to{transform:rotate(360deg)}}"
-    "@media(prefers-reduced-motion:reduce){body::before{animation:none;display:none}}"
-    ".wrap{width:100%%;max-width:1400px;margin:0 auto;padding:18px clamp(14px,4vw,32px) 48px}"
-    "a{color:#4fb8e0;text-decoration:none}a:hover{text-decoration:underline}"
-    "h1{font-size:20px;font-weight:600;margin:6px 0 16px}"
-    "h2{font-size:16px;font-weight:600;margin:22px 0 10px}"
-    "h3{font-size:14px;font-weight:600;margin:18px 0 8px;color:#c7d2e0}"
-    /* nav itself doesn't wrap -- .navlinks wraps internally instead, while
-     * .lang stays a fixed sibling anchored top-right (else it drops onto
-     * its own orphaned row once the links need more than one line). */
-    "nav{display:flex;align-items:flex-start;gap:8px;padding:5px;background:#15191d;border:1px solid #2a2f34;border-radius:10px;margin-bottom:18px;font-size:13px}"
-    ".navlinks{display:flex;flex-wrap:wrap;gap:4px;flex:1;min-width:0;align-items:center}"
-    "nav a{color:#94a0a8;padding:6px 12px;border-radius:7px;transition:background .12s,color .12s}"
-    "nav a:hover{background:#1d2227;color:#edf0f2;text-decoration:none}"
-    "nav a.active{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;font-weight:600;"
-    "box-shadow:0 0 0 1px rgba(242,177,52,.35),0 2px 10px -2px rgba(242,177,52,.5)}"
-    /* Hamburger toggle: hidden on desktop (the full link row fits), shown
-     * only on narrow screens via the media query below. Pure CSS -- a hidden
-     * checkbox (.nvt) whose :checked state reveals .navlinks, toggled by the
-     * <label> button, so no JS is needed and it degrades gracefully. */
-    "nav .logo{display:flex;align-items:center;align-self:center;padding:0 8px 0 4px;flex-shrink:0}"
-    "nav .logo img{display:block;border-radius:5px}"
-    "nav .brgr{display:none;color:#94a0a8;padding:6px 12px;border-radius:7px;cursor:pointer;font-size:18px;line-height:1;user-select:none}"
-    "nav .brgr:hover{background:#1d2227}"
-    "nav .nvt{display:none}"
-    /* Flag toggle: a small pill holding both flags, current language
-     * highlighted -- replaces the old plain text link (just the other
-     * language's name), which looked like a stray, unstyled afterthought
-     * next to the nav pill. */
-    "nav .lang{flex-shrink:0;display:flex;gap:2px;background:#0c1013;border-radius:20px;padding:2px;border:1px solid #2a2f34}"
-    "nav .lang a{padding:3px 8px;border-radius:16px;font-size:15px;line-height:1.3;opacity:.5}"
-    "nav .lang a:hover{background:#1d2227;text-decoration:none;opacity:.8}"
-    "nav .lang a.active{background:linear-gradient(160deg,#f2b134,#d99a1f);opacity:1}"
-    /* border-collapse:separate (not collapse!) -- browsers ignore
-     * border-radius on a <table> when its borders are collapsed, which made
-     * plain (non-.scroll) tables look square-cornered despite this rule.
-     * border-spacing:0 keeps cells touching, same look as collapse. */
-    "table{width:100%%;border-collapse:separate;border-spacing:0;background:#15191d;border:1px solid #2a2f34;border-radius:10px;margin:10px 0;overflow:hidden}"
-    "th,td{text-align:left;padding:10px 14px;font-size:13.5px;border-bottom:1px solid #20252a}"
-    "tr:last-child>*{border-bottom:none}"
-    "tr:hover>td{background:#1a1f24}"
-    "th{color:#94a0a8;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}"
-    "td{font-variant-numeric:tabular-nums}"
-    ".kv th{width:1px;white-space:nowrap;padding-right:32px}.kv td{overflow-wrap:anywhere}"
-    ".scroll{overflow-x:auto;border:1px solid #2a2f34;border-radius:10px;margin:10px 0}"
-    ".scroll table{border:none;border-radius:0;margin:0;width:auto;min-width:100%%}"
-    ".scroll td,.scroll th{white-space:nowrap}"
-    /* Detail/Type cells wrap at ANY width -- the detail text alone can
-     * be ~100 chars, wide enough to force scroll even on desktop. */
-    ".scroll td.wrapcell{white-space:normal;word-break:break-word}"
-    ".scroll td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}"
-    /* Narrow screens: tighter padding, #mtbl drops its redundant "#" column. */
-    "@media(max-width:640px){"
-    /* Nav collapses to a hamburger dropdown; sticky, z-index above Leaflet's
-     * panes (up to 700) so an open dropdown wins on /map. */
-    "nav{flex-wrap:wrap;align-items:center;position:sticky;top:0;z-index:1000}"
-    "nav .brgr{display:block;order:1}"
-    "nav .lang{order:2;margin-left:auto}"
-    "nav .navlinks{display:none;order:3;flex-basis:100%%;flex-direction:column;gap:2px;margin-top:6px;"
-    "max-height:calc(100vh - 60px);overflow-y:auto}"
-    "nav .nvt:checked~.navlinks{display:flex}"
-    "nav .navlinks a{padding:9px 12px}"
-    ".scroll th,.scroll td{padding:8px 6px}"
-    "#mtbl th:first-child,#mtbl td:first-child{display:none}"
-    /* th column width is shared table-wide: one long label pushed the whole
-     * table off-screen, so wrap labels beyond this width. */
-    ".kv th{white-space:normal;max-width:38vw}"
-    "}"
-    "button{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;font-weight:600;border:none;font-size:13.5px;padding:9px 15px;border-radius:8px;margin:3px 5px 3px 0;cursor:pointer;"
-    "box-shadow:0 2px 12px -3px rgba(242,177,52,.5);transition:box-shadow .15s,transform .08s}"
-    "button:hover{background:linear-gradient(160deg,#ffc861,#e2a52b);box-shadow:0 3px 16px -2px rgba(242,177,52,.65)}"
-    "button:active{transform:translateY(1px)}"
-    "input,select{background:#0c1013;color:#edf0f2;border:1px solid #333a41;border-radius:7px;padding:7px 9px;font-size:13.5px;max-width:100%%}"
-    "input:focus,select:focus{outline:none;border-color:#4fb8e0;box-shadow:0 0 0 3px rgba(79,184,224,.18)}"
-    /* Breathing room for the upload button when it wraps under its file input
-     * on narrow screens; harmless when they fit side by side. */
-    "input[type=file]{margin:4px 8px 8px 0}"
-    ".kv input:not([type=checkbox]):not([type=range]){width:100%%;max-width:360px}"
-    /* Range inputs were excluded above and need their own width cap, else
-     * the browser's intrinsic width widens the whole table column. */
-    ".kv input[type=range]{width:100%%;max-width:280px}"
-    /* IPv4 fields only need "255.255.255.255" (15 chars); !important since
-     * the generic 360px rule above is otherwise more specific. */
-    ".ipfield{max-width:140px!important}"
-    /* ::before dot gives each badge a small "status light" even where the
-     * colour alone might be hard to tell apart (colour-blindness, a dim
-     * screen) -- purely CSS, no change needed anywhere the .ok/.bad spans
-     * themselves get built. */
-    ".ok{display:inline-block;color:#5fd88a;background:#122019;padding:2px 10px;border-radius:20px;font-size:12px}"
-    ".bad{display:inline-block;color:#ff6b6b;background:#241315;padding:2px 10px;border-radius:20px;font-size:12px}"
-    ".ok::before,.bad::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%%;"
-    "background:currentColor;margin-right:5px;vertical-align:middle}"
-    ".warn{background:#241c0d;border:1px solid #7a5c12;color:#f2b134;padding:12px 14px;border-radius:10px;margin:14px 0}"
-    "small{color:#94a0a8}"
-    ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:6px 0 4px}"
-    ".card{background:#15191d;border:1px solid #2a2f34;border-radius:10px;padding:12px 14px}"
-    ".card .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#94a0a8;margin-bottom:5px}"
-    ".card .v{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}"
-    /* Section box: one visual group per topic; cards inside go a step darker
-     * so they still stand out against the section background. */
-    ".sect{background:#15191d;border:1px solid #2a2f34;border-radius:10px;padding:14px 16px;margin:16px 0}"
-    ".sect>h2{margin:0 0 10px}"
-    ".sect .card,.sect table,.sect .scroll{background:#0f1317;border-color:#232830}"
-    /* .isec sits inside .sect and is darker, so its tables go back up a step. */
-    ".isec table,.isec .scroll{background:#15191d;border-color:#2a2f34}"
-    ".isec{background:#0f1317;border:1px solid #232830;border-radius:8px;padding:10px 12px;margin:12px 0}"
-    ".foot{text-align:center;font-size:12px;color:#5c6770;margin-top:34px}"
-    ".foot a{color:#5c6770}.foot a:hover{color:#94a0a8}"
-    "pre{background:#0a0d0f;border:1px solid #2a2f34;border-radius:9px;color:#cfe8f0}"
-    "</style><title>%s</title></head><body><div class='wrap'>"
+    /* Stylesheet is served from /s.css; ?v= is the ELF hash prefix, so every
+     * new build -- not just a version bump -- gets a fresh, uncached URL. */
+    "<link rel='stylesheet' href='/s.css?v=%s'>"
+    "<title>%s</title></head><body><div class='wrap'>"
+    /* Context line above the nav: weekday, date, clock, node. On a page with
+     * auto-refresh the clock follows; on one without it names the load time,
+     * which is exactly how old the figures below are. */
+    "%s"
     /* .navlinks is a separate flex item from .lang (see CSS) so the page
      * links can wrap onto multiple rows on narrow screens while the flag
      * switch stays anchored top-right instead of dropping onto its own,
@@ -1548,6 +1625,15 @@ static const char PAGE_HEADER_FMT[] =
     "<a href='?lang=de' class='%s' title='Deutsch'>&#127462;&#127481;</a>"
     "<a href='?lang=en' class='%s' title='English'>&#127468;&#127463;</a>"
     "</span></nav>"
+    /* In the head, not the footer: the flags are clickable long before the
+     * page finishes streaming, and until this runs they drop the query. */
+    "<script>var lq=location.search.replace(/^\\?/,'').split('&').filter(function(s){"
+    "return s&&s.indexOf('=')>0&&s.slice(0,5).toLowerCase()!=='lang=';});"
+    "document.querySelectorAll('nav .lang a').forEach(function(a){"
+    /* lang= first, not last: resolve_language reads only the first 511 bytes
+     * of the query, and a long one would push it out of reach. */
+    "a.setAttribute('href','?'+['lang='+a.getAttribute('href').slice(-2)]"
+    ".concat(lq).join('&')+location.hash);});</script>"
     "<h1>%s</h1>";
 
 static const char PAGE_FOOTER[] =
@@ -1617,12 +1703,44 @@ static void send_pending_verify_banner(httpd_req_t *req)
 
 /* `json_url` enables the pause/resume button + polling loop feeding
  * window.arApply -- no full reload, so CSS animations never restart. */
+/* "FR, 21.08.2026 <sep> 14:02 <sep> " from the device clock, or empty if it was
+ * never set -- a 1970 date would read as a fault, not as a missing sync. */
+static void format_clockline(char *out, size_t cap, const char *sep)
+{
+    out[0] = '\0';
+    time_t now = time(NULL);
+    struct tm lt;
+    /* Same threshold the rest of the tree uses for "the clock is real". */
+    if (now < 1600000000 || !localtime_r(&now, &lt)) return;
+    /* Weekday short names come from the traffic page's list, so this line
+     * needs no vocabulary of its own. */
+    char wd[64];
+    snprintf(wd, sizeof(wd), "%s", T(S_TRF_WDAYS));
+    const char *day = wd;
+    for (int i = 0; i < lt.tm_wday && day; i++)
+    {
+        const char *c = strchr(day, ',');
+        day = c ? c + 1 : NULL;
+    }
+    char dbuf[16] = "";
+    if (day)
+    {
+        size_t n = 0;
+        while (day[n] && day[n] != ',' && n + 1 < sizeof(dbuf)) { dbuf[n] = day[n]; n++; }
+        dbuf[n] = '\0';
+    }
+    snprintf(out, cap, "%s%s%02d.%02d.%04d %s %02d:%02d %s ",
+             dbuf, dbuf[0] ? ", " : "",
+             lt.tm_mday, lt.tm_mon + 1, lt.tm_year + 1900,
+             sep, lt.tm_hour, lt.tm_min, sep);
+}
+
 static void send_page_header_refresh(httpd_req_t *req, const char *heading, const char *json_url)
 {
     /* static EXT_RAM_BSS_ATTR, not a stack buffer -- the httpd task's stack
      * is only 16384 bytes total (see webserver_init), and header[] growing
      * on-stack is exactly what caused a real crash once. */
-    static EXT_RAM_BSS_ATTR char refresh_tag[1024];
+    static EXT_RAM_BSS_ATTR char refresh_tag[1280];
     /* Static doesn't auto-reset between calls; clear explicitly so a page
      * with json_url==NULL can't inherit a previous request's script. */
     refresh_tag[0] = '\0';
@@ -1632,8 +1750,8 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
         config_get_u32(CONFIG_INDEX_REFRESH_SEC, &ri);
         if (ri > 0 && ri < 0xFFFFFFFF)
             snprintf(refresh_tag, sizeof(refresh_tag),
-                "<script>(function(){var ri=%lu,url='%s',t=null;"
-                "function tick(){fetch(url).then(function(r){return r.json();})"
+                "<script>(function(){var ri=%lu,url='%s',t=null,lt=0;"
+                "function tick(){lt=Date.now();fetch(url).then(function(r){return r.json();})"
                 ".then(function(d){if(window.arApply)window.arApply(d);}).catch(function(){});}"
                 "window.addEventListener('load',function(){"
                 "var b=document.createElement('button');"
@@ -1644,6 +1762,14 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
                 "if(on){tick();t=setInterval(tick,ri*1000);}else{if(t)clearInterval(t);}u();};"
                 "u();document.body.appendChild(b);"
                 "if(localStorage.getItem('ar')!=='0'){tick();t=setInterval(tick,ri*1000);}"
+                /* Mobile browsers freeze setInterval while the screen is off. Guard
+                 * lives here, not in tick(), which must stay free to run at ri=1. */
+                "function wake(){if(document.hidden||Date.now()-lt<1000)return;"
+                "if(localStorage.getItem('ar')!=='0')tick();}"
+                "document.addEventListener('visibilitychange',wake);"
+                /* e.persisted separates a bfcache return from a normal load, whose
+                 * tick the load handler above already fires. */
+                "window.addEventListener('pageshow',function(e){if(e.persisted)wake();});"
                 "});})();</script>",
                 (unsigned long)ri, json_url);
     }
@@ -1679,9 +1805,27 @@ static void send_page_header_refresh(httpd_req_t *req, const char *heading, cons
     else
         snprintf(page_title, sizeof(page_title), "ITS G5 Node");
 
-    static EXT_RAM_BSS_ATTR char header[9216];
-    snprintf(header, sizeof(header), PAGE_HEADER_FMT,
-             lc, page_title, refresh_tag, page_title,
+    /* /s.css cache key. The ELF hash, not ->version: a test build that edits
+     * s.css without bumping version.txt must still reach the browser. */
+    char css_ver[9];
+    esp_app_get_elf_sha256(css_ver, sizeof(css_ver));
+
+    char clk[80];
+    format_clockline(clk, sizeof(clk), "&middot;");
+    static EXT_RAM_BSS_ATTR char ctxline[sizeof(nodeid_esc) + 160];
+    /* Clock in its own span so a poll can replace just that part. */
+    HTML_PRINTF(ctxline, "<div class='ctx'><span id='st-clk'>%s</span>%s</div>",
+                clk, nodeid_esc);
+
+    /* With the CSS gone from the format string -Wformat-truncation can no
+     * longer bound this call; the assert does it instead (200 = nav+heading). */
+    static EXT_RAM_BSS_ATTR char header[4096];
+    _Static_assert(sizeof(PAGE_HEADER_FMT) + sizeof(refresh_tag)
+                   + 2 * sizeof(page_title) + sizeof(css_ver) + sizeof(ctxline)
+                   + 200 <= sizeof(header),
+                   "page header worst case no longer fits");
+    HTML_PRINTF(header, PAGE_HEADER_FMT,
+             lc, page_title, refresh_tag, css_ver, page_title, ctxline,
              lc, T(S_NAV_STATUS),
              lc, T(S_NAV_MESSAGES),
              lc, T(S_NAV_SETTINGS),
@@ -1709,23 +1853,59 @@ static void send_page_header(httpd_req_t *req, const char *heading)
     send_page_header_refresh(req, heading, NULL);
 }
 
-/* Renders the status page's "Activity" sparkline + message-type breakdown,
- * from counters rate_record_packet/msg_type_stats_record already fill in
- * webserver_handle_packet. */
-/* Builds just the sparkline's <rect> bars (no <svg> wrapper -- that's
- * emitted once, id='st-spark', and only its innerHTML gets swapped on
- * later polls since the viewBox/size never change). Shared between the
- * initial /  render and /status.json. */
-static void build_spark_bars_html(char *out, size_t out_size)
+/* One sample per completed second; the 60th ring slot is the second still
+ * being counted, so only 59 of them can ever be shown. */
+#define SPARK_POINTS    (RATE_WINDOW_SECS - 1)
+#define SPARK_PEAK_MIN  10  /* msgs/s floor, so a quiet minute stays flat */
+#define SPARK_DECAY_SEC 30
+
+/* Fixed y-scale: rescaling to the window maximum made 58 of 60 samples equal
+ * and moved the axis between polls. Lockless: only the httpd task renders. */
+static uint32_t spark_peak = SPARK_PEAK_MIN;
+static uint64_t spark_decay_at;
+
+static uint32_t spark_scale(const uint32_t *counts, size_t n, uint64_t now_sec)
+{
+    uint32_t wmax = 0;
+    for (size_t i = 0; i < n; i++)
+        if (counts[i] > wmax) wmax = counts[i];
+
+    if (!spark_decay_at) spark_decay_at = now_sec;
+    if (wmax > spark_peak)
+    {
+        spark_peak = wmax;
+        spark_decay_at = now_sec;
+    }
+    else if (now_sec - spark_decay_at >= SPARK_DECAY_SEC)
+    {
+        /* Whole steps, capped: a tab left closed for a day must not repeat
+         * the decay thousands of times. */
+        uint32_t steps = (uint32_t)((now_sec - spark_decay_at) / SPARK_DECAY_SEC);
+        if (steps > 64) steps = 64;
+        while (steps-- && spark_peak > SPARK_PEAK_MIN)
+            spark_peak -= (spark_peak / 4) ? (spark_peak / 4) : 1;
+        if (spark_peak < SPARK_PEAK_MIN) spark_peak = SPARK_PEAK_MIN;
+        /* Never below what the window holds: a lower peak would clip the top
+         * of the line flat and make the label flicker by one. */
+        if (spark_peak < wmax) spark_peak = wmax;
+        spark_decay_at = now_sec;
+    }
+    return spark_peak;
+}
+
+/* Builds the sparkline as a polyline "points" list; the <svg>/<polyline> shell
+ * is emitted once and later polls only setAttribute('points'). */
+static void build_spark_points(char *out, size_t out_size, uint32_t *peak_out)
 {
     uint64_t now_sec = esp_timer_get_time() / 1000000ull;
-    uint32_t counts[RATE_WINDOW_SECS];
-    uint32_t maxcount = 1;
+    uint32_t counts[SPARK_POINTS];
     if (msg_ring_mutex && xSemaphoreTake(msg_ring_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
-        for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
+        for (size_t i = 0; i < SPARK_POINTS; i++)
         {
-            uint64_t sec = now_sec - (RATE_WINDOW_SECS - 1 - i);
+            /* Ends at now_sec - 1: the current second is still filling up and
+             * as a line endpoint it twitched downwards on every poll. */
+            uint64_t sec = now_sec - SPARK_POINTS + i;
             rate_bucket_t *b = &rate_buckets[sec % RATE_WINDOW_SECS];
             counts[i] = (b->sec == sec) ? b->count : 0;
         }
@@ -1735,16 +1915,20 @@ static void build_spark_bars_html(char *out, size_t out_size)
     {
         memset(counts, 0, sizeof(counts));
     }
-    for (size_t i = 0; i < RATE_WINDOW_SECS; i++)
-        if (counts[i] > maxcount) maxcount = counts[i];
 
+    uint32_t peak = spark_scale(counts, SPARK_POINTS, now_sec);
+    if (peak_out) *peak_out = peak;
+
+    out[0] = '\0';
     size_t o = 0;
-    for (size_t i = 0; i < RATE_WINDOW_SECS && o < out_size; i++)
+    for (size_t i = 0; i < SPARK_POINTS && o + 12 < out_size; i++)
     {
-        int h = counts[i] ? (int)(4 + (counts[i] * 32) / maxcount) : 1;
-        o += snprintf(out + o, out_size - o,
-            "<rect x='%d' y='%d' width='3' height='%d' rx='1' fill='#f2b134'/>",
-            (int)i * 4, 40 - h, h);
+        /* h stays in 1..36 so the 2 px stroke never clips at the viewBox edge;
+         * a silent second drops to the baseline, which is the honest reading. */
+        uint32_t h = counts[i] ? 4 + (counts[i] * 32) / peak : 1;
+        if (h > 36) h = 36;
+        o += (size_t)snprintf(out + o, out_size - o, "%s%u,%u",
+                              o ? " " : "", (unsigned)(i * 4), (unsigned)(40 - h));
     }
 }
 
@@ -1779,42 +1963,54 @@ static void build_typeline_html(char *out, size_t out_size)
     }
 }
 
+/* Renders the status page's "Activity" sparkline + message-type breakdown,
+ * from counters rate_record_packet/msg_type_stats_record already fill in
+ * webserver_handle_packet. */
 static void render_activity_stats(httpd_req_t *req)
 {
-    /* Sent as separate chunks: the sparkline nears its 6 KiB buffer and
-     * -Werror=format-truncation would demand an absurd combined destination. */
-    char title[128];
-    snprintf(title, sizeof(title), "<h3>%s</h3>", T(S_ACTIVITY_TITLE));
-    httpd_resp_send_chunk(req, title, HTTPD_RESP_USE_STRLEN);
+    /* Sent as separate chunks: the point list is built before the label,
+     * because the label has to name the scale it was drawn against. */
+    uint32_t peak = 0;
+    static EXT_RAM_BSS_ATTR char spark[512];
+    build_spark_points(spark, sizeof(spark), &peak);
 
     /* The two halves below cover DIFFERENT periods, so each says so itself --
      * one heading for both had the type totals read as a 60 s snapshot. */
-    char sparklbl[128];
-    snprintf(sparklbl, sizeof(sparklbl), "<p style='margin:2px 0'><small>%s</small></p>",
-             T(S_ACTIVITY_SPARK));
+    char scaletxt[48];
+    snprintf(scaletxt, sizeof(scaletxt), "%s %lu/s", T(S_ACTIVITY_SCALE),
+             (unsigned long)peak);
+    /* Opens the section; the matching </div> rides on hintblock at the end of
+     * this function, so everything in between belongs to the group. */
+    char sparklbl[320];
+    HTML_PRINTF(sparklbl,
+        "<div class='grp'><h2>%s</h2>"
+        "<div class='lbl'>%s &middot; <span id='st-sparkmax'>%s</span></div>",
+        T(S_ACTIVITY_TITLE), T(S_ACTIVITY_SPARK), scaletxt);
     httpd_resp_send_chunk(req, sparklbl, HTTPD_RESP_USE_STRLEN);
 
-    char svgopen[160];
-    snprintf(svgopen, sizeof(svgopen),
-        "<svg id='st-spark' viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>",
-        RATE_WINDOW_SECS * 4);
+    /* id='st-spark' kept though unused: an older tab still polling would throw
+     * on a null element. vector-effect: else the stroke stretches with x. */
+    char svgopen[320];
+    HTML_PRINTF(svgopen,
+        "<div class='spark'>"
+        "<svg id='st-spark' viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>"
+        "<polyline id='st-sparkl' fill='none' stroke='#f2b134' stroke-width='2'"
+        " vector-effect='non-scaling-stroke' points='",
+        (SPARK_POINTS - 1) * 4);
     httpd_resp_send_chunk(req, svgopen, HTTPD_RESP_USE_STRLEN);
-
-    static EXT_RAM_BSS_ATTR char bars[6144];
-    build_spark_bars_html(bars, sizeof(bars));
-    httpd_resp_send_chunk(req, bars, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</svg>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, spark, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "'/></svg></div>", HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR char typeline[1024];
     build_typeline_html(typeline, sizeof(typeline));
     char typeblock[1408];
     snprintf(typeblock, sizeof(typeblock),
-        "<p style='margin:8px 0 2px'><small>%s</small></p><p id='st-type'>%s</p>",
+        "<div class='lbl sp'>%s</div><div class='types' id='st-type'>%s</div>",
         T(S_ACTIVITY_TYPES), typeline[0] ? typeline : T(S_ACTIVITY_NONE));
     httpd_resp_send_chunk(req, typeblock, HTTPD_RESP_USE_STRLEN);
 
     char hintblock[768];
-    snprintf(hintblock, sizeof(hintblock), "<p><small>%s</small></p>", T(S_TYPE_HINT));
+    snprintf(hintblock, sizeof(hintblock), "<p class='note'>%s</p></div>", T(S_TYPE_HINT));
     httpd_resp_send_chunk(req, hintblock, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1862,79 +2058,131 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     else
         snprintf(chan_str, sizeof(chan_str), "-");
 
-    send_page_header_refresh(req, T(S_TITLE_STATUS), "/status.json");
+    send_page_header_refresh(req, T(S_TITLE_STATUS),
+                             current_lang == LANG_EN ? "/status.json?lang=en"
+                                                     : "/status.json?lang=de");
 
     /* SD usage instead of the static hardware variant that stood here: it
      * answers "is the card filling up" at a glance. */
-    char sdbuf[128];
+    /* Text and class kept apart: T(S_SD_USED_OF) is itself the format
+     * string, so the wrapping span cannot be appended to it. */
+    /* The share is the cell's value now, the byte text its detail line; both
+     * default to the same dash the old single-line variant showed. */
+    char sdval[48] = "&ndash;";
+    /* Empty, not a dash: the detail line then renders blank instead of putting
+     * a second dash under the one in the value. */
+    char sdtxt[128] = "";
+    const char *sdcls = "";
 #if CONFIG_ENABLE_SD
     {
         uint64_t sd_total = 0, sd_free = 0;
         if (sdcard_usage(&sd_total, &sd_free) == ESP_OK && sd_total)
         {
             char u[24], t[24], f[24];
+            unsigned pct = (unsigned)(((sd_total - sd_free) * 100ull) / sd_total);
             format_bytes64(sd_total - sd_free, u, sizeof(u));
             format_bytes64(sd_total, t, sizeof(t));
             format_bytes64(sd_free, f, sizeof(f));
-            snprintf(sdbuf, sizeof(sdbuf), T(S_SD_USED_OF), u, t, f);
+            snprintf(sdtxt, sizeof(sdtxt), T(S_SD_USED_OF), u, t, f);
+            /* %% is a literal percent sign in the value, not a conversion. */
+            snprintf(sdval, sizeof(sdval), "%u<span class='e'>%%</span>", pct);
+            sdcls = lvl_class(pct, 80, 92);
         }
         else
-            snprintf(sdbuf, sizeof(sdbuf), "%s", T(S_SD_NOT_MOUNTED));
+        {
+            snprintf(sdtxt, sizeof(sdtxt), "%s", T(S_SD_NOT_MOUNTED));
+            /* Grey, not red: running without a card is a normal setup for
+             * someone else, not a fault of this one. */
+            sdcls = "v-off";
+        }
     }
-#else
-    snprintf(sdbuf, sizeof(sdbuf), "-");
+#endif
+    /* Threshold colour and its tooltip sit on the label, which is where the
+     * state dot is in the new grid. */
+    const char *sdtitle = strcmp(sdcls, "v-bad") == 0    ? T(S_TH_ALARM)
+                          : strcmp(sdcls, "v-warn") == 0 ? T(S_TH_WARN) : "";
+
+#ifdef CONFIG_ENABLE_TEMPERATURE
+    /* Read once: the class and the number must not come from two samples,
+     * and a failed read prints "nan" unless it is caught here. */
+    float tc = temperature_get();
+    char tstr[64];
+    /* Range check, not just NaN: a wild reading would push the closing tag out
+     * of the buffer, and a cut </span> swallows the rest of the page. */
+    if (tc == tc && tc > -100.0f && tc < 200.0f)
+        snprintf(tstr, sizeof(tstr), "%.1f<span class='e'>&deg;C</span>", (double)tc);
+    else
+        snprintf(tstr, sizeof(tstr), "&ndash;");
 #endif
 
     /* id='st-*' on every cell that /status.json can update -- see arApply
      * below. Node ID/MAC/firmware never change without a reboot
      * (a full page load already happens then), so those stay static. */
+    /* One buffer for both halves: the second snprintf only runs once the first
+     * chunk is out, and the httpd task's stack is 16 KB in total. */
     char body[3584];
+    /* No heading on the top row -- position says it. Channel and sniffer state
+     * ride in the detail line of the value they belong to, label included. */
     snprintf(body, sizeof(body),
-        "<div class='cards'>"
-        "<div class='card'><div class='l'>%s</div><div class='v' id='st-msgs'>%lu</div></div>"
-        "<div class='card'><div class='l'>%s</div><div class='v' id='st-rate'>%lu</div></div>"
-        "<div class='card'><div class='l'>%s</div><div class='v' id='st-uptime'>%s</div></div>"
-        "</div>"
-        "<table class='kv'>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td>%02x:%02x:%02x:%02x:%02x:%02x</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td><span class='%s' id='st-sniff'>%s</span></td></tr>"
-        "<tr><th>%s</th><td id='st-chan'>%s</td></tr>"
-        "<tr><th>%s</th><td><span class='%s' id='st-mqtt'>%s</span></td></tr>"
-#ifdef CONFIG_ENABLE_TEMPERATURE
-        "<tr><th>%s</th><td id='st-temp'>%.1f &deg;C</td></tr>"
-#endif
-        "</table>",
-        T(S_MSGS_RECEIVED), (unsigned long)msg_total_count,
+        "<div class='grid'>"
+        "<div class='cell'><div class='l'>%s</div>"
+        "<div class='v' id='st-msgs'>%lu</div><div class='d'>%s</div></div>"
+        "<div class='cell'><div class='l'>%s</div>"
+        "<div class='v' id='st-rate'>%lu</div>"
+        "<div class='d'>%s <span id='st-chan'>%s</span></div></div>"
+        "<div class='cell'><div class='l %s' id='st-upl'>%s</div>"
+        "<div class='v' id='st-uptime'>%s</div>"
+        "<div class='d'>%s <span class='%s' id='st-sniff'>%s</span></div></div>"
+        "</div>",
+        T(S_MSGS_RECEIVED), (unsigned long)msg_total_count, T(S_SINCE_BOOT),
         T(S_RATE), (unsigned long)rate,
-        T(S_UPTIME), uptime_str,
-        T(S_NODEID), nodeid_esc,
-        T(S_MAC), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        T(S_FW_VERSION), app_desc->version,
-        T(S_SD_CARD), sdbuf,
-        T(S_SNIFFER), running ? "ok" : "bad", running ? T(S_RUNNING) : T(S_STOPPED),
         T(S_CHANNEL), chan_str,
-        T(S_MQTT), mqtt_connected_state ? "ok" : "bad",
-        mqtt_connected_state ? T(S_CONNECTED) : T(S_DISCONNECTED)
-#ifdef CONFIG_ENABLE_TEMPERATURE
-        , T(S_TEMPERATURE), (double)temperature_get()
-#endif
-    );
+        running ? "v-ok" : "v-off", T(S_UPTIME), uptime_str,
+        T(S_SNIFFER), running ? "ok" : "bad",
+        running ? T(S_RUNNING) : T(S_STOPPED));
     httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
 
     render_activity_stats(req);
 
+    /* The SD value gets no state class: /status.json carries no SD field, so a
+     * coloured 36px number would keep asserting the share from page load. */
+    snprintf(body, sizeof(body),
+        "<div class='grp'><h2>%s</h2><div class='grid'>"
+        "<div class='cell'><div class='l %s' id='st-sdl' title='%s'>%s</div>"
+        "<div class='v'>%s</div><div class='d'>%s</div></div>"
+#ifdef CONFIG_ENABLE_TEMPERATURE
+        "<div class='cell'><div class='l %s' id='st-templ'>%s</div>"
+        "<div class='v %s' id='st-temp'>%s</div></div>"
+#endif
+        "<div class='cell'><div class='l %s' id='st-mqttl'>%s</div>"
+        "<div class='v' id='st-mqtt'>%s</div></div>"
+        "<div class='cell'><div class='l'>%s</div><div class='v'>%s</div>"
+        "<div class='d'>%s %02x:%02x:%02x:%02x:%02x:%02x</div></div>"
+        "<div class='cell'><div class='l'>%s</div><div class='v'>%s</div></div>"
+        "</div></div>",
+        T(S_SYS_GRP_DEVICE),
+        sdcls, sdtitle, T(S_SD_CARD), sdval, sdtxt,
+#ifdef CONFIG_ENABLE_TEMPERATURE
+        temp_class(tc), T(S_TEMPERATURE), temp_class(tc), tstr,
+#endif
+        mqtt_connected_state ? "v-ok" : "v-bad", T(S_MQTT),
+        mqtt_connected_state ? T(S_CONNECTED) : T(S_DISCONNECTED),
+        /* An empty nodeid would leave a bare 36px gap under its label. */
+        T(S_NODEID), nodeid_esc[0] ? nodeid_esc : "&ndash;",
+        T(S_MAC), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        T(S_FW_VERSION), app_desc->version);
+    httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
+
     /* No reload on click -- fetch the toggle, then let window.stSetSniff
      * (defined in applyscript below) update the button + status span from
      * the action just taken, same as a poll would. */
-    /* 1024, not 512: the power-off button plus its confirm/busy strings add
-     * ~330 bytes in German, and a truncated onclick would silently produce a
-     * dead button rather than an error. */
-    char buttons[1024];
+    /* 1152: the German worst case is 985 bytes, and a truncated onclick would
+     * silently produce a dead button rather than an error. */
+    char buttons[1152];
     snprintf(buttons, sizeof(buttons),
-        "<p>"
+        /* .btnrow makes these three quiet like the mockup without touching the
+         * global amber button, which /settings' own savebar still relies on. */
+        "<p class='btnrow'>"
         "<button id='st-sniffbtn' data-action='%s' onclick=\"var a=this.getAttribute('data-action');"
         /* r.ok, not "it returned": /sniffer is password-gated, and a rejected
          * request must not flip the label. The status poll re-asserts the truth. */
@@ -1961,29 +2209,47 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 
     /* Applies /status.json to the cells; innerHTML because labels can carry
      * entities, and the Start/Stop button swaps label+action in the same pass. */
-    char applyscript[1536];
+    /* className REPLACES the class list, so every id that also carries a layout
+     * class ('v', 'l') has to get that class written back with it. */
+    char applyscript[1792];
     snprintf(applyscript, sizeof(applyscript),
         "<script>(function(){"
-        "var RUN='%s',STOP='%s',CONN='%s',DISC='%s',BSTART='%s',BSTOP='%s';"
+        "var RUN='%s',STOP='%s',CONN='%s',DISC='%s',BSTART='%s',BSTOP='%s',SCL='%s';"
+        "function cls(i,c){var e=document.getElementById(i);if(e)e.className=c;}"
         "window.stSetSniff=function(r){"
         "var sn=document.getElementById('st-sniff');sn.className=r?'ok':'bad';sn.innerHTML=r?RUN:STOP;"
+        "cls('st-upl','l '+(r?'v-ok':'v-off'));"
         "var sb=document.getElementById('st-sniffbtn');"
         "if(sb){sb.textContent=r?BSTOP:BSTART;sb.setAttribute('data-action',r?'stop':'start');}"
         "};"
         "window.arApply=function(d){"
+        /* Otherwise the clock freezes on the minute the page was loaded. */
+        "var ck=document.getElementById('st-clk');"
+        "if(ck&&d.clk!==undefined)ck.textContent=d.clk;"
         "document.getElementById('st-msgs').textContent=d.msgs;"
         "document.getElementById('st-rate').textContent=d.rate;"
         "document.getElementById('st-uptime').textContent=d.uptime;"
         "document.getElementById('st-chan').textContent=d.chan;"
-        "document.getElementById('st-spark').innerHTML=d.spark;"
+        /* setAttribute, not innerHTML: the polyline is one SVG element now. */
+        "var sl=document.getElementById('st-sparkl');"
+        "if(sl&&d.sparkp!==undefined)sl.setAttribute('points',d.sparkp);"
+        "var sm=document.getElementById('st-sparkmax');"
+        "if(sm&&d.smax!==undefined)sm.textContent=SCL+' '+d.smax+'/s';"
         "document.getElementById('st-type').innerHTML=d.types;"
         "window.stSetSniff(d.sniff);"
-        "var mq=document.getElementById('st-mqtt');"
-        "mq.className=d.mqtt?'ok':'bad';mq.innerHTML=d.mqtt?CONN:DISC;"
-        "var te=document.getElementById('st-temp');if(te&&d.temp!==undefined)te.textContent=d.temp.toFixed(1)+' \\u00b0C';"
+        "document.getElementById('st-mqtt').innerHTML=d.mqtt?CONN:DISC;"
+        "cls('st-mqttl','l '+(d.mqtt?'v-ok':'v-bad'));"
+        /* null = sensor not answering; the class has to follow the value,
+         * or the colour freezes on whatever the page was loaded with. */
+        "var te=document.getElementById('st-temp');"
+        "if(te&&d.temp!==undefined&&d.temp!==null){"
+        "te.innerHTML=d.temp.toFixed(1)+'<span class=e>\\u00b0C</span>';"
+        "te.className='v '+(d.tcl||'');cls('st-templ','l '+(d.tcl||''));}"
+        /* Defined by the neighbour block below, absent on /system. */
+        "if(window.peerPoll)window.peerPoll();"
         "};})();</script>",
         T(S_RUNNING), T(S_STOPPED), T(S_CONNECTED), T(S_DISCONNECTED),
-        T(S_SNIFF_START), T(S_SNIFF_STOP));
+        T(S_SNIFF_START), T(S_SNIFF_STOP), T(S_ACTIVITY_SCALE));
     httpd_resp_send_chunk(req, applyscript, HTTPD_RESP_USE_STRLEN);
 
     /* Neighbours at a glance: three receivers meant three browser tabs, and
@@ -2016,32 +2282,53 @@ static esp_err_t status_page_handler(httpd_req_t *req)
             if (open_q && o + 1 < sizeof(plist)) plist[o++] = '"';
             plist[o] = '\0';
 
-            static EXT_RAM_BSS_ATTR char peerblk[2048];
+            static EXT_RAM_BSS_ATTR char peerblk[3072];
+            /* Every literal %% below is JavaScript modulo, not a conversion. */
             HTML_PRINTF(peerblk,
-                "<h2>%s</h2><div class='scroll'><table id='peertbl'><thead><tr>"
+                /* Stays a table: its four column heads are firmware texts and
+                 * rows compare across peers better than tiles would. */
+                "<div class='grp'><h2>%s</h2>"
+                "<div class='scroll'><table id='peertbl'><thead><tr>"
                 "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
                 "<tbody id='peerbody'></tbody></table></div>"
                 "<script>(function(){var P=[%s];var B=document.getElementById('peerbody');"
                 "if(!P.length){return;}"
-                "function row(h,txt){var tr=document.createElement('tr');"
-                "tr.innerHTML=\"<td><a href='http://\"+h+\"/'>\"+h+\"</a></td>\"+txt;"
-                "return tr;}"
-                "P.forEach(function(h){var tr=row(h,'<td colspan=3>&hellip;</td>');B.appendChild(tr);"
-                "fetch('http://'+h+'/status.json',{cache:'no-store'})"
+                "var ND='%s',IDLE=120,R={},busy=false;"
+                /* Same d/h/m/s spelling as format_uptime, so language-neutral. */
+                "function dur(s){var d=Math.floor(s/86400),h=Math.floor(s%%86400/3600),"
+                "m=Math.floor(s%%3600/60),x=s%%60;"
+                "return (d?d+'d ':'')+(d||h?h+'h ':'')+(d||h||m?m+'m ':'')+x+'s';}"
+                "function lnk(h){return \"<td><a href='http://\"+h+\"/'>\"+h+\"</a></td>\";}"
+                /* d.msgs===0 also catches peers still on firmware without idle,
+                 * which is exactly the deaf-since-boot case. */
+                "function rt(d){var q=(d.idle!==undefined)?(d.idle<0||d.idle>=IDLE):(d.msgs===0);"
+                "if(!q)return \"<td>\"+d.rate+\"</td>\";"
+                "return \"<td><span class='bad'>\"+ND+' '+(d.idle>0?dur(d.idle):d.uptime)+\"</span></td>\";}"
+                "function one(h){var tr=R[h];"
+                "return fetch('http://'+h+'/status.json',{cache:'no-store'})"
                 ".then(function(r){return r.json();}).then(function(d){"
-                "tr.innerHTML=\"<td><a href='http://\"+h+\"/'>\"+h+\"</a></td><td>\"+d.rate"
-                "+\"</td><td>\"+d.uptime+\"</td><td>\"+(d.mqtt?'&#10003;':'&#10007;')+\"</td>\";})"
+                "tr.innerHTML=lnk(h)+rt(d)+\"<td>\"+d.uptime+\"</td><td>\""
+                "+(d.mqtt?'&#10003;':'&#10007;')+\"</td>\";})"
                 /* A blocked cross-origin read and a dead host both land in
                  * catch(); a no-cors probe tells them apart, so an older peer
                  * is not reported as offline. */
                 ".catch(function(){"
-                "fetch('http://'+h+'/status.json',{mode:'no-cors',cache:'no-store'})"
-                ".then(function(){tr.innerHTML=\"<td><a href='http://\"+h+\"/'>\"+h"
-                "+\"</a></td><td colspan=3>%s</td>\";})"
-                ".catch(function(){tr.innerHTML=\"<td>\"+h+\"</td><td colspan=3>%s</td>\";});"
-                "});});})();</script>",
+                "return fetch('http://'+h+'/status.json',{mode:'no-cors',cache:'no-store'})"
+                ".then(function(){tr.innerHTML=lnk(h)+\"<td colspan=3><small class='v-warn'>%s</small></td>\";})"
+                ".catch(function(){tr.innerHTML=\"<td>\"+h"
+                "+\"</td><td colspan=3><span class='bad'>%s</span></td>\";});"
+                "});}"
+                /* Re-polled from arApply: the idle time is a DURATION, and a
+                 * frozen one still claims 12s of silence hours later. */
+                "window.peerPoll=function(){if(busy)return;busy=true;"
+                "Promise.all(P.map(function(h){return one(h);})).then(function(){busy=false;},"
+                "function(){busy=false;});};"
+                "P.forEach(function(h){var tr=document.createElement('tr');"
+                "tr.innerHTML=lnk(h)+'<td colspan=3>&hellip;</td>';B.appendChild(tr);R[h]=tr;});"
+                "window.peerPoll();})();</script></div>",
                 T(S_PEER_TITLE), T(S_PEER_NODE), T(S_PEER_RATE), T(S_PEER_UPTIME),
-                T(S_PEER_MQTT), plist, T(S_PEER_OLDFW), T(S_PEER_OFFLINE));
+                T(S_PEER_MQTT), plist, T(S_PEER_NODATA), T(S_PEER_OLDFW),
+                T(S_PEER_OFFLINE));
             httpd_resp_send_chunk(req, peerblk, HTTPD_RESP_USE_STRLEN);
         }
     }
@@ -2080,25 +2367,51 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
     else
         snprintf(chan_str, sizeof(chan_str), "-");
 
-    static EXT_RAM_BSS_ATTR char bars[6144];
-    build_spark_bars_html(bars, sizeof(bars));
+    /* Middle dot as raw UTF-8: this one goes through textContent, not markup. */
+    char clkj[80];
+    format_clockline(clkj, sizeof(clkj), "\u00b7");
+
+#ifdef CONFIG_ENABLE_TEMPERATURE
+    /* "nan" is not valid JSON and would kill the whole poll, not just this
+     * one field, so a failed read goes out as null. */
+    float tc = temperature_get();
+    char tval[24];
+    if (tc == tc) snprintf(tval, sizeof(tval), "%.1f", (double)tc);
+    else          snprintf(tval, sizeof(tval), "null");
+#endif
+
+    uint32_t peak = 0;
+    static EXT_RAM_BSS_ATTR char spark[512];
+    build_spark_points(spark, sizeof(spark), &peak);
     static EXT_RAM_BSS_ATTR char typeline[1024];
     build_typeline_html(typeline, sizeof(typeline));
+
+    /* -1 = nothing ever received (0 would read as "just now"); clamped at 0
+     * because a frame arriving between the two reads would underflow. */
+    uint32_t last1 = msg_last_sec1, now32 = (uint32_t)uptime_s;
+    long idle = last1 ? (long)(now32 > last1 - 1 ? now32 - (last1 - 1) : 0) : -1;
 
     static EXT_RAM_BSS_ATTR char json[8192];
     snprintf(json, sizeof(json),
         "{\"msgs\":%lu,\"rate\":%lu,\"uptime\":\"%s\",\"sniff\":%s,\"chan\":\"%s\",\"mqtt\":%s,"
-        "\"spark\":\"%s\",\"types\":\"%s\""
+        /* sparkp, not spark: the old field carried <rect> markup, this one
+         * carries polyline coordinates -- a renamed field breaks louder. */
+        "\"sparkp\":\"%s\",\"smax\":%lu,\"idle\":%ld,\"types\":\"%s\""
+        /* Literal UTF-8, not an entity: arApply writes it with textContent,
+         * which would show "&middot;" verbatim. */
+        ",\"clk\":\"%s\""
 #ifdef CONFIG_ENABLE_TEMPERATURE
-        ",\"temp\":%.1f"
+        ",\"temp\":%s,\"tcl\":\"%s\""
 #endif
         "}",
         (unsigned long)msg_total_count, (unsigned long)rate, uptime_str,
         running ? "true" : "false", chan_str,
         mqtt_connected_state ? "true" : "false",
-        bars, typeline[0] ? typeline : T(S_ACTIVITY_NONE)
+        spark, (unsigned long)peak, idle,
+        typeline[0] ? typeline : T(S_ACTIVITY_NONE),
+        clkj
 #ifdef CONFIG_ENABLE_TEMPERATURE
-        , (double)temperature_get()
+        , tval, temp_class(tc)
 #endif
     );
     /* The peer row on another node's status page reads this cross-origin,
@@ -2495,8 +2808,9 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
      * position. */
     send_page_header(req, T(S_TITLE_MESSAGES));
 
+    /* Opens the page's first group; closed once before the archive block. */
     char intro[256];
-    snprintf(intro, sizeof(intro), "<p>");
+    snprintf(intro, sizeof(intro), "<div class='grp top'><p class='note'>");
     size_t l = strlen(intro);
     snprintf(intro + l, sizeof(intro) - l, T(S_MSG_INTRO), WEB_MSG_RING_SIZE);
     l = strlen(intro);
@@ -2507,14 +2821,17 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
      * approach several hundred bytes, which intro's small fixed buffer isn't
      * sized for. */
     char typehint[768];
-    snprintf(typehint, sizeof(typehint), "<p><small>%s</small></p>", T(S_TYPE_HINT));
+    snprintf(typehint, sizeof(typehint), "<p class='note'>%s</p>", T(S_TYPE_HINT));
     httpd_resp_send_chunk(req, typehint, HTTPD_RESP_USE_STRLEN);
 
     /* Formatted output is ~300 bytes -- at 256 this truncated inside the open
      * <script>, and the browser swallowed the whole table as script text. */
     char fbar[512];
     HTML_PRINTF(fbar,
-        "<p>%s: <input id='lf' size='18' oninput='applyf()'></p>"
+        /* Colon inside the span: as its own text node it would become a flex
+         * item of .tools and sit a gap away from the word. */
+        "<p class='tools'><span class='cap'>%s:</span>"
+        "<input id='lf' size='18' oninput='applyf()'></p>"
         "<script>window.applyf=function(){"
         "var n=document.getElementById('lf').value.toLowerCase();"
         "document.querySelectorAll('#msgtbody tr').forEach(function(r){"
@@ -2608,6 +2925,10 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, ws_script, HTTPD_RESP_USE_STRLEN);
 #endif
 
+    /* Closes .grp top unconditionally -- the archive block below is SD-only
+     * and must not be the one carrying the closing tag. */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+
 #if CONFIG_ENABLE_SD
     /* Archive tools live here with the messages they operate on: search the
      * PCAP recording, and the manual re-send of stationary senders. */
@@ -2616,22 +2937,22 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
          * checked, because a cut here swallows the rest of the page. */
         static EXT_RAM_BSS_ATTR char arch[6144];
         HTML_PRINTF(arch,
-            "<h2>%s</h2><p><small>%s</small></p>"
-            "<p><input type='datetime-local' id='sf'> &ndash; "
-            "<input type='datetime-local' id='st'> &nbsp; %s: "
+            "<div class='grp'><h2>%s</h2><p class='note'>%s</p>"
+            "<p class='tools'><input type='datetime-local' id='sf'> &ndash; "
+            "<input type='datetime-local' id='st'> <span class='cap'>%s:</span> "
             "<input id='sq' size='14' maxlength='32'> "
             "<button onclick='srch()'>%s</button> "
-            "<button onclick='expp()'>%s</button>"
-            "<br><small>%s</small></p>"
-            "<div id='sr'></div>"
-            "<h2>%s</h2><p><small>%s</small></p>"
-            "<p><input type='datetime-local' id='rf'> &ndash; "
-            "<input type='datetime-local' id='rt'> &nbsp; %s: "
+            "<button onclick='expp()'>%s</button></p>"
+            "<p class='note'>%s</p>"
+            "<div id='sr'></div></div>"
+            "<div class='grp'><h2>%s</h2><p class='note'>%s</p>"
+            "<p class='tools'><input type='datetime-local' id='rf'> &ndash; "
+            "<input type='datetime-local' id='rt'> <span class='cap'>%s:</span> "
             "<select id='rth'><option value='0' selected>%s</option>"
             "<option value='3600'>1/h</option>"
             "<option value='600'>1/10 min</option></select> "
             "<button onclick='rsuup()'>%s</button></p>"
-            "<pre id='rr'></pre>"
+            "<pre id='rr' class='logpre'></pre></div>"
             "<script>"
             "(function(){function f(d){var p=function(n){return (n<10?'0':'')+n;};"
             "return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}"
@@ -2704,9 +3025,9 @@ static esp_err_t map_get_handler(httpd_req_t *req)
      * map container with it, leaving a blank page and CSS shown as text. */
     char hint[2560];
     HTML_PRINTF(hint,
-        "<details style='margin:6px 0'>"
-        "<summary style='cursor:pointer'><small>%s</small></summary>"
-        "<p><small>%s</small></p></details>"
+        "<details class='dtl'>"
+        "<summary>%s</summary>"
+        "<p class='note'>%s</p></details>"
         "<link rel='stylesheet' href='/leaflet.css'>"
         "<script src='/leaflet.js'></script>"
         /* The icon box grew to 40px to hold the heading needle; the popup is
@@ -2744,7 +3065,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "vertical-align:middle;margin-left:8px}"
         "#pbbar i{position:absolute;top:0;height:100%%;width:40%%;border-radius:3px;"
         "background:#f2b134;animation:pbslide 1.1s infinite linear}</style>"
-        "<div style='margin:8px 0'>"
+        "<div class='grp nohd'>"
         "<label>%s <input type='datetime-local' id='pbfrom'></label> "
         "<label>%s <input type='datetime-local' id='pbto'></label> "
         "<button id='pbload'>%s</button>"
@@ -2827,12 +3148,13 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         if (open_q && o + 1 < sizeof(peerjs)) peerjs[o++] = '"';
         peerjs[o] = '\0';
     }
-    char labels[1792];   /* worst case ~1190 with all texts, peers and node id */
+    char labels[1792];   /* worst case ~1354 with all texts, peers and node id */
     HTML_PRINTF(labels,
              "<script>var ITS_MAP_L_STREETS=\"%s\",ITS_MAP_L_SAT=\"%s\","
              "ITS_MAP_L_DARK=\"%s\",ITS_MAP_L_LIGHT=\"%s\","
              "ITS_MAP_L_TRACKS=\"%s\",ITS_MAP_L_TRACKS_P=\"%s\","
              "ITS_MAP_TRACK_PTS=\"%s\",ITS_MAP_TRACK_CAP=\"%s\",ITS_MAP_TRACK_DAYS=%lu,"
+             "ITS_MAP_TRACK_DUR=\"%s\",ITS_MAP_BUSY=\"%s\","
              "ITS_MAP_SEEN_BY=\"%s\",ITS_MAP_PEERS=[%s],ITS_MAP_SELF=\"%s\","
              "ITS_PB_NONE=\"%s\",ITS_PB_ERROR=\"%s\",ITS_PB_BUSY=\"%s\","
              "ITS_PB_PART=\"%s\","
@@ -2844,6 +3166,7 @@ static esp_err_t map_get_handler(httpd_req_t *req)
              T(S_MAP_LAYER_DARK), T(S_MAP_LAYER_LIGHT),
              T(S_MAP_LAYER_TRACKS), T(S_MAP_LAYER_TRACKS_P),
              T(S_MAP_TRACK_PTS), T(S_MAP_TRACK_CAP), (unsigned long)trkdays,
+             T(S_MAP_TRACK_DUR), T(S_MAP_BUSY),
              T(S_MAP_SEEN_BY), peerjs, selfname,
              T(S_PLAYBACK_NONE), T(S_PLAYBACK_ERROR), T(S_PLAYBACK_BUSY),
              T(S_PLAYBACK_PARTIAL),
@@ -3000,12 +3323,30 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         /* Thin and translucent on purpose: where many vehicles took the same
          * road the lines stack up and that road simply gets brighter, which
          * is the "imprint" effect without needing a heat map. */
+        /* Deliberately clear of PEER_COLORS and of the traffic-light colours:
+         * a local bus and a peer's line must not come out the same green. */
+        "function trkColor(y){if(y===6)return '#46d9a0';"
+        "if(y===7||y===8||y===9)return '#d98cb0';"
+        "if(y===2||y===3||y===4)return '#9aa6ff';"
+        "if(y===11)return '#e0b050';"
+        "if(y===1)return '#cfd6da';return '#4fb8e0';}"
+        /* Numeric station type, so not emojiFor() -- that one keys on the type
+         * NAME. Blank for unknown rather than claiming a road-user type. */
+        "function trkIcon(y){if(y===6)return '\\ud83d\\ude8c ';"
+        "if(y===7||y===8||y===9)return '\\ud83d\\ude9a ';"
+        "if(y===2||y===3||y===4)return '\\ud83c\\udfcd ';"
+        "if(y===1)return '\\ud83d\\udeb6 ';"
+        "if(y===11)return '\\ud83d\\ude8a ';"
+        "if(y===5)return '\\ud83d\\ude97 ';return '';}"
+        /* A fixed colour means a peer: those stay one colour each and are
+         * dashed, so origin and road-user type read on separate channels. */
         "function drawTracks(a,layer,color,who){"
         "for(var i=0;i<a.length;i++){var t=a[i];if(!t.p||t.p.length<2)continue;"
         "var pts=t.p.map(function(q){return [q[0]/1e7,q[1]/1e7];});"
-        "var pl=L.polyline(pts,{color:color,weight:2,opacity:0.35,"
-        "renderer:trackRenderer});"
-        "pl.bindPopup('#'+t.i+' \\u00b7 '+pts.length+' '+ITS_MAP_TRACK_PTS"
+        "var pl=L.polyline(pts,{color:color||trkColor(t.t),weight:2,opacity:0.35,"
+        "dashArray:color?'6,5':null,renderer:trackRenderer});"
+        "pl.bindPopup(trkIcon(t.t)+'#'+t.i+' \\u00b7 '+pts.length+' '+ITS_MAP_TRACK_PTS"
+        "+(t.d!==undefined?' \\u00b7 '+ITS_MAP_TRACK_DUR+' '+t.d+' s':'')"
         "+(who?'<br><small>'+ITS_MAP_SEEN_BY+' '+htxt(who)+'</small>':''));"
         "pl.addTo(layer);}}"
         /* /tracks.json used to be a bare array and became {"t":[...],"c":n}.
@@ -3013,27 +3354,33 @@ static esp_err_t map_get_handler(httpd_req_t *req)
          * this its tracks vanish into the peer .catch -- indistinguishable
          * from "receiver offline", which is exactly what that catch hides. */
         "function trkArr(d){return Array.isArray(d)?d:((d&&d.t)||[]);}"
+        /* /tracks.json runs on the shared slow worker now, so a busy worker
+         * answers 503 text/plain -- without this the layer just stays empty. */
         "function loadTracks(){tracksLoaded=true;"
         "fetch('/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
-        ".then(function(r){return r.json();}).then(function(d){"
-        "trackLayer.clearLayers();drawTracks(trkArr(d),trackLayer,'#4fb8e0',ITS_MAP_SELF);"
+        ".then(function(r){if(r.status===503)throw 503;return r.json();}).then(function(d){"
+        "trackLayer.clearLayers();drawTracks(trkArr(d),trackLayer,null,ITS_MAP_SELF);"
         "trackCapSelf=!!(d&&d.c);trackCap=trackCapSelf||trackCapPeer;updateTrackNote();"
-        "}).catch(function(){tracksLoaded=false;});}"
+        "}).catch(function(e){tracksLoaded=false;if(e===503)alert(ITS_MAP_BUSY);});}"
         /* One colour per peer, in the order they are configured, so the same
          * receiver keeps the same colour across reloads. Chosen to stay apart
          * from the local blue and from the amber UI accent. */
         "var PEER_COLORS=['#e07a4f','#7ad07a','#c07ae0','#e0c04f','#4fe0c0'];"
-        "function loadPeerTracks(){peerTracksLoaded=true;trackCapPeer=false;"
+        /* Peers run the same firmware, so they answer 503 too. Reported once
+         * per attempt: five peers must not mean five alert boxes. */
+        "var peerTrkBusy=false;"
+        "function loadPeerTracks(){peerTracksLoaded=true;trackCapPeer=false;peerTrkBusy=false;"
         "peerTrackLayer.clearLayers();"
         "ITS_MAP_PEERS.forEach(function(hp,idx){"
         "fetch('http://'+hp+'/tracks.json?days='+ITS_MAP_TRACK_DAYS,{cache:'no-store'})"
-        ".then(function(r){return r.json();}).then(function(d){"
+        ".then(function(r){if(r.status===503)throw 503;return r.json();}).then(function(d){"
         "drawTracks(trkArr(d),peerTrackLayer,PEER_COLORS[idx%PEER_COLORS.length],hp);"
         "if(d&&d.c)trackCapPeer=true;trackCap=trackCapSelf||trackCapPeer;updateTrackNote();"
         /* A peer that is off or unreachable is skipped silently, exactly like
          * the live marker poll -- one missing receiver must not cost the
          * others their tracks. */
-        "}).catch(function(){});});}"
+        "}).catch(function(e){if(e===503&&!peerTrkBusy){peerTrkBusy=true;"
+        "peerTracksLoaded=false;alert(ITS_MAP_BUSY);}});});}"
         "var markers={};var VMEM={};var haveView=false;var liveMode=true;"
         "var EMOJI={Ped:'\\ud83d\\udeb6',Cyclist:'\\ud83d\\udeb4',Moped:'\\ud83d\\udef5',"
         "Motorcycle:'\\ud83c\\udfcd',Car:'\\ud83d\\ude97',Bus:'\\ud83d\\ude8c',"
@@ -3200,18 +3547,28 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "function fetchSpat(){if(!liveMode)return;"
         "fetch('/spatem.json',{cache:'no-store'}).then(function(r){return r.json();})"
         ".then(function(a){var m={};for(var i=0;i<a.length;i++){m[a[i].i]=a[i];"
-        "var k=a[i].rg+'/'+a[i].id;PHASE[k]={};"
-        "for(var j=0;j<a[i].g.length;j++)PHASE[k][a[i].g[j][0]]=a[i].g[j][1];}"
+        "var k=a[i].rg+'/'+a[i].id;PHASE[k]={};MTXT[k]={};"
+        "for(var j=0;j<a[i].g.length;j++){PHASE[k][a[i].g[j][0]]=a[i].g[j][1];"
+        /* Field 3 is the ready-translated movement text the server already sends. */
+        "MTXT[k][a[i].g[j][0]]=a[i].g[j][3];}}"
         "SPAT=m;paintLanes();}).catch(function(){});}"
         "fetchSpat();setInterval(fetchSpat,3000);"
         /* Lane geometry: fetched once (the layout is static), then just
          * recoloured whenever new phases arrive. Ingress lanes take their
          * signal group's colour; lanes without a group stay neutral grey. */
-        "var LANES=[],PHASE={};"
+        /* MTXT shares this var statement with PHASE on purpose: fetchSpat() runs
+         * before this line and only its async callback may touch either. */
+        "var LANES=[],PHASE={},MTXT={};"
         "function paintLanes(){for(var i=0;i<LANES.length;i++){var o=LANES[i];"
         "var ph=(PHASE[o.k]||{})[o.sg];"
         "o.line.setStyle({color:(o.sg<0?'#7a848c':spatColor(ph)),"
-        "weight:(o.t==1?3:4),opacity:(o.sg<0?0.5:0.9),dashArray:(o.t==1?'4,4':null)});}}"
+        "weight:(o.t==1?3:4),opacity:(o.sg<0?0.5:0.9),dashArray:(o.t==1?'4,4':null)});"
+        /* Movement text arrives with every phase poll, the popup was bound once.
+         * Not run through htxt(): it comes from the T() table and carries entities. */
+        "var mv=(MTXT[o.k]||{})[o.sg];"
+        "if(o.pt){var pc=o.pt+(mv?' \\u00b7 '+mv:'');"
+        /* Only on change -- rewriting an open popup every 3s drops a selection. */
+        "if(pc!==o.pc){o.pc=pc;o.line.setPopupContent(pc);}}}}"
         "function loadLanes(){fetch('/lanes.json',{cache:'no-store'})"
         ".then(function(r){return r.json();}).then(function(a){"
         "for(var i=0;i<LANES.length;i++)map.removeLayer(LANES[i].line);LANES=[];"
@@ -3219,10 +3576,11 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         /* `ln` deliberately not named L -- that is Leaflet's own global. */
         "for(var j=0;j<X.lanes.length;j++){var ln=X.lanes[j];"
         "var pts=ln.p.map(function(p){return [p[0]/1e7,p[1]/1e7];});"
+        "var pt='Spur '+ln.l+(ln.sg>=0?' \\u00b7 SG '+ln.sg:'')"
+        "+(ln.t==1?' \\u00b7 \\u00dcbergang':'');"
         "var pl=L.polyline(pts,{color:'#7a848c',weight:4,opacity:0.8}).addTo(map);"
-        "pl.bindPopup('Spur '+ln.l+(ln.sg>=0?' \\u00b7 SG '+ln.sg:'')"
-        "+(ln.t==1?' \\u00b7 \\u00dcbergang':''));"
-        "LANES.push({line:pl,sg:ln.sg,t:ln.t,k:k});}}"
+        "pl.bindPopup(pt);"
+        "LANES.push({line:pl,sg:ln.sg,t:ln.t,k:k,pt:pt});}}"
         "paintLanes();}).catch(function(){});}"
         "loadLanes();setInterval(loadLanes,120000);"
         "window.addEventListener('pagehide',function(){closing=true;if(ws)ws.close();});"
@@ -3329,7 +3687,8 @@ static esp_err_t map_get_handler(httpd_req_t *req)
 /* GET /spatem.json -- current traffic-light phases, keyed by the RSU's
  * stationId so /map can enrich that marker's popup. RAM-only (no SD needed),
  * so it lives outside the SD guard below. Shape:
- * [{"i":stationId,"rg":region,"id":id,"rev":n,"age":secs,"g":[[sg,phase],...]}] */
+ * [{"i":stationId,"rg":region,"id":id,"rev":n,"age":secs,
+ *   "g":[[sg,phase,secsLeft,"movement text"],...]}] */
 /* Defined further down with the rest of the traffic-page helpers. */
 static void spat_movement_text(const spatem_intersection_t *e, uint8_t sg,
                                char *out, size_t out_size);
@@ -3817,7 +4176,8 @@ static const char *spat_phase_name(uint8_t phase)
     switch (phase)
     {
     case 5: case 6:          return T(S_TRF_PH_GREEN);
-    case 4: case 7: case 8: case 9: return T(S_TRF_PH_AMBER);
+    case 4:                  return T(S_TRF_PH_REDAMBER);
+    case 7: case 8: case 9:  return T(S_TRF_PH_AMBER);
     case 2: case 3:          return T(S_TRF_PH_RED);
     default:                 return T(S_TRF_PH_OTHER);
     }
@@ -3865,15 +4225,16 @@ static void emit_traffic_lights(httpd_req_t *req)
     static spatem_intersection_t ints[SPATEM_MAX_INT];
     int ni = spatem_snapshot(ints, SPATEM_MAX_INT);
 
-    char h[128];
-    snprintf(h, sizeof(h), "<div class='sect'><h2>&#128678; %s</h2>", T(S_TRF_LIGHTS));
+    char h[160];
+    snprintf(h, sizeof(h), "<div class='grp' id='lights'><h2 class='ico'>&#128678; %s</h2>",
+             T(S_TRF_LIGHTS));
     httpd_resp_send_chunk(req, h, HTTPD_RESP_USE_STRLEN);
 
     if (ni == 0)
     {
         /* The section div is open -- every exit below must close it. */
         char none[192];
-        snprintf(none, sizeof(none), "<p><small>%s</small></p></div>", T(S_TRF_LIGHTS_NONE));
+        snprintf(none, sizeof(none), "<p class='note'>%s</p></div>", T(S_TRF_LIGHTS_NONE));
         httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
         return;
     }
@@ -3881,12 +4242,12 @@ static void emit_traffic_lights(httpd_req_t *req)
     /* Explanation + colour legend, so the bare signal-group numbers below
      * aren't cryptic. */
     char legend[1280];
-    #define LG_DOT(col) "<span style='display:inline-block;width:11px;height:11px;" \
-        "border-radius:50%%;background:" col ";vertical-align:middle;margin:0 4px 0 10px'></span>"
+    #define LG_DOT(col) "<span class='dot' style='background:" col ";margin:0 4px 0 10px'></span>"
     snprintf(legend, sizeof(legend),
-        "<p><small>%s" LG_DOT("#2ecc40") "%s" LG_DOT("#f2b134") "%s"
-        LG_DOT("#e74c3c") "%s</small></p>",
-        T(S_TRF_LIGHTS_INTRO), T(S_TRF_PH_GREEN), T(S_TRF_PH_AMBER), T(S_TRF_PH_RED));
+        "<p class='note'>%s" LG_DOT("#2ecc40") "%s" LG_DOT("#e67e22") "%s"
+        LG_DOT("#f2b134") "%s" LG_DOT("#e74c3c") "%s</p>",
+        T(S_TRF_LIGHTS_INTRO), T(S_TRF_PH_GREEN), T(S_TRF_PH_REDAMBER),
+        T(S_TRF_PH_AMBER), T(S_TRF_PH_RED));
     #undef LG_DOT
     httpd_resp_send_chunk(req, legend, HTTPD_RESP_USE_STRLEN);
 
@@ -3914,15 +4275,15 @@ static void emit_traffic_lights(httpd_req_t *req)
         char head[512];
         if (e->name[0])
             snprintf(head, sizeof(head),
-                "<div class='isec'><p style='margin:0 0 4px'><b>%s %s</b> "
-                "<small>(%u/%u &middot; Rev %u &middot; %s)</small></p>"
-                "<div style='margin-bottom:10px'>",
+                "<div class='isec'><div class='t'>%s %s "
+                "<small>(%u/%u &middot; Rev %u &middot; %s)</small></div>"
+                "<div class='chips'>",
                 T(S_TRF_INTERSECTION), nameesc, (unsigned)e->region,
                 (unsigned)e->id, (unsigned)e->revision, agebuf);
         else
             snprintf(head, sizeof(head),
-                "<div class='isec'><p style='margin:0 0 4px'><b>%s %u/%u</b> "
-                "<small>(Rev %u &middot; %s)</small></p><div style='margin-bottom:10px'>",
+                "<div class='isec'><div class='t'>%s %u/%u "
+                "<small>(Rev %u &middot; %s)</small></div><div class='chips'>",
                 T(S_TRF_INTERSECTION), (unsigned)e->region, (unsigned)e->id,
                 (unsigned)e->revision, agebuf);
         httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
@@ -3935,8 +4296,8 @@ static void emit_traffic_lights(httpd_req_t *req)
         {
             char stline[448];
             snprintf(stline, sizeof(stline),
-                "<p style='margin:0 0 6px'><small style='color:%s'>%s%s</small></p>",
-                st_alert ? "#e74c3c" : "#94a0a8", st_alert ? "&#9888; " : "", stbuf);
+                "<p class='m' style='color:%s'>%s%s</p>",
+                st_alert ? "#e74c3c" : "var(--mute)", st_alert ? "&#9888; " : "", stbuf);
             httpd_resp_send_chunk(req, stline, HTTPD_RESP_USE_STRLEN);
         }
 
@@ -3945,7 +4306,7 @@ static void emit_traffic_lights(httpd_req_t *req)
         {
             char geo[192], *g = geo;
             size_t left = sizeof(geo);
-            int k = snprintf(g, left, "<p style='margin:0 0 6px'><small style='color:#94a0a8'>");
+            int k = snprintf(g, left, "<p class='m'>");
             g += k; left -= (size_t)k;
             if (e->speed_max_kmh)
             {
@@ -3960,9 +4321,14 @@ static void emit_traffic_lights(httpd_req_t *req)
                          current_lang == LANG_DE ? "Spurbreite" : "Lane width",
                          (unsigned)(e->lane_width_cm / 100),
                          (unsigned)(e->lane_width_cm % 100));
-            strlcat(geo, "</small></p>", sizeof(geo));
+            strlcat(geo, "</p>", sizeof(geo));
             httpd_resp_send_chunk(req, geo, HTTPD_RESP_USE_STRLEN);
         }
+
+        /* Read before the chips, not after: the running-phase clock below sits
+         * on the chip, and the tallies are the only place that start is kept. */
+        static EXT_RAM_BSS_ATTR spatem_phases_t phbuf;
+        const spatem_phases_t *ph = spatem_phases(e->region, e->id, &phbuf) ? &phbuf : NULL;
 
         for (int s = 0; s < e->n; s++)
         {
@@ -3973,7 +4339,7 @@ static void emit_traffic_lights(httpd_req_t *req)
              * the leading sign says so instead of reading like a countdown. */
             char cd[64] = "";
             if (e->change_at[s] > now && e->change_at[s] - now <= 600)
-                snprintf(cd, sizeof(cd), " <small style='color:#94a0a8'>&ge;%lus</small>",
+                snprintf(cd, sizeof(cd), " <small>&ge;%lus</small>",
                          (unsigned long)(e->change_at[s] - now));
 
             /* Prefer what the group actually controls over its bare number;
@@ -3983,18 +4349,39 @@ static void emit_traffic_lights(httpd_req_t *req)
             spat_movement_text(e, e->sg[s], mv, sizeof(mv));
             char label[160];
             if (mv[0])
-                snprintf(label, sizeof(label), "%s <small style='color:#94a0a8'>(%u)</small>",
+                snprintf(label, sizeof(label), "%s <small>(%u)</small>",
                          mv, (unsigned)e->sg[s]);
             else
                 snprintf(label, sizeof(label), "%u", (unsigned)e->sg[s]);
 
-            char chip[512];
+            /* Rows are keyed by group id, e->sg[] is message order -- indexing
+             * the tallies by s would print one group's clock under another's dot. */
+            char run[128] = "";
+            for (uint8_t r = 0; ph && r < ph->n_rows; r++)
+                if (ph->sg[r] == e->sg[s])
+                {
+                    /* Only with the flip actually watched AND the group still
+                     * being heard: otherwise the number just counts silence. */
+                    if (((ph->armed >> r) & 1u) && ph->now_mono > ph->since[r] &&
+                        ph->now_mono - ph->last_mono[r] <= SPAT_GAP_SEC)
+                    {
+                        /* Formatted, not raw seconds: this junction rests in one
+                         * phase for hours, and "23412 s" reads as noise. */
+                        char rd[40];
+                        format_uptime(ph->now_mono - ph->since[r], rd, sizeof(rd));
+                        snprintf(run, sizeof(run),
+                                 " <small>%s %s</small>",
+                                 T(S_TRF_PH_SINCE), rd);
+                    }
+                    break;
+                }
+
+            char chip[768];
             snprintf(chip, sizeof(chip),
-                "<span title='%s' style='display:inline-block;margin:2px 10px 2px 0;white-space:nowrap'>"
-                "<span style='display:inline-block;width:13px;height:13px;border-radius:50%%;"
-                "background:%s;vertical-align:middle;margin-right:4px'></span>%s%s</span>",
+                "<span class='chip' title='%s'><i class='dot' style='background:%s'></i>"
+                "%s%s%s</span>",
                 spat_phase_name(e->phase[s]), spat_phase_color(e->phase[s]),
-                label, cd);
+                label, cd, run);
             httpd_resp_send_chunk(req, chip, HTTPD_RESP_USE_STRLEN);
         }
         httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
@@ -4002,38 +4389,41 @@ static void emit_traffic_lights(httpd_req_t *req)
         /* Measured phase durations. The controller never states these; they
          * come from watching each group flip, so they only appear once a few
          * full phases have been seen. */
-        static EXT_RAM_BSS_ATTR spatem_phases_t phbuf;
-        const spatem_phases_t *ph = spatem_phases(e->region, e->id, &phbuf) ? &phbuf : NULL;
         bool any = false;
         for (uint8_t r = 0; ph && r < ph->n_rows && !any; r++)
-            if (ph->cnt[r][0] || ph->cnt[r][2]) any = true;
+            if (ph->cnt[r][0] || ph->cnt[r][3]) any = true;
         if (any)
         {
             char dh[320];
             HTML_PRINTF(dh,
                 "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th>"
-                "<th>%s</th><th>%s</th></tr></thead><tbody>",
-                T(S_TRF_SG), T(S_TRF_PH_GREEN), T(S_TRF_PH_RED), T(S_TRF_CYCLES));
+                "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
+                T(S_TRF_SG), T(S_TRF_PH_GREEN), T(S_TRF_PH_REDAMBER),
+                T(S_TRF_PH_AMBER), T(S_TRF_PH_RED), T(S_TRF_CYCLES));
             httpd_resp_send_chunk(req, dh, HTTPD_RESP_USE_STRLEN);
             /* Walk the TALLY ROWS, not the message's group order: rows are
              * keyed by signal group id, so indexing them with the position in
              * e->sg[] would print one group's numbers under another's name. */
             for (uint8_t r = 0; r < ph->n_rows; r++)
             {
-                if (!ph->cnt[r][0] && !ph->cnt[r][2])
+                if (!ph->cnt[r][0] && !ph->cnt[r][3])
                     continue;
-                char gr[48] = "-", rd[48] = "-";
-                if (ph->cnt[r][0])
-                    snprintf(gr, sizeof(gr), "%lu s <small>(max %lu)</small>",
-                             (unsigned long)(ph->secs[r][0] / ph->cnt[r][0]),
-                             (unsigned long)ph->max[r][0]);
-                if (ph->cnt[r][2])
-                    snprintf(rd, sizeof(rd), "%lu s <small>(max %lu)</small>",
-                             (unsigned long)(ph->secs[r][2] / ph->cnt[r][2]),
-                             (unsigned long)ph->max[r][2]);
-                char drow[256];
-                HTML_PRINTF(drow, "<tr><td>%u</td><td>%s</td><td>%s</td><td>%lu</td></tr>",
-                            (unsigned)ph->sg[r], gr, rd, (unsigned long)ph->cnt[r][0]);
+                char cell[4][48];
+                for (int c = 0; c < 4; c++)
+                {
+                    if (ph->cnt[r][c])
+                        snprintf(cell[c], sizeof(cell[c]), "%lu s <small>(max %lu)</small>",
+                                 (unsigned long)(ph->secs[r][c] / ph->cnt[r][c]),
+                                 (unsigned long)ph->max[r][c]);
+                    else
+                        snprintf(cell[c], sizeof(cell[c]), "-");
+                }
+                char drow[320];
+                HTML_PRINTF(drow,
+                            "<tr><td>%u</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                            "<td>%lu</td></tr>",
+                            (unsigned)ph->sg[r], cell[0], cell[1], cell[2], cell[3],
+                            (unsigned long)ph->cnt[r][0]);
                 httpd_resp_send_chunk(req, drow, HTTPD_RESP_USE_STRLEN);
             }
             httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
@@ -4043,7 +4433,7 @@ static void emit_traffic_lights(httpd_req_t *req)
             /* Nothing measured yet is not the same as broken -- a traffic-
              * actuated light can hold one phase for a long time at night. */
             char waitmsg[320];
-            HTML_PRINTF(waitmsg, "<p><small>%s</small></p>", T(S_TRF_PH_WAIT));
+            HTML_PRINTF(waitmsg, "<p class='note'>%s</p>", T(S_TRF_PH_WAIT));
             httpd_resp_send_chunk(req, waitmsg, HTTPD_RESP_USE_STRLEN);
         }
         /* closes this intersection's .isec */
@@ -4096,6 +4486,71 @@ static uint32_t trf_bucket_key(const stat_hour_t *h, bool daily)
     return (uint32_t)((lt.tm_year + 1900) * 512 + lt.tm_yday);
 }
 
+/* The sender-list lookup takes a lock; several warning rows ask about the
+ * same addresses, so memo the answers -- but never a busy list. */
+typedef struct { uint8_t mac[6]; char name[INV_NAME_LEN]; uint32_t id; int8_t hit; } relay_memo_t;
+#define RELAY_MEMO_N 4
+
+static int relay_lookup(relay_memo_t *m, int *n, const uint8_t *mac,
+                        char *out, size_t cap, uint32_t *id_out)
+{
+    for (int i = 0; i < *n; i++)
+        if (memcmp(m[i].mac, mac, 6) == 0)
+        {
+            snprintf(out, cap, "%s", m[i].name);
+            if (id_out) *id_out = m[i].id;
+            return m[i].hit;
+        }
+    int r = inventory_lookup_mac(mac, out, cap, id_out);
+    /* A busy list is not an answer -- memoing it would let one timeout decide
+     * every remaining row of the page. */
+    if (r >= 0 && *n < RELAY_MEMO_N)
+    {
+        memcpy(m[*n].mac, mac, 6);
+        snprintf(m[*n].name, sizeof(m[*n].name), "%s", out);
+        m[*n].id = id_out ? *id_out : 0;
+        m[*n].hit = (int8_t)r;
+        (*n)++;
+    }
+    return r;
+}
+
+/* Warnings per OBSERVED hour, scaled to the strongest bucket. A bucket that was
+ * never observed is left out entirely -- a zero there would read as "quiet". */
+static void emit_profile(httpd_req_t *req, const char *title, const char *colhdr,
+                         const char *const *labels,
+                         const uint32_t *ev, const uint32_t *obs, int nb)
+{
+    uint32_t peak = 1;
+    for (int b = 0; b < nb; b++)
+        if (obs[b])
+        {
+            uint32_t v = (uint32_t)((uint64_t)ev[b] * 100 / obs[b]);
+            if (v > peak) peak = v;
+        }
+    char h[256];
+    snprintf(h, sizeof(h),
+             "<h3>%s</h3><div class='scroll'><table><thead><tr><th>%s</th>"
+             "<th>%s</th></tr></thead><tbody>",
+             title, colhdr, T(S_EVT_PERHOUR));
+    httpd_resp_send_chunk(req, h, HTTPD_RESP_USE_STRLEN);
+    for (int b = 0; b < nb; b++)
+    {
+        if (!obs[b])
+            continue;
+        uint32_t v = (uint32_t)((uint64_t)ev[b] * 100 / obs[b]);
+        unsigned pct = (unsigned)((uint64_t)v * 100 / peak);
+        char r[256];
+        snprintf(r, sizeof(r),
+            "<tr><td>%s</td><td>%lu.%02lu <small>(%lu / %lu)</small>"
+            "<div class='bar' style='width:%u%%'></div></td></tr>",
+            labels[b], (unsigned long)(v / 100), (unsigned long)(v % 100),
+            (unsigned long)ev[b], (unsigned long)obs[b], pct);
+        httpd_resp_send_chunk(req, r, HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t traffic_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
@@ -4111,6 +4566,9 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         uint32_t h = (uint32_t)strtoul(val, NULL, 10);
         hours = (h == 168 || h == 720) ? h : 24;
     }
+    /* Only the 24 h view changes fast enough to be worth a 5 s poll -- the
+     * 30 d page is ~99 KB and would be refetched whole every interval. */
+    if (hours != 24) ri = 0;
 
     static EXT_RAM_BSS_ATTR stat_hour_t rows[720];
     bool hist_ok = true;
@@ -4121,13 +4579,31 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     const char *lc = current_lang == LANG_DE ? "de" : "en";
     char head[768];
     snprintf(head, sizeof(head),
-        "<p><small>%s</small></p>"
-        "<p>%s: <a href='/traffic?hours=24&lang=%s'>%s</a> &middot; "
+        "<p class='note'>%s</p>"
+        "<p class='jump'>%s: <a href='/traffic?hours=24&lang=%s'>%s</a> &middot; "
         "<a href='/traffic?hours=168&lang=%s'>%s</a> &middot; "
         "<a href='/traffic?hours=720&lang=%s'>%s</a></p>",
         T(S_TRF_INTRO), T(S_TRF_WINDOW),
         lc, T(S_TRF_W_24H), lc, T(S_TRF_W_7D), lc, T(S_TRF_W_30D));
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+    /* Outside #trf-body on purpose: inside, the 5 s swap would rebuild it.
+     * The warnings section is only emitted when there are hourly rows. */
+    char jump[320];
+    /* Clamped: snprintf returns the length it WANTED, so an unchecked sum
+     * would step past the buffer instead of merely truncating. */
+    int jr = snprintf(jump, sizeof(jump),
+        "<p class='jump'>%s: <a href='#lights'>%s</a> &middot; <a href='#stats'>%s</a>",
+        T(S_TRF_JUMP), T(S_TRF_LIGHTS), T(S_TRF_STATS));
+    size_t jo = (jr < 0 || (size_t)jr >= sizeof(jump)) ? sizeof(jump) - 1 : (size_t)jr;
+    if (n > 0)
+    {
+        jr = snprintf(jump + jo, sizeof(jump) - jo,
+                      " &middot; <a href='#denm'>%s</a>", T(S_EVT_TITLE));
+        jo += (jr < 0 || (size_t)jr >= sizeof(jump) - jo) ? sizeof(jump) - jo - 1 : (size_t)jr;
+    }
+    snprintf(jump + jo, sizeof(jump) - jo, "</p>");
+    httpd_resp_send_chunk(req, jump, HTTPD_RESP_USE_STRLEN);
 
     /* Everything below the intro/selector is the auto-refreshed fragment. */
     httpd_resp_send_chunk(req, "<div id='trf-body'>", HTTPD_RESP_USE_STRLEN);
@@ -4136,7 +4612,7 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         /* Inside the fragment: the page swaps only this part on refresh, so
          * the note must appear and disappear with the data it describes. */
         char warn[384];
-        HTML_PRINTF(warn, "<p><small>&#9888; %s</small></p>", T(S_TRF_BUSY));
+        HTML_PRINTF(warn, "<p class='note'>&#9888; %s</p>", T(S_TRF_BUSY));
         httpd_resp_send_chunk(req, warn, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -4148,7 +4624,7 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     {
         char nd[384];
         snprintf(nd, sizeof(nd),
-                 "<div class='sect'><h2>&#128202; %s</h2>"
+                 "<div class='grp' id='stats'><h2 class='ico'>&#128202; %s</h2>"
                  "<div class='warn'>%s</div></div>",
                  T(S_TRF_STATS), T(S_TRF_NODATA));
         httpd_resp_send_chunk(req, nd, HTTPD_RESP_USE_STRLEN);
@@ -4186,23 +4662,103 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
             if (rows[i].speed_legacy && rows[i].sp_cnt[c]) speed_mixed = true;
     }
 
+    /* --- Availability. The newest row is the hour still RUNNING and would
+     * always read as a drop, so all of this stops at the last finished hour. */
+    uint32_t now_h = (uint32_t)(time(NULL) / 3600);
+    int nc = n;
+    while (nc > 0 && rows[nc - 1].hour >= now_h) nc--;
+    uint32_t med = 0, silent = 0, weak = 0;
+    bool steady = false;
+    if (nc > 0)
+    {
+        /* Median by binary search on the value instead of a sorted copy:
+         * exact, and it needs no 2.8 KB of scratch. */
+        uint32_t lo = 0, hi = 0;
+        for (int k = 0; k < nc; k++)
+            if (rows[k].total > hi) hi = rows[k].total;
+        while (lo < hi)
+        {
+            uint32_t mid = lo + (hi - lo + 1) / 2;
+            int cnt = 0;
+            for (int k = 0; k < nc; k++)
+                if (rows[k].total >= mid) cnt++;
+            if (cnt * 2 >= nc) lo = mid; else hi = mid - 1;
+        }
+        med = lo;
+        /* An hour in which nothing arrived writes no row at all, so this counts
+         * silence -- it is not proof that the receiver was down. */
+        /* Anchored at the window start, not at the oldest row found: a gap at
+         * the old edge would shrink the denominator and read as no gap. */
+        uint32_t from_h = now_h > hours - 1 ? now_h - (hours - 1) : 0;
+        uint64_t up_s = esp_timer_get_time() / 1000000ull;
+        time_t nowt = time(NULL);
+        if (nowt > (time_t)up_s)
+        {
+            uint32_t boot_h = (uint32_t)((nowt - (time_t)up_s) / 3600);
+            if (boot_h > from_h) from_h = boot_h;
+        }
+        uint32_t span = now_h > from_h ? now_h - from_h : 0;
+        silent = span > (uint32_t)nc ? span - (uint32_t)nc : 0;
+        int near = 0;
+        for (int k = 0; k < nc; k++)
+        {
+            uint64_t d = rows[k].total > med ? rows[k].total - med : med - rows[k].total;
+            if (d * 10 <= (uint64_t)med) near++;
+            if (med && (uint64_t)rows[k].total * 4 < med) weak++;
+        }
+        /* Only where a permanent transmitter dominates is a low hour a gap:
+         * with traffic-only reception the total drops every night by itself. */
+        steady = hist_ok && med && nc >= 6 && near * 3 >= nc * 2;
+    }
+    /* An incomplete read would make the counts look worse than reality. */
+    bool av_ok = hist_ok && nc > 0;
+
     char summary[640];
     snprintf(summary, sizeof(summary),
-        "<div class='sect'><h2>&#128202; %s</h2>"
-        "<div class='cards'>"
-        "<div class='card'><div class='l'>%s</div><div class='v'>%llu</div></div>"
-        "<div class='card'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>"
-        "</div>",
+        "<div class='grp' id='stats'><h2 class='ico'>&#128202; %s</h2>"
+        "<div class='grid'>"
+        "<div class='cell'><div class='l'>%s</div><div class='v'>%llu</div></div>"
+        "<div class='cell'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>",
         T(S_TRF_STATS),
         T(S_TRF_TOTAL), (unsigned long long)tot,
         T(S_TRF_SPEED), (unsigned long)(osp_cnt ? osp_sum / osp_cnt : 0), (unsigned long)osp_max);
     httpd_resp_send_chunk(req, summary, HTTPD_RESP_USE_STRLEN);
+
+    /* Own chunk so these two can join the same card row; it closes .cards. */
+    char avcards[288];
+    size_t ao = 0;
+    if (av_ok)
+    {
+        /* Clamped, same reason as `jump` above. */
+        int ar = snprintf(avcards, sizeof(avcards),
+            "<div class='cell'><div class='l'>%s</div><div class='v'>%lu</div></div>",
+            T(S_TRF_SILENT), (unsigned long)silent);
+        ao = (ar < 0 || (size_t)ar >= sizeof(avcards)) ? sizeof(avcards) - 1 : (size_t)ar;
+        if (steady)
+        {
+            ar = snprintf(avcards + ao, sizeof(avcards) - ao,
+                "<div class='cell'><div class='l'>%s</div><div class='v'>%lu</div></div>",
+                T(S_TRF_WEAKHOURS), (unsigned long)weak);
+            ao += (ar < 0 || (size_t)ar >= sizeof(avcards) - ao)
+                  ? sizeof(avcards) - ao - 1 : (size_t)ar;
+        }
+    }
+    snprintf(avcards + ao, sizeof(avcards) - ao, "</div>");
+    httpd_resp_send_chunk(req, avcards, HTTPD_RESP_USE_STRLEN);
+    if (av_ok)
+    {
+        /* Mandatory, not decoration: without it the page shows its own reboots
+         * as a fault of the transmitter. */
+        char avnote[448];
+        HTML_PRINTF(avnote, "<p class='note'>%s</p>", T(S_TRF_AVAIL_HINT));
+        httpd_resp_send_chunk(req, avnote, HTTPD_RESP_USE_STRLEN);
+    }
     /* Next to the overall card, not just the per-type ones: the overall card
      * is always rendered, the per-type block only when a vehicle reported. */
     if (speed_mixed)
     {
         char note[352];
-        snprintf(note, sizeof(note), "<p class='hint'>%s</p>", T(S_TRF_SPEED_MIXED));
+        snprintf(note, sizeof(note), "<p class='note'>%s</p>", T(S_TRF_SPEED_MIXED));
         httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -4213,7 +4769,7 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     if (any_speed)
     {
         char sh[128];
-        snprintf(sh, sizeof(sh), "<h3>%s</h3><div class='cards'>", T(S_TRF_SPEED_BY_TYPE));
+        snprintf(sh, sizeof(sh), "<h3>%s</h3><div class='grid'>", T(S_TRF_SPEED_BY_TYPE));
         httpd_resp_send_chunk(req, sh, HTTPD_RESP_USE_STRLEN);
         for (unsigned k = 0; k < SPCATS_N; k++)
         {
@@ -4221,7 +4777,7 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
             if (wsp_cnt[c] == 0) continue;
             char card[192];
             snprintf(card, sizeof(card),
-                "<div class='card'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>",
+                "<div class='cell'><div class='l'>%s</div><div class='v'>%lu / %lu</div></div>",
                 trf_cat_label((uint8_t)(c == STAT_CAT_CAR ? 5 : c == STAT_CAT_BUS ? 6 :
                                         c == STAT_CAT_TRUCK ? 7 : 2)),
                 (unsigned long)(wsp_sum[c] / wsp_cnt[c]), (unsigned long)wsp_max[c]);
@@ -4234,12 +4790,13 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
      * hid the rest -- roll up per calendar day instead. */
     bool daily = (hours > 48);
 
-    httpd_resp_send_chunk(req, "<div class='scroll'><table><tr><th>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<div class='scroll'><table><thead><tr><th>",
+                          HTTPD_RESP_USE_STRLEN);
     char thead[448];
     snprintf(thead, sizeof(thead),
-        "%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
-        "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>",
-        daily ? T(S_TRF_DAY) : T(S_TRF_HOUR), T(S_TRF_TOTAL), T(S_TRF_SENDERS),
+        "%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
+        "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
+        daily ? T(S_TRF_DAY) : T(S_TRF_HOUR), T(S_TRF_TOTAL),
         T(S_CAT_CAR), T(S_CAT_BUS), T(S_CAT_TRUCK),
         T(S_CAT_TWOWHEEL), T(S_CAT_PED), T(S_CAT_RSU), T(S_CAT_OTHER), T(S_TRF_SPEED));
     httpd_resp_send_chunk(req, thead, HTTPD_RESP_USE_STRLEN);
@@ -4305,43 +4862,76 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         }
         unsigned pct = (unsigned)((uint64_t)acc.total * 100 / bar_max);
 
-        /* Hours recorded before 0.27.0 carry no identifier count; show a dash
-         * rather than a zero that would read as "nothing was there". */
-        char idcell[24];
-        if (senders)
-            snprintf(idcell, sizeof(idcell), "%s%lu",
-                     capped ? "&ge;" : "", (unsigned long)senders);
-        else
-            snprintf(idcell, sizeof(idcell), "&ndash;");
+        /* Hours before 0.27.0 carry no identifier count -- a dash, not a zero
+         * that would read as "nothing was there". &ge; when it is a lower bound. */
+        const char *pre = senders ? (capped ? "&ge;" : "") : NULL;
+        char cls[STAT_NCAT][16];
+        for (int c = 0; c < STAT_NCAT; c++)
+            if (pre)
+                snprintf(cls[c], sizeof(cls[c]), "%s%lu", pre, (unsigned long)acc.senders[c]);
+            else
+                snprintf(cls[c], sizeof(cls[c]), "&ndash;");
+
+        /* Per-category speed for this bucket, naming only what actually
+         * measured. Hourly only: a daily mean answers a different question. */
+        char spd2[288] = "";
+        if (!daily)
+        {
+            char cats[224];
+            size_t so = 0;
+            unsigned ncat = 0;
+            for (unsigned k = 0; k < SPCATS_N && so + 56 < sizeof(cats); k++)
+            {
+                int c = spcats[k];
+                if (!acc.sp_cnt[c]) continue;
+                ncat++;
+                so += snprintf(cats + so, sizeof(cats) - so, "%s%s %lu/%lu",
+                               so ? " &middot; " : "",
+                               T(c == STAT_CAT_CAR   ? S_CAT_CAR :
+                                 c == STAT_CAT_BUS   ? S_CAT_BUS :
+                                 c == STAT_CAT_TRUCK ? S_CAT_TRUCK : S_CAT_TWOWHEEL),
+                               (unsigned long)(acc.sp_sum[c] / acc.sp_cnt[c]),
+                               (unsigned long)acc.sp_max[c]);
+            }
+            /* A single category would only repeat the cell above it. */
+            if (ncat >= 2)
+                snprintf(spd2, sizeof(spd2), "<div class='sub'>%s</div>", cats);
+        }
+
+        /* Same threshold as the "far below average" card: never the running
+         * hour, and never a daily sum against an hourly median. */
+        const char *rowcls = (!daily && steady && key < now_h &&
+                              (uint64_t)acc.total * 4 < med) ? " class='v-bad'" : "";
 
         /* Number first, thin bar on its own line below -- the bar can span the
          * full cell without ever colliding with the count. */
-        char row[576];
+        /* Per class the number of distinct identifiers, not messages: one car
+         * at the light sends hundreds and would dwarf a whole bus route. */
+        char row[768];
         snprintf(row, sizeof(row),
             "<tr><td>%s</td>"
-            "<td>%lu<div style='height:4px;background:#f2b134;border-radius:2px;"
-            "width:%u%%;min-width:2px;margin-top:3px'></div></td><td>%s</td>"
-            "<td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%lu</td>"
-            "<td>%lu / %lu</td></tr>",
-            when, (unsigned long)acc.total, pct,
-            idcell,
-            (unsigned long)acc.cat[STAT_CAT_CAR], (unsigned long)acc.cat[STAT_CAT_BUS],
-            (unsigned long)acc.cat[STAT_CAT_TRUCK], (unsigned long)acc.cat[STAT_CAT_TWOWHEEL],
-            (unsigned long)acc.cat[STAT_CAT_PED], (unsigned long)acc.cat[STAT_CAT_RSU],
-            (unsigned long)acc.cat[STAT_CAT_OTHER],
-            (unsigned long)(hsp_cnt ? hsp_sum / hsp_cnt : 0), (unsigned long)hsp_max);
+            "<td%s>%lu<div class='bar' style='width:%u%%'></div></td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%lu / %lu%s</td></tr>",
+            when, rowcls, (unsigned long)acc.total, pct,
+            cls[STAT_CAT_CAR], cls[STAT_CAT_BUS], cls[STAT_CAT_TRUCK],
+            cls[STAT_CAT_TWOWHEEL], cls[STAT_CAT_PED], cls[STAT_CAT_RSU],
+            cls[STAT_CAT_OTHER],
+            (unsigned long)(hsp_cnt ? hsp_sum / hsp_cnt : 0), (unsigned long)hsp_max, spd2);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
-    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
 
     char snote[1024];
-    HTML_PRINTF(snote, "<p><small>%s%s%s %s</small></p></div>", T(S_TRF_SENDERS_NOTE),
+    HTML_PRINTF(snote, "<p class='note'>%s%s%s %s</p></div>", T(S_TRF_SENDERS_NOTE),
                 daily ? " " : "", daily ? T(S_TRF_SENDERS_DAY) : "", T(S_TRF_IDENT_NOTE));
     httpd_resp_send_chunk(req, snote, HTTPD_RESP_USE_STRLEN);
 
     /* --- Warning events (DENM) for the same window, newest first. --- */
-    char etitle[96];
-    snprintf(etitle, sizeof(etitle), "<div class='sect'><h2>&#9888;&#65039; %s</h2>", T(S_EVT_TITLE));
+    char etitle[128];
+    snprintf(etitle, sizeof(etitle),
+             "<div class='grp' id='denm'><h2 class='ico'>&#9888;&#65039; %s</h2>",
+             T(S_EVT_TITLE));
     httpd_resp_send_chunk(req, etitle, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR event_rec_t evs[256];
@@ -4351,7 +4941,7 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
     {
         /* "None" is only true if the stored events were actually read. */
         char none[256];
-        snprintf(none, sizeof(none), "<p><small>%s</small></p>",
+        snprintf(none, sizeof(none), "<p class='note'>%s</p>",
                  ev_ok ? T(S_EVT_NONE) : T(S_TRF_BUSY));
         httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
     }
@@ -4363,14 +4953,21 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
         if (cav)
         {
             char note[256];
-            snprintf(note, sizeof(note), "<p><small>%s</small></p>", cav);
+            snprintf(note, sizeof(note), "<p class='note'>%s</p>", cav);
             httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
         }
-        httpd_resp_send_chunk(req, "<div class='scroll'><table><tr><th>", HTTPD_RESP_USE_STRLEN);
-        char eh[160];
-        snprintf(eh, sizeof(eh), "%s</th><th>%s</th><th>%s</th></tr>",
-                 T(S_EVT_TIME), T(S_EVT_SENDER), T(S_EVT_WARNING));
+        httpd_resp_send_chunk(req, "<div class='scroll'><table><thead><tr><th>",
+                              HTTPD_RESP_USE_STRLEN);
+        /* Same heading as /senders on purpose, so both pages read alike; the
+         * unit appears in the header only. */
+        char eh[192];
+        snprintf(eh, sizeof(eh),
+                 "%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
+                 T(S_EVT_TIME), T(S_EVT_SENDER), T(S_SND_RSSI), T(S_EVT_WARNING));
         httpd_resp_send_chunk(req, eh, HTTPD_RESP_USE_STRLEN);
+        relay_memo_t memo[RELAY_MEMO_N];
+        int memo_n = 0;
+        bool any_relay = false;
         for (int i = 0; i < en; i++)
         {
             time_t t = (time_t)evs[i].seconds;
@@ -4392,9 +4989,90 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
                          " &ndash; %s <small>(%u&times;)</small>",
                          until, (unsigned)evs[i].count);
             }
-            /* 44 bytes of markup + when[64] + the category label + cause[160];
-             * sub-causes pushed `cause` past what 256 could hold. */
-            char erow[384];
+            /* Class says WHAT warned, the id says WHO -- both in one cell so the
+             * table does not grow five columns wide on a phone. */
+            char sender[160];
+            snprintf(sender, sizeof(sender), "%s", trf_cat_label(evs[i].station_type));
+            if (evs[i].sender_id)
+            {
+                size_t o = strlen(sender);
+                snprintf(sender + o, sizeof(sender) - o, " <span class='mono'>%lu</span>",
+                         (unsigned long)evs[i].sender_id);
+            }
+            /* Its own test, not an else: the marker belongs on a row whose first
+             * sender arrived without an id too. */
+            if (evs[i].multi_sender)
+            {
+                size_t o = strlen(sender);
+                snprintf(sender + o, sizeof(sender) - o, " <small>(%s)</small>", T(S_EVT_MULTI));
+            }
+            if (evs[i].n_macs > 1)
+            {
+                size_t o = strlen(sender);
+                snprintf(sender + o, sizeof(sender) - o, " <small>(%s)</small>", T(S_EVT_RELAYED));
+            }
+
+            /* Which address relayed comes from the sender list, not from the
+             * order heard -- the fixed RSU is often heard before the vehicle. */
+            char relay[352] = "";
+            if (evs[i].n_macs > 1)
+            {
+                any_relay = true;
+                char nm_a[INV_NAME_LEN] = "", nm_b[INV_NAME_LEN] = "";
+                char nmesc[INV_NAME_LEN * 6] = "";
+                uint32_t id_a = 0, id_b = 0;
+                relay_lookup(memo, &memo_n, evs[i].mac_a, nm_a, sizeof(nm_a), &id_a);
+                relay_lookup(memo, &memo_n, evs[i].mac_b, nm_b, sizeof(nm_b), &id_b);
+                /* The originator is the address carrying the message's own
+                 * station id; an empty name cannot tell the two apart. */
+                const char *nm = nm_b;
+                unsigned via = evs[i].count_b;
+                if (id_b && id_b == evs[i].sender_id)
+                {
+                    nm = nm_a;
+                    via = evs[i].count > evs[i].count_b
+                            ? (unsigned)(evs[i].count - evs[i].count_b) : 0u;
+                }
+                /* The name came off the air (MAPEM) -- escape it, exactly like
+                 * the intersection name on this page. */
+                if (nm[0])
+                    html_escape(nm, nmesc, sizeof(nmesc));
+                /* Only with exactly two sources does the remainder belong to
+                 * the other one; a third makes the split unknowable. */
+                char share[32] = "";
+                if (evs[i].n_macs == 2)
+                    snprintf(share, sizeof(share), " &middot; %u/%u",
+                             via, (unsigned)evs[i].count);
+                snprintf(relay, sizeof(relay),
+                         "<div class='sub'>%s %s &middot; %s %u s%s</div>",
+                         T(S_EVT_RELAY_VIA), nmesc[0] ? nmesc : T(S_EVT_RELAY_UNKNOWN),
+                         T(S_EVT_RELAY_AFTER), (unsigned)evs[i].b_after_s, share);
+            }
+
+            /* A span, not one value: with 60 repeats the last frame says nothing.
+             * It covers this row, not the whole warning. */
+            char lvl[40] = "-";
+            if (evs[i].rssi_min || evs[i].rssi_max)
+            {
+                if (evs[i].rssi_min == evs[i].rssi_max)
+                    snprintf(lvl, sizeof(lvl), "%d", evs[i].rssi_min);
+                else
+                    snprintf(lvl, sizeof(lvl), "%d&hellip;%d", evs[i].rssi_min, evs[i].rssi_max);
+            }
+
+            /* Every stored event carries a position that the table used to
+             * throw away. Both coordinates, like /map's own test. */
+            char poslink[128] = "";
+            if (evs[i].lat_e7 && evs[i].lon_e7)
+                snprintf(poslink, sizeof(poslink),
+                         " <a class='pin' href='/map?lang=%s&amp;lat=%ld&amp;lon=%ld' title='%s'>"
+                         "&#128205;</a>",
+                         current_lang == LANG_EN ? "en" : "de",
+                         (long)evs[i].lat_e7, (long)evs[i].lon_e7, T(S_EVT_SHOWPOS));
+
+            /* 66 bytes of markup + when[64] + poslink[128] + sender[160] +
+             * relay[352] + lvl[40] + cause[160]; sub-causes pushed `cause` past 256. */
+            char erow[1024];
             /* Only cause 1 has been seen in real traffic and confirmed
              * against tshark, so anything else shows its raw code rather
              * than a guessed description. */
@@ -4419,11 +5097,80 @@ static esp_err_t traffic_get_handler(httpd_req_t *req)
             else
                 snprintf(cause, sizeof(cause), "Hazard notification (code %u)", (unsigned)evs[i].cause);
             snprintf(erow, sizeof(erow),
-                "<tr><td>%s</td><td>%s</td><td>&#9888; %s</td></tr>",
-                when, trf_cat_label(evs[i].station_type), cause);
+                "<tr><td>%s%s</td><td>%s%s</td><td class='mono'>%s</td><td>&#9888; %s</td></tr>",
+                when, poslink, sender, relay, lvl, cause);
             httpd_resp_send_chunk(req, erow, HTTPD_RESP_USE_STRLEN);
         }
-        httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+        /* Only when a row actually carries the marker -- everywhere else the
+         * paragraph would explain something the reader cannot see. */
+        if (any_relay)
+        {
+            char rh[512];
+            HTML_PRINTF(rh, "<p class='note'>%s</p>", T(S_EVT_RELAY_HINT));
+            httpd_resp_send_chunk(req, rh, HTTPD_RESP_USE_STRLEN);
+        }
+
+        /* Past 24 h only -- in one day each hour occurs once. A partial hourly
+         * read would leave the denominator short and overstate every bar. */
+        /* ev_ok too: hist_ok covers only the hourly read. Without the stored
+         * warnings the numerator is a handful of open RAM events. */
+        if (hours > 24 && hist_ok && ev_ok)
+        {
+            uint32_t ev_h[24] = {0}, obs_h[24] = {0};
+            uint32_t ev_w[7]  = {0}, obs_w[7]  = {0};
+            /* Same span for numerator and denominator: warnings keep their own
+             * retention, and a capped list starts at its oldest row. */
+            uint32_t ev_days = 30;
+            config_get_u32(CONFIG_INDEX_EVENT_RETAIN_DAYS, &ev_days);
+            if (ev_days == 0 || ev_days > 30) ev_days = 30;
+            uint32_t nw = (uint32_t)time(NULL);
+            uint32_t pf = nw > ev_days * 86400u ? nw - ev_days * 86400u : 0;
+            if (ev_capped && evs[en - 1].seconds > pf) pf = evs[en - 1].seconds;
+            for (int k = 0; k < n; k++)
+            {
+                if ((uint32_t)rows[k].hour < pf / 3600u) continue;
+                time_t th = (time_t)rows[k].hour * 3600;
+                struct tm lh;
+                localtime_r(&th, &lh);
+                obs_h[lh.tm_hour]++;
+                obs_w[lh.tm_wday]++;
+            }
+            for (int k = 0; k < en; k++)
+            {
+                if (evs[k].seconds < pf) continue;
+                time_t te = (time_t)evs[k].seconds;
+                struct tm le;
+                localtime_r(&te, &le);
+                ev_h[le.tm_hour]++;
+                ev_w[le.tm_wday]++;
+            }
+            char hl[24][3];
+            const char *hp[24];
+            for (int b = 0; b < 24; b++)
+            {
+                snprintf(hl[b], sizeof(hl[b]), "%02d", b);
+                hp[b] = hl[b];
+            }
+            emit_profile(req, T(S_EVT_BYHOUR), T(S_TRF_HOUR), hp, ev_h, obs_h, 24);
+            /* Split in place; a short table simply leaves the tail empty. */
+            char wdbuf[64];
+            const char *wd[7];
+            snprintf(wdbuf, sizeof(wdbuf), "%s", T(S_TRF_WDAYS));
+            char *wp = wdbuf;
+            for (int d = 0; d < 7; d++)
+            {
+                wd[d] = wp;
+                char *c = strchr(wp, ',');
+                if (!c) { for (int e = d + 1; e < 7; e++) wd[e] = ""; break; }
+                *c = '\0';
+                wp = c + 1;
+            }
+            emit_profile(req, T(S_EVT_BYWDAY), T(S_TRF_DAY), wd, ev_w, obs_w, 7);
+            char pfh[768];
+            HTML_PRINTF(pfh, "<p class='note'>%s</p>", T(S_EVT_PROFILE_HINT));
+            httpd_resp_send_chunk(req, pfh, HTTPD_RESP_USE_STRLEN);
+        }
     }
     /* closes the warnings .sect (both branches above end here) */
     httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
@@ -4450,6 +5197,10 @@ static esp_err_t markers_json_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json, len);
 }
+
+/* A vehicle standing still emits no point at all (tracklog's TR_MIN_MOVE_E7),
+ * so this has to sit above a signal stop, not near the 2 s sampling floor. */
+#define TRK_SPLIT_SEC 600
 
 static esp_err_t tracks_get_handler(httpd_req_t *req)
 {
@@ -4504,6 +5255,21 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
         if (pts[i].station_id == 0)
             continue;                      /* already emitted below */
         uint32_t sid = pts[i].station_id;
+        /* No second point inside the gap means a lone sighting: consume it
+         * and emit nothing, because the map skips p.length<2 anyway. */
+        bool pair = false;
+        for (int j = i + 1; j < n; j++)
+        {
+            bool past = pts[j].seconds > pts[i].seconds &&
+                        pts[j].seconds - pts[i].seconds > TRK_SPLIT_SEC;
+            if (pts[j].station_id == sid) { pair = !past; break; }
+            if (past) break;               /* time-ordered: none can follow */
+        }
+        if (!pair)
+        {
+            pts[i].station_id = 0;
+            continue;
+        }
         char head[64];
         snprintf(head, sizeof(head), "%s{\"i\":%lu,\"t\":%u,\"p\":[",
                  first_track ? "" : ",", (unsigned long)sid,
@@ -4521,10 +5287,16 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
         char buf[1024];
         size_t bl = 0;
         bool first_pt = true;
+        uint32_t first_sec = pts[i].seconds, last_sec = first_sec;
         for (int j = i; j < n && !client_gone; j++)
         {
             if (pts[j].station_id != sid)
                 continue;
+            /* Leave the rest to the outer loop, which picks the station up
+             * again and makes a second trip of it. */
+            if (!first_pt && pts[j].seconds > last_sec &&
+                pts[j].seconds - last_sec > TRK_SPLIT_SEC)
+                break;
             int k = snprintf(buf + bl, sizeof(buf) - bl, "%s[%ld,%ld]",
                              first_pt ? "" : ",",
                              (long)pts[j].lat_e7, (long)pts[j].lon_e7);
@@ -4543,12 +5315,18 @@ static esp_err_t tracks_get_handler(httpd_req_t *req)
             }
             bl += (size_t)k;
             first_pt = false;
+            if (pts[j].seconds > last_sec) last_sec = pts[j].seconds;
             pts[j].station_id = 0;         /* consumed */
         }
         if (bl && httpd_resp_send_chunk(req, buf, bl) != ESP_OK)
             client_gone = true;
+        /* "d" at the END of the object, so the point stream stays untouched
+         * and a peer on older firmware simply ignores the extra key. */
+        char tail[32];
+        snprintf(tail, sizeof(tail), "],\"d\":%lu}",
+                 (unsigned long)(last_sec - first_sec));
         if (!client_gone &&
-            httpd_resp_send_chunk(req, "]}", HTTPD_RESP_USE_STRLEN) != ESP_OK)
+            httpd_resp_send_chunk(req, tail, HTTPD_RESP_USE_STRLEN) != ESP_OK)
             client_gone = true;
     }
 
@@ -4734,8 +5512,9 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
     resolve_language(req);
     send_page_header(req, T(S_TITLE_SENDERS));
 
+    /* Opens the page's one group; the reset button below closes it. */
     char intro[512];
-    HTML_PRINTF(intro, "<p><small>%s</small></p>", T(S_SND_INTRO));
+    HTML_PRINTF(intro, "<div class='grp top'><p class='note'>%s</p>", T(S_SND_INTRO));
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR inv_station_t snap[INV_MAX_STATIONS];
@@ -4744,17 +5523,18 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
     if (n == 0)
     {
         char none[192];
-        HTML_PRINTF(none, "<p>%s</p>", T(S_SND_NONE));
+        HTML_PRINTF(none, "<p class='note'>%s</p>", T(S_SND_NONE));
         httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
     }
     else
     {
         char head[512];
         HTML_PRINTF(head,
-            "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th>"
-            "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>",
-            T(S_SND_ID), T(S_SND_NAME), T(S_SND_TYPES), T(S_SND_FRAMES),
-            T(S_SND_RSSI), T(S_SND_POS), T(S_SND_FIRST), T(S_SND_LAST));
+            "<div class='scroll'><table><thead><tr><th>%s</th>"
+            "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
+            "</tr></thead><tbody>",
+            T(S_SND_STATION), T(S_SND_TYPES), T(S_SND_FRAMES),
+            T(S_SND_RSSI), T(S_SND_POS), T(S_SND_LAST));
         httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
 
         uint32_t now = (uint32_t)time(NULL);
@@ -4762,13 +5542,27 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
         {
             inv_station_t *s = &snap[i];
 
-            char types[64] = "";
+            char types[288] = "";
             size_t to = 0;
-            for (uint8_t b = 0; b < 16 && to + 10 < sizeof(types); b++)
+            for (uint8_t b = 0; b < 16 && to + 64 < sizeof(types); b++)
                 if (s->msg_mask & (1u << b))
                 {
                     const char *nm = inv_msg_name(b);
                     if (!nm) continue;
+#if CONFIG_ENABLE_SD
+                    /* hours=720 because the 24 h default hides all but the
+                     * newest few. Only under SD -- else /traffic is not built. */
+                    const char *anchor = strcmp(nm, "DENM") == 0 ? "denm" :
+                        (strcmp(nm, "SPATEM") == 0 || strcmp(nm, "MAPEM") == 0) ? "lights" : NULL;
+                    if (anchor)
+                    {
+                        to += snprintf(types + to, sizeof(types) - to,
+                                       "%s<a href='/traffic?hours=720&amp;lang=%s#%s'>%s</a>",
+                                       to ? " " : "", current_lang == LANG_EN ? "en" : "de",
+                                       anchor, nm);
+                        continue;
+                    }
+#endif
                     to += snprintf(types + to, sizeof(types) - to, "%s%s", to ? " " : "", nm);
                 }
 
@@ -4805,13 +5599,39 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
             else if (age < 3600) snprintf(last, sizeof(last), "%lum", (unsigned long)(age / 60));
             else                 snprintf(last, sizeof(last), "%luh", (unsigned long)(age / 3600));
 
-            char row[896];
+            /* Vendor prefix tells sibling units apart at a glance; vehicles use
+             * locally administered (random) addresses, roadside units do not. */
+            char mac[20] = "-";
+            if (s->has_mac)
+                snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                         s->mac[0], s->mac[1], s->mac[2], s->mac[3], s->mac[4], s->mac[5]);
+
+            /* The MAPEM name IS the identity where there is one; id, MAC and the
+             * mostly empty intersection become detail under it. */
+            char ident[248], idmac[64];
+            if (nameesc[0])
+            {
+                snprintf(ident, sizeof(ident), "%s", nameesc);
+                snprintf(idmac, sizeof(idmac), "%lu%s%s", (unsigned long)s->station_id,
+                         s->has_mac ? " &middot; " : "", s->has_mac ? mac : "");
+            }
+            else
+            {
+                snprintf(ident, sizeof(ident), "%lu", (unsigned long)s->station_id);
+                snprintf(idmac, sizeof(idmac), "%s", s->has_mac ? mac : "&ndash;");
+            }
+            char firstline[48];
+            snprintf(firstline, sizeof(firstline), "%s %s", T(S_SND_SINCE), first);
+
+            char row[1152];
             HTML_PRINTF(row,
-                "<tr><td class='mono'>%lu</td><td class='wrapcell'>%s</td>"
-                "<td>%s</td><td>%lu</td><td class='mono'>%s</td>"
-                "<td class='mono'>%s</td><td>%s</td><td>%s</td></tr>",
-                (unsigned long)s->station_id, nameesc[0] ? nameesc : "-",
-                types[0] ? types : "-", (unsigned long)s->frames, sig, pos, first, last);
+                "<tr><td class='wrapcell'>%s<div class='sub mono'>%s</div></td>"
+                "<td>%s</td><td>%lu</td>"
+                "<td class='mono'>%s</td><td class='mono'>%s</td>"
+                "<td>%s<div class='sub'>%s</div></td></tr>",
+                ident, idmac,
+                types[0] ? types : "-", (unsigned long)s->frames, sig, pos,
+                last, firstline);
             httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
         }
         httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
@@ -4820,7 +5640,7 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
     if (inventory_overflow())
     {
         char full[256];
-        HTML_PRINTF(full, "<p><small>&#9888; %s</small></p>", T(S_SND_FULL));
+        HTML_PRINTF(full, "<p class='note'>&#9888; %s</p>", T(S_SND_FULL));
         httpd_resp_send_chunk(req, full, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -4828,15 +5648,15 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
     char vtext[288];
     snprintf(vtext, sizeof(vtext), T(S_SND_VEHICLES),
              (unsigned long)inventory_vehicle_frames());
-    HTML_PRINTF(veh, "<p><small>%s</small></p>", vtext);
+    HTML_PRINTF(veh, "<p class='note'>%s</p>", vtext);
     httpd_resp_send_chunk(req, veh, HTTPD_RESP_USE_STRLEN);
 
     char clr[512];
     HTML_PRINTF(clr,
         /* r.ok: this page is ungated but the POST is not -- reloading after a
          * 401 would show the untouched list as if the reset had happened. */
-        "<p><button onclick=\"if(confirm('%s'))fetch('/senders/clear',"
-        "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p>",
+        "<p class='btnrow'><button onclick=\"if(confirm('%s'))fetch('/senders/clear',"
+        "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p></div>",
         T(S_SND_CLEAR_CONFIRM), T(S_SND_CLEAR));
     httpd_resp_send_chunk(req, clr, HTTPD_RESP_USE_STRLEN);
 
@@ -4850,22 +5670,88 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
  *  the passage list reads the card, so a busy card just omits it.
  * ================================================================== */
 
+#if CONFIG_ENABLE_SD
+/* Median headway without an O(n log n) sort on the httpd task: gaps bucketed by
+ * the minute. The last bucket is "60 or more", i.e. no regular service. */
+#define PT_GAP_BUCKETS 61
+#define PT_DEST_SLOTS 8
+typedef struct {
+    uint16_t line;
+    uint32_t prev_sec;              /* last passage folded in, 0 = none yet */
+    uint32_t n, ngap;
+    uint32_t first_sod, last_sod;   /* seconds into the operating day */
+    uint16_t dest[PT_DEST_SLOTS];
+    uint32_t dcnt[PT_DEST_SLOTS];
+} pt_ops_t;
+#endif
+
 static esp_err_t transit_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
     send_page_header(req, T(S_TITLE_TRANSIT));
 
+    /* Opens the first group; the passage block below swaps it for its own,
+     * and one unconditional </div> further down closes whichever is open. */
     char intro[640];
-    HTML_PRINTF(intro, "<p><small>%s</small></p>", T(S_PT_INTRO));
+    HTML_PRINTF(intro, "<div class='grp top'><p class='note'>%s</p>", T(S_PT_INTRO));
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR pt_line_t snap[PT_MAX_LINES];
     int n = ptlog_snapshot(snap);
 
+#if CONFIG_ENABLE_SD
+    /* Read BEFORE the line rows go out -- a sent chunk cannot be amended. The
+     * file is read whole either way, so PT_PASS_KEEP costs no extra card time. */
+    static EXT_RAM_BSS_ATTR pt_pass_t pass[PT_PASS_KEEP];
+    static EXT_RAM_BSS_ATTR uint16_t gap_hist[PT_MAX_LINES][PT_GAP_BUCKETS];
+    static EXT_RAM_BSS_ATTR pt_ops_t ops[PT_MAX_LINES];
+    /* Statics, so they must be cleared on entry -- otherwise the second view
+     * of this page counts every passage a second time. */
+    memset(gap_hist, 0, sizeof(gap_hist));
+    memset(ops, 0, sizeof(ops));
+    int pn = ptlog_read_passages(pass, PT_PASS_KEEP);
+    for (int i = 0; i < n; i++)
+        ops[i].line = snap[i].line;
+    /* Backwards through a newest-first array is chronological order. */
+    for (int k = pn - 1; k >= 0; k--)
+    {
+        int idx = -1;
+        for (int i = 0; i < n; i++)
+            if (ops[i].line == pass[k].line) { idx = i; break; }
+        if (idx < 0)
+            continue;                  /* line no longer in the aggregate table */
+        pt_ops_t *o = &ops[idx];
+        if (o->prev_sec && pass[k].seconds > o->prev_sec)
+        {
+            uint32_t m = (pass[k].seconds - o->prev_sec) / 60;
+            if (m >= PT_GAP_BUCKETS) m = PT_GAP_BUCKETS - 1;
+            gap_hist[idx][m]++;
+            o->ngap++;
+        }
+        o->prev_sec = pass[k].seconds;
+        /* Operating day starts at 03:00, so a trip just after midnight stays
+         * with the day it belongs to instead of opening the next one. */
+        time_t ots = (time_t)pass[k].seconds - 3 * 3600;
+        struct tm olt;
+        localtime_r(&ots, &olt);
+        uint32_t sod = (uint32_t)(olt.tm_hour * 3600 + olt.tm_min * 60 + olt.tm_sec);
+        if (!o->n || sod < o->first_sod) o->first_sod = sod;
+        if (!o->n || sod > o->last_sod)  o->last_sod  = sod;
+        o->n++;
+        for (int d = 0; d < PT_DEST_SLOTS; d++)
+        {
+            if (o->dcnt[d] && o->dest[d] != pass[k].dest) continue;
+            o->dest[d] = pass[k].dest;
+            o->dcnt[d]++;
+            break;
+        }
+    }
+#endif
+
     if (n == 0)
     {
         char none[192];
-        HTML_PRINTF(none, "<p>%s</p>", T(S_PT_NONE));
+        HTML_PRINTF(none, "<p class='note'>%s</p>", T(S_PT_NONE));
         httpd_resp_send_chunk(req, none, HTTPD_RESP_USE_STRLEN);
     }
     else
@@ -4879,6 +5765,7 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
 
         uint32_t now = (uint32_t)time(NULL);
+        bool any_ops = false;
         for (int i = 0; i < n; i++)
         {
             pt_line_t *l = &snap[i];
@@ -4905,37 +5792,111 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
             else if (age < 86400) snprintf(last, sizeof(last), "%luh", (unsigned long)(age / 3600));
             else                  snprintf(last, sizeof(last), "%lud", (unsigned long)(age / 86400));
 
+            /* Empty whenever the passage log no longer holds a run of this
+             * line -- a dash there would claim something was measured. */
+            char tsub[256] = "";
+#if CONFIG_ENABLE_SD
+            if (ops[i].n)
+            {
+                bool sep = false;
+                snprintf(tsub, sizeof(tsub), "<div class='sub'>");
+                size_t to = strlen(tsub);
+                if (ops[i].ngap)
+                {
+                    uint32_t half = (ops[i].ngap + 1) / 2, acc = 0;
+                    uint32_t med = PT_GAP_BUCKETS - 1;
+                    for (uint32_t b = 0; b < PT_GAP_BUCKETS; b++)
+                    {
+                        acc += gap_hist[i][b];
+                        if (acc >= half) { med = b; break; }
+                    }
+                    if (med >= PT_GAP_BUCKETS - 1)
+                        snprintf(tsub + to, sizeof(tsub) - to, "%s", T(S_PT_HEADWAY_NONE));
+                    else
+                        snprintf(tsub + to, sizeof(tsub) - to, "%s ~%lu min",
+                                 T(S_PT_HEADWAY), (unsigned long)med);
+                    to = strlen(tsub);
+                    sep = true;
+                }
+                uint32_t fs = (ops[i].first_sod + 3 * 3600) % 86400;
+                uint32_t ls = (ops[i].last_sod  + 3 * 3600) % 86400;
+                if (ops[i].n > 1)
+                    snprintf(tsub + to, sizeof(tsub) - to,
+                             "%s%02lu:%02lu&ndash;%02lu:%02lu", sep ? " &middot; " : "",
+                             (unsigned long)(fs / 3600), (unsigned long)(fs % 3600 / 60),
+                             (unsigned long)(ls / 3600), (unsigned long)(ls % 3600 / 60));
+                else
+                    snprintf(tsub + to, sizeof(tsub) - to, "%s%s %02lu:%02lu",
+                             sep ? " &middot; " : "", T(S_PT_OPS_FIRST),
+                             (unsigned long)(fs / 3600), (unsigned long)(fs % 3600 / 60));
+                to = strlen(tsub);
+                int b1 = -1, b2 = -1;
+                for (int d = 0; d < PT_DEST_SLOTS; d++)
+                {
+                    /* 0 is "not stated" in R09, not a destination number. */
+                    if (!ops[i].dcnt[d] || !ops[i].dest[d]) continue;
+                    if (b1 < 0 || ops[i].dcnt[d] > ops[i].dcnt[b1]) { b2 = b1; b1 = d; }
+                    else if (b2 < 0 || ops[i].dcnt[d] > ops[i].dcnt[b2]) b2 = d;
+                }
+                if (b1 >= 0)
+                {
+                    snprintf(tsub + to, sizeof(tsub) - to, " &middot; %s %u (%lu)",
+                             T(S_PT_DIR), (unsigned)ops[i].dest[b1],
+                             (unsigned long)ops[i].dcnt[b1]);
+                    to = strlen(tsub);
+                    if (b2 >= 0)
+                    {
+                        snprintf(tsub + to, sizeof(tsub) - to, " / %u (%lu)",
+                                 (unsigned)ops[i].dest[b2], (unsigned long)ops[i].dcnt[b2]);
+                        to = strlen(tsub);
+                    }
+                }
+                snprintf(tsub + to, sizeof(tsub) - to, "</div>");
+                any_ops = true;
+            }
+#endif
+
+            /* 79 bytes of markup + tsub[256] + the five cells: 457 worst case. */
             char row[512];
             HTML_PRINTF(row,
-                "<tr><td><b>%u</b></td><td>%lu</td><td>%s</td><td>%s</td>"
+                "<tr><td><b>%u</b>%s</td><td>%lu</td><td>%s</td><td>%s</td>"
                 "<td>%s</td><td>%lu</td><td>%s</td></tr>",
-                l->line, (unsigned long)l->sightings, avg, late, early,
+                l->line, tsub, (unsigned long)l->sightings, avg, late, early,
                 (unsigned long)l->dev_zero, last);
             httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
         }
         httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
 
         char note[768];
-        HTML_PRINTF(note, "<p><small>%s</small></p>", T(S_PT_LIMIT));
+        HTML_PRINTF(note, "<p class='note'>%s</p>", T(S_PT_LIMIT));
         httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
+        if (any_ops)
+        {
+            char ohint[640];
+            HTML_PRINTF(ohint, "<p class='note'>%s</p>", T(S_PT_OPS_HINT));
+            httpd_resp_send_chunk(req, ohint, HTTPD_RESP_USE_STRLEN);
+        }
     }
 
 #if CONFIG_ENABLE_SD
     /* The summary says how late a line usually is; this says WHEN. */
     {
-        static EXT_RAM_BSS_ATTR pt_pass_t pass[120];
-        int pn = ptlog_read_passages(pass, 120);
         if (pn > 0)
         {
             char ph[384];
             HTML_PRINTF(ph,
-                "<h2>%s</h2><div class='scroll'><table><thead><tr><th>%s</th>"
+                /* Closes the intro group and opens its own -- the one
+                 * unconditional </div> below then balances either path. */
+                "</div><div class='grp'><h2>%s</h2><div class='scroll'><table><thead><tr><th>%s</th>"
                 "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
                 "</tr></thead><tbody>",
                 T(S_PT_PASSAGES), T(S_PT_WHEN), T(S_PT_LINE), T(S_PT_COURSE),
                 T(S_PT_DEST), T(S_PT_DEV), T(S_PT_INRANGE));
             httpd_resp_send_chunk(req, ph, HTTPD_RESP_USE_STRLEN);
-            for (int k = 0; k < pn; k++)
+            /* The array feeds the headway maths above; the table stays at 120
+             * rows, because 2000 would be hundreds of kilobytes of markup. */
+            int pshow = pn < 120 ? pn : 120;
+            for (int k = 0; k < pshow; k++)
             {
                 time_t t = (time_t)pass[k].seconds;
                 struct tm lt;
@@ -4962,15 +5923,15 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
 
     char act[256], atext[192];
     snprintf(atext, sizeof(atext), T(S_PT_ACTIVE), ptlog_open_count());
-    HTML_PRINTF(act, "<p><small>%s</small></p>", atext);
+    HTML_PRINTF(act, "<p class='note'>%s</p>", atext);
     httpd_resp_send_chunk(req, act, HTTPD_RESP_USE_STRLEN);
 
     char clr[512];
     HTML_PRINTF(clr,
         /* r.ok: this page is ungated but the POST is not -- reloading after a
          * 401 would show the untouched list as if the reset had happened. */
-        "<p><button onclick=\"if(confirm('%s'))fetch('/transit/clear',"
-        "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p>",
+        "<p class='btnrow'><button onclick=\"if(confirm('%s'))fetch('/transit/clear',"
+        "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p></div>",
         T(S_PT_CLEAR_CONFIRM), T(S_PT_CLEAR));
     httpd_resp_send_chunk(req, clr, HTTPD_RESP_USE_STRLEN);
 
@@ -5191,7 +6152,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     send_page_header(req, T(S_TITLE_SETTINGS));
 
     char intro[256];
-    snprintf(intro, sizeof(intro), "<p>%s</p>", T(S_SET_INTRO));
+    snprintf(intro, sizeof(intro), "<p class='note'>%s</p>", T(S_SET_INTRO));
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
 
     /* Each section is its own chunk, same multi-chunk pattern as
@@ -5203,7 +6164,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
      * node ID 378); HTML_PRINTF only logs a truncation, so headroom is cheap. */
     static EXT_RAM_BSS_ATTR char general[6144];
     HTML_PRINTF(general,
-        "<h2>%s</h2><table class='kv'>"
+        "<div class='grp top'><h2>%s</h2><table class='kv set'>"
         /* size='16', not the field's full width: the HTML size attribute
          * skews auto-layout column width even under a CSS width:100% rule
          * (size=40 alone pushed the table wider than a phone screen). */
@@ -5232,7 +6193,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         /* Size new rows against general[] at its declaration, not from here. */
         "<tr><th>%s</th><td><input type='checkbox' id='bten'%s>"
         "<br><small>%s</small></td></tr>"
-        "</table>",
+        "</table></div>",
         T(S_SET_GROUP_GENERAL),
         T(S_NODEID), nodeid,
         T(S_AUTOSTART_CHAN),
@@ -5254,7 +6215,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Network --- */
     static EXT_RAM_BSS_ATTR char network[4096];
     snprintf(network, sizeof(network),
-        "<h2>%s</h2><table class='kv'>"
+        "<div class='grp'><h2>%s</h2><table class='kv set'>"
         "<tr><th></th><td>%s</td></tr>"
         "<tr><th>%s</th><td><input type='checkbox' id='dhcp'%s onchange='dhcpToggle()'></td></tr>"
         "<tr><th>%s</th><td><input class='ipfield' id='ethip' value='%s' size='16' maxlength='15'></td></tr>"
@@ -5271,7 +6232,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td><input type='checkbox' id='ethleds'%s>"
         "<br><small>%s</small></td></tr>"
 #endif
-        "</table>",
+        "</table></div>",
         T(S_SET_GROUP_NETWORK),
         cur_line,
         T(S_ETH_DHCP), dhcp ? " checked" : "",
@@ -5290,9 +6251,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- MQTT --- */
     static EXT_RAM_BSS_ATTR char mqtt_block[2048];
     snprintf(mqtt_block, sizeof(mqtt_block),
-        "<h2>%s</h2><table class='kv'>"
+        "<div class='grp'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='16'></td></tr>"
-        "</table>",
+        "</table></div>",
         T(S_SET_GROUP_MQTT), T(S_MQTT_URI), mqtt_uri);
     httpd_resp_send_chunk(req, mqtt_block, HTTPD_RESP_USE_STRLEN);
 
@@ -5300,7 +6261,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Storage (SD): logging + PCAP capture --- */
     static EXT_RAM_BSS_ATTR char storage[3072];
     HTML_PRINTF(storage,
-        "<h2>%s</h2><table class='kv'>"
+        "<div class='grp'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
         "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' max='512' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
@@ -5319,7 +6280,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<tr><th>%s</th><td><input type='checkbox' id='trkon'%s>"
         "<br><small>%s</small></td></tr>"
         "<tr><th>%s</th><td><input id='trkdays' type='number' min='1' max='7' value='%lu' size='6'></td></tr>"
-        "</table>",
+        "</table></div>",
         T(S_SET_GROUP_STORAGE),
         T(S_LOG_SYS), log_sys ? " checked" : "",
         T(S_LOG_BUDGET), (unsigned long)log_mb, T(S_LOG_HINT),
@@ -5340,10 +6301,10 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Traffic page retention --- */
     char trfset[768];
     snprintf(trfset, sizeof(trfset),
-        "<h2>%s</h2><table class='kv'>"
+        "<div class='grp'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td><input id='statsdays' type='number' min='1' max='30' value='%lu' size='6'></td></tr>"
         "<tr><th>%s</th><td><input id='eventdays' type='number' min='1' max='30' value='%lu' size='6'></td></tr>"
-        "</table>",
+        "</table></div>",
         T(S_SET_GROUP_TRAFFIC),
         T(S_STATS_RETAIN_DAYS), (unsigned long)stats_days,
         T(S_EVENT_RETAIN_DAYS), (unsigned long)event_days);
@@ -5353,13 +6314,13 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Security --- */
     static EXT_RAM_BSS_ATTR char security[1024];
     snprintf(security, sizeof(security),
-        "<h2>%s</h2><table class='kv'>"
+        "<div class='grp'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td>"
         "<input type='password' id='webpasswd' size='16' autocomplete='new-password'>"
         "<br><small>%s</small>"
         "<br><label><input type='checkbox' id='webpwclear'> %s</label>"
         "</td></tr>"
-        "</table>",
+        "</table></div>",
         T(S_SET_GROUP_SECURITY),
         T(S_WEB_PASSWORD),
         pw_set ? T(S_WEB_PASSWORD_SET) : T(S_WEB_PASSWORD_NONE),
@@ -5383,7 +6344,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
          * unsaved-changes indicator; the top button stays. */
         "<style>#savebar{position:fixed;left:0;right:0;bottom:0;z-index:900;"
         "display:none;padding:10px clamp(14px,4vw,32px);"
-        "background:rgba(21,25,29,.96);border-top:1px solid #2a2f34;"
+        /* Own colour, not inherited: if /s.css fails to load, the default
+         * text colour would be black on this dark bar. */
+        "background:rgba(21,25,29,.96);color:#edf0f2;border-top:1px solid #2a2f34;"
         "box-shadow:0 -4px 20px rgba(0,0,0,.45)}"
         "#savebar .in{max-width:1400px;margin:0 auto;display:flex;"
         "align-items:center;gap:12px;flex-wrap:wrap}"
@@ -5818,7 +6781,30 @@ static esp_err_t sniffer_post_handler(httpd_req_t *req)
     int ret;
     esp_err_t run_res;
     if (strcmp(action, "start") == 0)
-        run_res = esp_console_run("sniffer", &ret);
+    {
+        /* do_sniffer_cmd assigns the channel global before sniffer_start()
+         * refuses -- a second Start would retune a running capture via resume. */
+        if (sniffer_is_running())
+        {
+            httpd_resp_set_type(req, "text/plain");
+            httpd_resp_sendstr(req, "OK");
+            return ESP_OK;
+        }
+        uint32_t chan = 0;
+        config_get_u32(CONFIG_INDEX_AUTOSTART_CHAN, &chan);
+        /* channel is an MHz frequency for phy_change_channel(), not a WLAN
+         * channel: without -c the console default (1) is no valid frequency. */
+        if (chan < 5800 || chan > 5900)
+        {
+            /* Only reachable via "no autostart" on /settings; the button starts
+             * anyway, because an explicit click asks for reception. */
+            ESP_LOGW(TAG, "autostart disabled, start button uses G5CC");
+            chan = 5900;
+        }
+        char cmd[32];
+        snprintf(cmd, sizeof(cmd), "sniffer -c %lu", (unsigned long)chan);
+        run_res = esp_console_run(cmd, &ret);
+    }
     else if (strcmp(action, "stop") == 0)
         run_res = esp_console_run("sniffer --stop", &ret);
     else
@@ -5937,6 +6923,14 @@ static esp_err_t leaflet_js_get_handler(httpd_req_t *req)
                        "application/javascript", "max-age=31536000, immutable");
 }
 
+/* Shared page stylesheet. Immutable is safe because the page links it with
+ * ?v=<ELF hash>: every new build is a new URL, so no stale sheet survives. */
+static esp_err_t s_css_get_handler(httpd_req_t *req)
+{
+    return send_asset(req, s_css_start, s_css_end,
+                       "text/css", "max-age=31536000, immutable");
+}
+
 static esp_err_t leaflet_css_get_handler(httpd_req_t *req)
 {
     return send_asset(req, leaflet_css_start, leaflet_css_end,
@@ -5973,7 +6967,9 @@ static esp_err_t manifest_get_handler(httpd_req_t *req)
 {
     static const char m[] =
         "{\"name\":\"ITS G5 Node\",\"short_name\":\"ITS G5\",\"start_url\":\"/\","
-        "\"display\":\"standalone\",\"background_color\":\"#0c1013\","
+        /* Same ground as body in s.css -- otherwise the home-screen splash
+         * flashes the old, lighter colour before the page paints. */
+        "\"display\":\"standalone\",\"background_color\":\"#06070b\","
         "\"theme_color\":\"#f2b134\",\"icons\":["
         "{\"src\":\"/apple-touch-icon.png\",\"sizes\":\"180x180\",\"type\":\"image/png\"},"
         "{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\"},"
@@ -6046,10 +7042,13 @@ static const char *task_state_str(eTaskState s)
 
 /* Per-task CPU rows shared by /system and /system.json; two snapshots ~300 ms
  * apart give current load, wrap-safe. html_escape keeps it JSON-safe too. */
-static void build_task_rows_html(char *out, size_t out_size)
+static void build_task_rows_html(char *out, size_t out_size, int *idle_x10_out)
 {
     out[0] = '\0';
     size_t o = 0;
+    /* Idle share in tenths of a percent, -1 until measured: a failed
+     * snapshot must not read as "no idle left" and show 100 % load. */
+    if (idle_x10_out) *idle_x10_out = -1;
 
     UBaseType_t n1 = uxTaskGetNumberOfTasks();
     if (n1 > 64) n1 = 64;
@@ -6062,6 +7061,7 @@ static void build_task_rows_html(char *out, size_t out_size)
         vTaskDelay(pdMS_TO_TICKS(300));
         UBaseType_t c2 = uxTaskGetSystemState(a2, n1, &rt2);
         uint32_t total_delta = rt2 - rt1;
+        if (idle_x10_out) *idle_x10_out = 0;
 
         for (UBaseType_t i = 0; i < c2 && o < out_size; i++)
         {
@@ -6071,24 +7071,56 @@ static void build_task_rows_html(char *out, size_t out_size)
             uint32_t delta = a2[i].ulRunTimeCounter - prev;
             unsigned cpu_x10 = total_delta ? (unsigned)(((uint64_t)delta * 1000) / total_delta) : 0;
 
+            /* Every IDLE* task counts: a multi-core part has one per core. */
+            if (idle_x10_out && strncmp(a2[i].pcTaskName, "IDLE", 4) == 0)
+                *idle_x10_out += (int)cpu_x10;
+
             char nameesc[48];
             html_escape(a2[i].pcTaskName, nameesc, sizeof(nameesc));
+            /* Single quotes only: this fragment is embedded unescaped in
+             * /system.json, where a double quote would break the response. */
+            /* Bytes on this port, not words -- measured against the running tasks. */
+            const char *scls = a2[i].usStackHighWaterMark < 512  ? "v-bad"
+                             : a2[i].usStackHighWaterMark < 1024 ? "v-warn" : "";
             o += snprintf(out + o, out_size - o,
-                "<tr><td>%s</td><td>%s</td><td>%u</td><td>%u.%u</td><td>%u</td></tr>",
+                "<tr><td>%s</td><td>%s</td><td>%u</td><td>%u.%u</td><td class='%s'>%u</td></tr>",
                 nameesc, task_state_str(a2[i].eCurrentState),
                 (unsigned)a2[i].uxCurrentPriority,
-                cpu_x10 / 10, cpu_x10 % 10,
+                cpu_x10 / 10, cpu_x10 % 10, scls,
                 (unsigned)a2[i].usStackHighWaterMark);
         }
     }
+    else
+        ESP_LOGE(TAG, "task snapshot alloc failed, table stays empty");
     free(a1);
     free(a2);
+}
+
+/* Load = what the idle tasks did not take. Rendered here (not in the
+ * caller) so page and JSON cannot disagree about the wording. */
+static void format_cpu_load(int idle_x10, int cores, char *out, size_t out_size)
+{
+    if (idle_x10 < 0 || cores < 1)
+    {
+        snprintf(out, out_size, "&ndash;");
+        return;
+    }
+    int busy = 1000 * cores - idle_x10;
+    if (busy < 0) busy = 0;
+    busy /= cores;
+    /* Single quotes: cpu_str is also embedded in /system.json. */
+    snprintf(out, out_size, "%d%s%d<span class='e'>%%</span>", busy / 10,
+             current_lang == LANG_DE ? "," : ".", busy % 10);
 }
 
 static esp_err_t system_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
-    send_page_header_refresh(req, T(S_TITLE_SYSTEM), "/system.json");
+    /* With the language: the JSON handler resolves it per request, so without
+     * it an English page flips to German formatting on the first poll. */
+    send_page_header_refresh(req, T(S_TITLE_SYSTEM),
+                             current_lang == LANG_EN ? "/system.json?lang=en"
+                                                     : "/system.json?lang=de");
 
     /* image_check validates the SHA256, so this can't false-positive on
      * stale flash content. Reuses the generic partition download below
@@ -6156,36 +7188,34 @@ static esp_err_t system_get_handler(httpd_req_t *req)
     format_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), rp_m, sizeof(rp_m));
     format_bytes(heap_caps_get_total_size(MALLOC_CAP_SPIRAM), rp_t, sizeof(rp_t));
 
-    char info[1792];
-    snprintf(info, sizeof(info),
-        "<table class='kv'>"
+    /* Everything that only changes with a reboot. The separate ESP-IDF row
+     * is gone: app->idf_ver in the firmware row is the same string. */
+    char devblk[1024];
+    HTML_PRINTF(devblk,
+        "<div class='grp top'><h2>%s</h2><table class='kv'>"
         "<tr><th>%s</th><td>%s rev %d, %s</td></tr>"
         "<tr><th>%s</th><td>%d</td></tr>"
         "<tr><th>%s</th><td>%d MHz</td></tr>"
-        "<tr><th>%s</th><td>%s (IDF %s, %s %s)</td></tr>"
+        "<tr><th>%s</th><td>%s</td></tr>"
+        "<tr><th>%s</th><td>%s <small>(IDF %s &middot; %s %s)</small></td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
         "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td id='sys-uptime'>%s</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s (%s)</th><td id='sys-ram-i'>%s / %s / %s</td></tr>"
-        "<tr><th>%s (%s)</th><td id='sys-ram-p'>%s / %s / %s</td></tr>"
-        "</table>",
+        "</table></div>",
+        T(S_SYS_GRP_DEVICE),
         T(S_SYS_CHIP), CONFIG_IDF_TARGET, chip.revision, feat,
         T(S_SYS_CORES), chip.cores,
         T(S_SYS_CPU_FREQ), CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        T(S_SYS_FLASH), flash_str,
         T(S_FW_VERSION), app->version, app->idf_ver, app->date, app->time,
-        T(S_SYS_IDF), esp_get_idf_version(),
         T(S_SYS_RESET), reset_reason_str(esp_reset_reason()),
-        T(S_UPTIME), uptime_str,
-        T(S_ETH_IP), eth_line,
-        T(S_SYS_RAM_INT), T(S_SYS_TRIPLE), ri_f, ri_m, ri_t,
-        T(S_SYS_RAM_PSRAM), T(S_SYS_TRIPLE), rp_f, rp_m, rp_t);
-    httpd_resp_send_chunk(req, info, HTTPD_RESP_USE_STRLEN);
+        T(S_ETH_IP), eth_line);
+    httpd_resp_send_chunk(req, devblk, HTTPD_RESP_USE_STRLEN);
 
     /* Stability counters (NVS-persisted, survive crash + power loss). */
     char maxup_str[48];
     format_uptime(sysstat_max_uptime_sec(), maxup_str, sizeof(maxup_str));
     char lastcrash_str[64];
+    bool crash_recent = false;
     int64_t lc = sysstat_last_crash_time();
     if (lc > 0)
     {
@@ -6194,6 +7224,9 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         int64_t ago = now.tv_sec - lc;
         char ago_str[48];
         format_uptime(ago > 0 ? (uint64_t)ago : 0, ago_str, sizeof(ago_str));
+        /* A lifetime counter whose newest entry is weeks old is history, and
+         * the hint under this card says so -- do not colour it as a warning. */
+        crash_recent = ago > 0 && ago < 7 * 24 * 3600;
         snprintf(lastcrash_str, sizeof(lastcrash_str), "%s %s",
                  current_lang == LANG_DE ? "vor" : "", ago_str);
     }
@@ -6202,41 +7235,70 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         snprintf(lastcrash_str, sizeof(lastcrash_str), "%s", T(S_STAT_NEVER));
     }
 
-    char stats[512];
-    snprintf(stats, sizeof(stats),
-        "<table class='kv'>"
-        "<tr><th>%s</th><td>%lu</td></tr>"
-        "<tr><th>%s</th><td>%lu</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "<tr><th>%s</th><td>%s</td></tr>"
-        "</table>",
-        T(S_STAT_BOOTS),    (unsigned long)sysstat_boot_count(),
-        T(S_STAT_CRASHES),  (unsigned long)sysstat_crash_count(),
+    /* Total and date sit in the card's own sub-line: a bare crash count above
+     * the number it refers to read as if something were missing. */
+    uint32_t crashes = sysstat_crash_count();
+    char stabblk[1152];
+    HTML_PRINTF(stabblk,
+        "<div class='grp'><h2>%s</h2><div class='grid'>"
+        "<div class='cell'><div class='l %s'>%s</div><div class='v'>%lu</div>"
+        "<div class='d'>%s: %lu &middot; %s: %s</div></div>"
+        "<div class='cell'><div class='l'>%s</div><div class='v'>%s</div></div>"
+        "<div class='cell'><div class='l'>%s</div><div class='v' id='sys-uptime'>%s</div></div>"
+        "</div><p class='note'>%s</p>",
+        T(S_SYS_GRP_STABILITY),
+        crash_recent ? "v-warn" : "", T(S_STAT_CRASHES), (unsigned long)crashes,
+        T(S_STAT_BOOTS), (unsigned long)sysstat_boot_count(),
         T(S_STAT_LASTCRASH), lastcrash_str,
-        T(S_STAT_MAXUP),    maxup_str);
-    httpd_resp_send_chunk(req, stats, HTTPD_RESP_USE_STRLEN);
+        T(S_STAT_MAXUP), maxup_str,
+        T(S_UPTIME), uptime_str,
+        T(S_SYS_CRASH_HINT));
+    httpd_resp_send_chunk(req, stabblk, HTTPD_RESP_USE_STRLEN);
 
     char statsbtn[384];
     snprintf(statsbtn, sizeof(statsbtn),
-        "<p><button onclick=\"if(confirm('%s'))fetch('/system/stats/clear',{method:'POST'}).then(()=>location.reload());\">%s</button></p>",
+        "<p class='btnrow'><button onclick=\"if(confirm('%s'))fetch('/system/stats/clear',{method:'POST'}).then(()=>location.reload());\">%s</button></p>",
         T(S_STAT_RESET_CONFIRM), T(S_STAT_RESET));
     httpd_resp_send_chunk(req, statsbtn, HTTPD_RESP_USE_STRLEN);
+    /* Closes the stability section opened above. */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+
+    /* Load group: the task table is built first because its idle share is
+     * the CPU figure shown above it. */
+    static EXT_RAM_BSS_ATTR char task_rows[16384];
+    int idle_x10 = -1;
+    build_task_rows_html(task_rows, sizeof(task_rows), &idle_x10);
+    char cpu_str[48];
+    format_cpu_load(idle_x10, chip.cores, cpu_str, sizeof(cpu_str));
+
+    char loadblk[1024];
+    HTML_PRINTF(loadblk,
+        "<div class='grp'><h2>%s</h2><div class='grid'>"
+        "<div class='cell'><div class='l'>%s</div><div class='v' id='sys-cpu'>%s</div></div>"
+        "</div><table class='kv'>"
+        "<tr><th>%s (%s)</th><td class='%s' id='sys-ram-i'>%s / %s / %s</td></tr>"
+        "<tr><th>%s (%s)</th><td id='sys-ram-p'>%s / %s / %s</td></tr>"
+        "</table>",
+        T(S_SYS_GRP_LOAD),
+        T(S_SYS_LOAD), cpu_str,
+        T(S_SYS_RAM_INT), T(S_SYS_TRIPLE), ram_int_class(), ri_f, ri_m, ri_t,
+        T(S_SYS_RAM_PSRAM), T(S_SYS_TRIPLE), rp_f, rp_m, rp_t);
+    httpd_resp_send_chunk(req, loadblk, HTTPD_RESP_USE_STRLEN);
 
     char taskhdr[64];
-    snprintf(taskhdr, sizeof(taskhdr), "<h2>%s</h2>", T(S_SYS_TASKS));
+    snprintf(taskhdr, sizeof(taskhdr), "<h3>%s</h3>", T(S_SYS_TASKS));
     httpd_resp_send_chunk(req, taskhdr, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req,
-        "<div class='scroll'><table><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
-    char hdr[128];
-    snprintf(hdr, sizeof(hdr), "%s</th><th>%s</th><th>%s</th><th>%s</th></tr><tbody id='sys-tasks'>",
+        "<div class='scroll'><table><thead><tr><th>Task</th><th>", HTTPD_RESP_USE_STRLEN);
+    char hdr[192];
+    snprintf(hdr, sizeof(hdr), "%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody id='sys-tasks'>",
              T(S_SYS_COL_STATE), T(S_SYS_COL_PRIO), T(S_SYS_COL_CPU), T(S_SYS_COL_STACK));
     httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
 
-    static EXT_RAM_BSS_ATTR char task_rows[16384];
-    build_task_rows_html(task_rows, sizeof(task_rows));
     httpd_resp_send_chunk(req, task_rows, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+    /* Last </div> closes the load section opened above. */
+    httpd_resp_send_chunk(req, "</tbody></table></div></div>", HTTPD_RESP_USE_STRLEN);
 
     /* Recorder health: every one of these was already counted internally
      * and shown nowhere, so a degraded device looked perfectly fine. */
@@ -6256,27 +7318,39 @@ static esp_err_t system_get_handler(httpd_req_t *req)
                  (unsigned long long)(paused_ms / 1000),
                  current_lang == LANG_DE ? "," : ".",
                  (unsigned long long)(paused_ms % 1000));
-        /* 1280, not 1024: the pause row and its German hint overran the old size. */
-        char loss[1280];
+        /* 1792, not 1280: six more rows and the SD sentence in the German hint. */
+        char loss[1792];
         HTML_PRINTF(loss,
-            "<h2>%s</h2><div class='scroll'><table class='kv'>"
+            "<div class='grp'><h2>%s</h2><div class='scroll'><table class='kv'>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%s</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
 #if CONFIG_ENABLE_SD
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu</td></tr>"
+            "<tr><th>%s</th><td>%lu ms</td></tr>"
 #endif
-            "</table></div><p><small>%s</small></p>",
+            "</table></div><p class='note'>%s</p></div>",
             T(S_LOSS_TITLE),
             T(S_LOSS_SNIFFER), (unsigned long)sniffer_dropped(),
             T(S_LOSS_MQTT), (unsigned long)mqtt_tx_dropped(),
             T(S_LOSS_BT_PAUSED), paused_str,
+            T(S_LOSS_BT_NOTIFY), (unsigned long)bt_stream_dropped_notify(),
+            T(S_LOSS_BT_QUEUE), (unsigned long)bt_stream_dropped_enqueue(),
 #if CONFIG_ENABLE_SD
             T(S_LOSS_PCAP), (unsigned long)sdpcap_dropped(),
             T(S_LOSS_THINNED), (unsigned long)sdpcap_filtered(),
             T(S_LOSS_TRACKS), (unsigned long)(trk_evicted + trk_dropped),
+            T(S_LOSS_PASSAGES), (unsigned long)ptlog_passages_dropped(),
+            T(S_LOSS_EVENTS), (unsigned long)events_evicted(),
+            T(S_LOSS_SD_FAILS), (unsigned long)sdcard_io_fail_max(),
+            T(S_LOSS_SD_HELD), (unsigned long)sdcard_io_held_max_ms(),
 #endif
             T(S_LOSS_HINT));
         httpd_resp_send_chunk(req, loss, HTTPD_RESP_USE_STRLEN);
@@ -6286,12 +7360,19 @@ static esp_err_t system_get_handler(httpd_req_t *req)
      * table as a pre-rendered HTML fragment (same rows build_task_rows_html
      * already produces for the initial page, just re-sent via innerHTML so
      * the row set can grow/shrink too, not just the numbers in place). */
+    /* Every lookup guarded: one missing id used to throw on the first poll
+     * and kill every later line of this function, the task table included. */
     httpd_resp_send_chunk(req,
         "<script>window.arApply=function(d){"
-        "document.getElementById('sys-uptime').textContent=d.uptime;"
-        "document.getElementById('sys-ram-i').textContent=d.ram_i;"
-        "document.getElementById('sys-ram-p').textContent=d.ram_p;"
-        "document.getElementById('sys-tasks').innerHTML=d.tasks_html;"
+        "var e;"
+        "var ck=document.getElementById('st-clk');"
+        "if(ck&&d.clk!==undefined)ck.textContent=d.clk;"
+        "if((e=document.getElementById('sys-uptime')))e.textContent=d.uptime;"
+        "if((e=document.getElementById('sys-cpu'))&&d.cpu!==undefined)e.innerHTML=d.cpu;"
+        "if((e=document.getElementById('sys-ram-i'))){e.textContent=d.ram_i;"
+        "if(d.ram_icl!==undefined)e.className=d.ram_icl;}"
+        "if((e=document.getElementById('sys-ram-p')))e.textContent=d.ram_p;"
+        "if((e=document.getElementById('sys-tasks')))e.innerHTML=d.tasks_html;"
         "};</script>", HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
@@ -6319,12 +7400,24 @@ static esp_err_t system_json_get_handler(httpd_req_t *req)
     format_bytes(heap_caps_get_total_size(MALLOC_CAP_SPIRAM), rp_t, sizeof(rp_t));
 
     static EXT_RAM_BSS_ATTR char task_rows[16384];
-    build_task_rows_html(task_rows, sizeof(task_rows));
+    int idle_x10 = -1;
+    build_task_rows_html(task_rows, sizeof(task_rows), &idle_x10);
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    char cpu_str[48];
+    format_cpu_load(idle_x10, chip.cores, cpu_str, sizeof(cpu_str));
+
+    char clkj[80];
+    format_clockline(clkj, sizeof(clkj), "\u00b7");
 
     static EXT_RAM_BSS_ATTR char json[17408];
     snprintf(json, sizeof(json),
-        "{\"uptime\":\"%s\",\"ram_i\":\"%s / %s / %s\",\"ram_p\":\"%s / %s / %s\",\"tasks_html\":\"%s\"}",
-        uptime_str, ri_f, ri_m, ri_t, rp_f, rp_m, rp_t, task_rows);
+        "{\"uptime\":\"%s\",\"cpu\":\"%s\",\"ram_i\":\"%s / %s / %s\",\"ram_icl\":\"%s\","
+        /* Literal UTF-8: it is written with textContent, which shows an
+         * entity verbatim. */
+        "\"ram_p\":\"%s / %s / %s\",\"clk\":\"%s\",\"tasks_html\":\"%s\"}",
+        uptime_str, cpu_str, ri_f, ri_m, ri_t, ram_int_class(),
+        rp_f, rp_m, rp_t, clkj, task_rows);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
@@ -6338,7 +7431,7 @@ static esp_err_t system_json_get_handler(httpd_req_t *req)
  * button is disabled while it runs -- a second upload mid-flash would be
  * genuinely harmful, not merely wasteful. */
 static const char UPDATE_FORM_FMT[] =
-    "<p>%s</p>"
+    "<div class='grp top'><p class='note'>%s</p>"
     "<input type='file' id='fw'><button id='upbtn' onclick='upload()'>%s</button>"
     "<style>@keyframes upflash{0%%{background-position:0 0}"
     "100%%{background-position:40px 0}}"
@@ -6388,7 +7481,7 @@ static const char UPDATE_FORM_FMT[] =
     "document.getElementById('result').innerText='%s';"
     "xhr.send(f);"
     "}"
-    "</script>";
+    "</script></div>";
 
 static esp_err_t update_get_handler(httpd_req_t *req)
 {
@@ -6610,8 +7703,11 @@ static void send_fs_overview(httpd_req_t *req)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     static EXT_RAM_BSS_ATTR char hdr[768];
+    /* thead/tbody, not the implicit one: only a real thead gets the group's
+     * underline from .grp thead th. */
     snprintf(hdr, sizeof(hdr),
-        "<h2>%s</h2><p>%s</p><div class='scroll'><table><tr><th>%s</th><th>Typ</th><th>%s</th><th></th></tr>",
+        "<div class='grp top'><h2>%s</h2><p class='note'>%s</p>"
+        "<div class='scroll'><table><thead><tr><th>%s</th><th>Typ</th><th>%s</th><th></th></tr></thead><tbody>",
         T(S_FS_PARTITIONS), T(S_FS_NOTE), T(S_SD_NAME), T(S_SD_SIZE));
     httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
 
@@ -6657,7 +7753,72 @@ static void send_fs_overview(httpd_req_t *req)
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
         it = esp_partition_next(it);
     }
-    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</tbody></table></div></div>", HTTPD_RESP_USE_STRLEN);
+}
+
+/* Path as clickable steps, one chunk per step: a single buffer for the whole
+ * line grows with the square of the path depth. lq == NULL: links carry no lang=. */
+static void send_path_crumbs(httpd_req_t *req, const char *base,
+                             const char *lq, const char *rel)
+{
+    static EXT_RAM_BSS_ATTR char crumb[SD_PATH_MAX * 9 + 192];
+    static EXT_RAM_BSS_ATTR char segesc[SD_PATH_MAX * 6], prefenc[SD_PATH_MAX * 3];
+    char prefix[SD_PATH_MAX];
+
+    HTML_PRINTF(crumb, "<p class='crumbs'><a href='%s%s%s'>/</a>",
+                base, lq ? "?lang=" : "", lq ? lq : "");
+    httpd_resp_send_chunk(req, crumb, HTTPD_RESP_USE_STRLEN);
+
+    size_t pl = 0;
+    const char *seg = rel;
+    while (*seg)
+    {
+        const char *end = strchr(seg, '/');
+        size_t sl = end ? (size_t)(end - seg) : strlen(seg);
+        if (pl && pl + 1 < sizeof(prefix)) prefix[pl++] = '/';
+        for (size_t k = 0; k < sl && pl + 1 < sizeof(prefix); k++) prefix[pl++] = seg[k];
+        prefix[pl] = '\0';
+        char segbuf[SD_PATH_MAX];
+        strlcpy(segbuf, seg, sl + 1 < sizeof(segbuf) ? sl + 1 : sizeof(segbuf));
+        html_escape(segbuf, segesc, sizeof(segesc));
+        url_encode(prefix, prefenc, sizeof(prefenc));
+        /* The last step stays unlinked -- that is where the listing already is. */
+        if (end)
+            HTML_PRINTF(crumb, "<a href='%s?p=%s%s%s'>%s</a>/", base, prefenc,
+                        lq ? "&amp;lang=" : "", lq ? lq : "", segesc);
+        else
+            HTML_PRINTF(crumb, "%s", segesc);
+        httpd_resp_send_chunk(req, crumb, HTTPD_RESP_USE_STRLEN);
+        seg = end ? end + 1 : seg + sl;
+    }
+    httpd_resp_send_chunk(req, "</p>", HTTPD_RESP_USE_STRLEN);
+}
+
+/* Sorting in the browser -- readdir hands rows over in creation order. Shared
+ * contract: <tbody id='dbody'>, data-c on sortable <th>, data-fix on fixed rows. */
+static void send_dir_sort_script(httpd_req_t *req)
+{
+    httpd_resp_send_chunk(req,
+        "<script>(function(){var tb=document.getElementById('dbody');if(!tb)return;var dir={};"
+        "function srt(c){dir[c]=!dir[c];var s=dir[c]?1:-1;"
+        /* data-fix, not a class: .pin in s.css is an unrelated glyph rule. */
+        "var r=[].slice.call(tb.rows).filter(function(x){return !x.hasAttribute('data-fix');});"
+        "r.sort(function(a,b){"
+        /* Directories stay on top in both directions. */
+        "var da=+(a.getAttribute('data-d')||0),db=+(b.getAttribute('data-d')||0);"
+        "if(da!==db)return db-da;"
+        "if(c===2)return s*((+a.getAttribute('data-sz'))-(+b.getAttribute('data-sz')));"
+        /* numeric:true is what puts 20260820-06 before -10. */
+        "return s*a.cells[1].textContent.localeCompare(b.cells[1].textContent,"
+        "undefined,{numeric:true,sensitivity:'base'});});"
+        "r.forEach(function(x){tb.appendChild(x);});}"
+        /* The heads turn clickable only here, once the last row has arrived --
+         * offering the affordance mid-stream promises what cannot work yet. */
+        "document.querySelectorAll('th[data-c]').forEach(function(h){"
+        "h.className='srt';h.tabIndex=0;"
+        "h.onclick=function(){srt(+h.getAttribute('data-c'));};"
+        "h.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();h.onclick();}};"
+        "});})();</script>", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t sdcard_get_handler(httpd_req_t *req)
@@ -6681,8 +7842,8 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     /* Flash partition layout first, then the SD-card section below it. */
     send_fs_overview(req);
-    char sdhdr[64];
-    snprintf(sdhdr, sizeof(sdhdr), "<h2>%s</h2>", T(S_FS_SDCARD));
+    char sdhdr[96];
+    snprintf(sdhdr, sizeof(sdhdr), "<div class='grp'><h2>%s</h2>", T(S_FS_SDCARD));
     httpd_resp_send_chunk(req, sdhdr, HTTPD_RESP_USE_STRLEN);
 
     if (!sdcard_is_mounted())
@@ -6691,13 +7852,17 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
          * mounts, and since 0.22.7 nothing formats it automatically. */
         char buf[1024];
         snprintf(buf, sizeof(buf),
-            "<p>%s</p><p><small>%s</small></p>"
-            "<form method='post' action='/sdcard/mount' style='display:inline-block;margin-right:8px'>"
+            /* Closes the SD group opened above: this branch returns early. */
+            "<p>%s</p><p class='note'>%s</p>"
+            /* A div, not a p: a <form> inside a <p> makes the parser close the
+             * paragraph early, and the row would fall apart. */
+            "<div class='btnrow tools'>"
+            "<form method='post' action='/sdcard/mount' style='display:inline-block'>"
             "<button>%s</button></form>"
             "<button onclick=\"if(confirm('%s')){"
             "var x=new XMLHttpRequest();x.open('POST','/sdcard/format');"
             "x.onload=function(){location.reload();};"
-            "this.innerText='%s';x.send();}\">%s</button>",
+            "this.innerText='%s';x.send();}\">%s</button></div></div>",
             T(S_SD_NOT_MOUNTED), T(S_SD_UNMOUNTED_HINT),
             T(S_SD_MOUNT),
             T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING), T(S_SD_FORMAT));
@@ -6709,16 +7874,24 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     /* Usage + upload form + format button */
     uint64_t total = 0, freeb = 0;
-    char usage[256] = "";
-    if (sdcard_usage(&total, &freeb) == ESP_OK)
+    char usage[384] = "";
+    /* total != 0 guards the percentage below against a divide by zero. */
+    if (sdcard_usage(&total, &freeb) == ESP_OK && total)
     {
         char t[24], u[24], f[24];
+        unsigned pct = (unsigned)(((total - freeb) * 100ull) / total);
         format_bytes64(total, t, sizeof(t));
         format_bytes64(total - freeb, u, sizeof(u));
         format_bytes64(freeb, f, sizeof(f));
         char used_of[128];
         snprintf(used_of, sizeof(used_of), T(S_SD_USED_OF), u, t, f);
-        snprintf(usage, sizeof(usage), "<p><b>%s:</b> %s</p>", T(S_SD_USAGE), used_of);
+        /* Same thresholds and the same tile as the SD figure on '/'. %% is a
+         * literal percent sign in the value, not a conversion. */
+        snprintf(usage, sizeof(usage),
+                 "<div class='grid'><div class='cell'><div class='l %s'>%s</div>"
+                 "<div class='v'>%u<span class='e'>%%</span></div>"
+                 "<div class='d'>%s</div></div></div>",
+                 lvl_class(pct, 80, 92), T(S_SD_USAGE), pct, used_of);
     }
 
     /* These scratch buffers are large; keeping them on the stack overflowed the
@@ -6727,22 +7900,27 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
      * places them in PSRAM .bss to spare the scarce internal SRAM. */
     static EXT_RAM_BSS_ATTR char relenc[SD_PATH_MAX * 3];
     url_encode(rel, relenc, sizeof(relenc));
-    /* rel is attacker-controlled (from ?p=) and gets displayed as a path
-     * breadcrumb below; escape it so it can't inject HTML/JS. */
-    static EXT_RAM_BSS_ATTR char relesc[SD_PATH_MAX * 6];
-    html_escape(rel, relesc, sizeof(relesc));
 
-    static EXT_RAM_BSS_ATTR char top[3584];
+    static EXT_RAM_BSS_ATTR char top[4096];
     snprintf(top, sizeof(top),
         "%s"
-        "<p>%s: <input type='file' id='fw'><button onclick='up()'>%s</button> "
+        /* Colon inside the span: on its own it would become a flex item of
+         * .tools and sit a gap away from the word. */
+        "<p class='tools'><span class='cap'>%s:</span><input type='file' id='fw'>"
+        "<button onclick='up()'>%s</button> "
         "<span id='ur'></span></p>"
-        "<p><button onclick='fmt()'>%s</button> <span id='fr'></span></p>"
-        "<p><button onclick='seltar()'>&#8595; %s</button> "
+        "<p class='btnrow tools'><button onclick='fmt()'>%s</button> <span id='fr'></span></p>"
+        "<p class='btnrow tools'><button onclick='seltar()'>&#8595; %s</button> "
         "<button onclick='seldel()'>%s</button></p>"
-        "<p><small>%s</small></p>"
+        "<p class='note'>%s</p>"
         "<script>"
-        "var P='%s';"
+        "var P='%s';var ITS_SD_FAIL='%s';"
+        /* All three buttons used to reload no matter what came back, so a 414
+         * from a long selection or a 500 looked exactly like success. */
+        "function sdreq(u,go){var x=new XMLHttpRequest();x.open('POST',u);"
+        "x.onload=function(){if(x.status!==200||x.responseText==='Error')"
+        "alert(ITS_SD_FAIL+' ('+x.status+')');location.reload();};"
+        "x.onerror=function(){alert(ITS_SD_FAIL);};x.send(go);}"
         /* P and del() paths are ALREADY url-encoded server-side -- encoding again
          * made %2520 out of a space. Only raw DOM values still need encoding. */
         "function up(){var f=document.getElementById('fw').files[0];if(!f){return;}"
@@ -6751,12 +7929,9 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "x.onload=function(){location.reload();};"
         "document.getElementById('ur').innerText='%s';x.send(f);}"
         "function fmt(){if(!confirm('%s'))return;"
-        "var x=new XMLHttpRequest();x.open('POST','/sdcard/format');"
-        "x.onload=function(){location.reload();};"
-        "document.getElementById('fr').innerText='%s';x.send();}"
+        "document.getElementById('fr').innerText='%s';sdreq('/sdcard/format');}"
         "function del(p){if(!confirm('%s'))return;"
-        "var x=new XMLHttpRequest();x.open('POST','/sdcard/delete?p='+p);"
-        "x.onload=function(){location.reload();};x.send();}"
+        "sdreq('/sdcard/delete?p='+p);}"
         "function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
         "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
         "function(c){s.push(encodeURIComponent(c.value));});"
@@ -6764,15 +7939,14 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "function seldel(){var s=[];document.querySelectorAll('.sel:checked').forEach("
         "function(c){s.push(encodeURIComponent(c.value));});"
         "if(!s.length){alert('%s');return;}if(!confirm('%s'))return;"
-        "var x=new XMLHttpRequest();x.open('POST','/sdcard/delete?sel='+s.join('|'));"
-        "x.onload=function(){location.reload();};x.send();}"
+        "sdreq('/sdcard/delete?sel='+s.join('|'));}"
         "</script>",
         usage,
         T(S_SD_UP_HERE), T(S_SD_UP_BTN),
         T(S_SD_FORMAT),
         T(S_TAR_SELECTED), T(S_SD_DELETE_SELECTED),
         T(S_TAR_HINT),
-        relenc,
+        relenc, T(S_SD_ACTION_FAILED),
         T(S_UPLOADING),
         T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING),
         T(S_SD_DELETE_CONFIRM),
@@ -6780,15 +7954,24 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, top, HTTPD_RESP_USE_STRLEN);
 
 
-    /* Own (small) chunk: the path breadcrumb is attacker-controlled (?p=), so
-     * it is kept separate from the buffer above and always HTML-escaped. */
-    static EXT_RAM_BSS_ATTR char breadcrumb[SD_PATH_MAX * 6 + 256];
-    snprintf(breadcrumb, sizeof(breadcrumb),
-        "<p><b>/%s</b></p><div class='scroll'><table>"
-        "<tr><th><input type='checkbox' onclick='selall(this)'></th>"
-        "<th>%s</th><th>%s</th><th></th></tr>",
-        relesc, T(S_SD_NAME), T(S_SD_SIZE));
-    httpd_resp_send_chunk(req, breadcrumb, HTTPD_RESP_USE_STRLEN);
+    /* NULL: the /sdcard listing links carry no lang= either, so the crumbs
+     * keep the page consistent instead of half-fixing it. */
+    /* Same language as /fs: resolve_language has no cookie and no default
+     * beyond German, so a link without lang= silently switches back. */
+    const char *lq = current_lang == LANG_EN ? "en" : "de";
+    send_path_crumbs(req, "/sdcard", lq, rel);
+
+    /* thead/tbody is not cosmetics: without it the header row sits in the
+     * implicit tbody and the client-side sorter would shuffle it in. */
+    char tblopen[512];
+    HTML_PRINTF(tblopen,
+        "<div class='scroll'><table><thead><tr>"
+        "<th><input type='checkbox' onclick='selall(this)'></th>"
+        "<th data-c='1'>%s</th>"
+        "<th data-c='2'>%s</th>"
+        "<th></th></tr></thead><tbody id='dbody'>",
+        T(S_SD_NAME), T(S_SD_SIZE));
+    httpd_resp_send_chunk(req, tblopen, HTTPD_RESP_USE_STRLEN);
 
     /* Parent-directory link */
     if (rel[0])
@@ -6799,10 +7982,13 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         if (slash) *slash = '\0'; else parent[0] = '\0';
         char penc[SD_PATH_MAX * 3];
         url_encode(parent, penc, sizeof(penc));
-        char row[SD_PATH_MAX * 3 + 128];
+        /* data-fix keeps this row out of the sort, hence always on top; the
+         * 14 bytes it costs go on top of an already thin percent-encoding margin. */
+        char row[SD_PATH_MAX * 3 + 192];
         snprintf(row, sizeof(row),
-            "<tr><td></td><td><a href='/sdcard?p=%s'>%s</a></td><td></td><td></td></tr>",
-            penc, T(S_SD_PARENT));
+            "<tr data-fix='1'><td></td><td><a href='/sdcard?p=%s&amp;lang=%s'>%s</a></td>"
+            "<td></td><td></td></tr>",
+            penc, lq, T(S_SD_PARENT));
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -6841,22 +8027,25 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
             url_encode(childrel, relenc2, sizeof(relenc2));
             html_escape(childrel, relhtml, sizeof(relhtml));
 
+            /* data-d/data-sz feed the client-side sorter: the displayed size is
+             * already formatted ("1.0 MiB") and cannot be compared numerically. */
             static EXT_RAM_BSS_ATTR char row[SD_PATH_MAX * 14];
             if (is_dir)
             {
                 snprintf(row, sizeof(row),
-                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
-                    "<td><a href='/sdcard?p=%s'>%s/</a></td><td></td><td></td></tr>",
-                    relhtml, relenc2, nameesc);
+                    "<tr data-d='1' data-sz='0'><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<td><a href='/sdcard?p=%s&amp;lang=%s'>%s/</a></td><td></td><td></td></tr>",
+                    relhtml, relenc2, lq, nameesc);
             }
             else
             {
                 char sz[32];
                 format_bytes64((uint64_t)st.st_size, sz, sizeof(sz));
                 snprintf(row, sizeof(row),
-                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<tr data-d='0' data-sz='%llu'><td><input type='checkbox' class='sel' value='%s'></td>"
                     "<td><a href='/sdcard/download?p=%s'>%s</a></td><td>%s</td>"
                     "<td><button onclick=\"del('%s')\">%s</button></td></tr>",
+                    (unsigned long long)st.st_size,
                     relhtml, relenc2, nameesc, sz, relenc2, T(S_SD_DELETE));
             }
             httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
@@ -6869,11 +8058,14 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     if (entries == 0)
     {
         char row[128];
-        snprintf(row, sizeof(row), "<tr><td colspan='4'>%s</td></tr>", T(S_SD_EMPTY));
+        snprintf(row, sizeof(row), "<tr data-fix='1'><td colspan='4'>%s</td></tr>", T(S_SD_EMPTY));
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
-    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+    send_dir_sort_script(req);
+    /* Own chunk so the closing tag of the SD group is findable when reading. */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -7110,8 +8302,11 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
     /* Bulk path: ?sel=a|b|c, same encoding as /sdcard/tar's ?sel= (percent-
      * encoded '|' folded back first). Directories are removed recursively
      * (see sd_rm_tree); bad paths are silently skipped, best-effort. */
-    char query[1024];
-    char sel[1024] = "";
+    /* Static, not stack: 8 KB of scratch would halve the httpd task's stack.
+     * Own copies -- tar_download has its own and runs on the worker task. */
+    static EXT_RAM_BSS_ATTR char query[4096];
+    static EXT_RAM_BSS_ATTR char sel[4096];
+    sel[0] = '\0';
     bool have_sel = false;
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
         have_sel = httpd_query_key_value(query, "sel", sel, sizeof(sel)) == ESP_OK;
@@ -7148,6 +8343,8 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
             if (lock_busy) break;
         }
         sdcard_read_end();
+        if (failed)
+            httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, failed == 0 ? "OK" : "Error");
         return failed == 0 ? ESP_OK : ESP_FAIL;
     }
@@ -7169,6 +8366,7 @@ static esp_err_t sdcard_delete_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, "OK");
         return ESP_OK;
     }
+    httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_sendstr(req, "Error");
     return ESP_FAIL;
 }
@@ -7493,29 +8691,38 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
     const char *lq = current_lang == LANG_EN ? "en" : "de";
     send_page_header(req, T(S_TITLE_SD));
 
-    /* Heading, back-link to the overview, and the current-path breadcrumb.
-     * rel comes from ?p= (attacker-controlled) → always HTML-escaped. */
-    static EXT_RAM_BSS_ATTR char relesc[SD_PATH_MAX * 6];
-    html_escape(rel, relesc, sizeof(relesc));
-    static EXT_RAM_BSS_ATTR char head[SD_PATH_MAX * 12];
-    snprintf(head, sizeof(head),
-        "<h2>%s &middot; /data</h2>"
-        "<p><a href='/sdcard?lang=%s'>&larr; %s</a></p>"
-        "<p><button onclick='seltar()'>&#8595; %s</button></p>"
-        "<p><small>%s</small></p>"
+    /* No path in here any more (send_path_crumbs escapes it per step), so a
+     * small stack buffer replaces the 3840-byte PSRAM static. */
+    char head[1024];
+    HTML_PRINTF(head,
+        /* Path in a span: the heading is uppercased, and a mount point is
+         * case-sensitive -- "/DATA" names something that does not exist. */
+        "<div class='grp top'><h2>%s &middot; <span class='path'>/data</span></h2>"
+        "<p class='jump'><a href='/sdcard?lang=%s'>&larr; %s</a></p>"
+        "<p class='btnrow tools'><button onclick='seltar()'>&#8595; %s</button></p>"
+        "<p class='note'>%s</p>"
         "<script>function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
         "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
         "function(c){s.push(encodeURIComponent(c.value));});"
-        "if(!s.length){alert('%s');return;}location.href='/fs/tar?sel='+s.join('|');}</script>"
-        "<p><b>/%s</b></p><div class='scroll'><table>"
-        "<tr><th><input type='checkbox' onclick='selall(this)'></th>"
-        "<th>%s</th><th>%s</th></tr>",
+        "if(!s.length){alert('%s');return;}location.href='/fs/tar?sel='+s.join('|');}</script>",
         T(S_FS_INTERNAL), lq, T(S_TITLE_SD),
         T(S_TAR_SELECTED),
         T(S_TAR_HINT),
-        T(S_TAR_NONE),
-        relesc, T(S_SD_NAME), T(S_SD_SIZE));
+        T(S_TAR_NONE));
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+    send_path_crumbs(req, "/fs", lq, rel);
+
+    /* thead/tbody is not cosmetics: without it the header row sits in the
+     * implicit tbody and the client-side sorter would shuffle it in. */
+    char tblopen[512];
+    HTML_PRINTF(tblopen,
+        "<div class='scroll'><table><thead><tr>"
+        "<th><input type='checkbox' onclick='selall(this)'></th>"
+        "<th data-c='1'>%s</th>"
+        "<th data-c='2'>%s</th></tr></thead><tbody id='dbody'>",
+        T(S_SD_NAME), T(S_SD_SIZE));
+    httpd_resp_send_chunk(req, tblopen, HTTPD_RESP_USE_STRLEN);
 
     /* Parent-directory link */
     if (rel[0])
@@ -7526,9 +8733,10 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
         if (slash) *slash = '\0'; else parent[0] = '\0';
         char penc[SD_PATH_MAX * 3];
         url_encode(parent, penc, sizeof(penc));
-        char row[SD_PATH_MAX * 3 + 128];
+        /* data-fix keeps this row out of the sort, hence always on top. */
+        char row[SD_PATH_MAX * 3 + 192];
         snprintf(row, sizeof(row),
-            "<tr><td></td><td><a href='/fs?p=%s&amp;lang=%s'>%s</a></td><td></td></tr>",
+            "<tr data-fix='1'><td></td><td><a href='/fs?p=%s&amp;lang=%s'>%s</a></td><td></td></tr>",
             penc, lq, T(S_SD_PARENT));
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
@@ -7565,7 +8773,7 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
             if (is_dir)
             {
                 snprintf(row, sizeof(row),
-                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<tr data-d='1' data-sz='0'><td><input type='checkbox' class='sel' value='%s'></td>"
                     "<td><a href='/fs?p=%s&amp;lang=%s'>%s/</a></td><td></td></tr>",
                     relhtml, relenc2, lq, nameesc);
             }
@@ -7573,9 +8781,12 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
             {
                 char sz[32];
                 format_bytes64((uint64_t)st.st_size, sz, sizeof(sz));
+                /* data-d/data-sz feed the sorter: the displayed size is already
+                 * formatted ("1.0 MiB") and cannot be compared numerically. */
                 snprintf(row, sizeof(row),
-                    "<tr><td><input type='checkbox' class='sel' value='%s'></td>"
+                    "<tr data-d='0' data-sz='%llu'><td><input type='checkbox' class='sel' value='%s'></td>"
                     "<td><a href='/fs/download?p=%s'>%s</a></td><td>%s</td></tr>",
+                    (unsigned long long)st.st_size,
                     relhtml, relenc2, nameesc, sz);
             }
             httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
@@ -7586,11 +8797,14 @@ static esp_err_t internal_get_handler(httpd_req_t *req)
     if (entries == 0)
     {
         char row[128];
-        snprintf(row, sizeof(row), "<tr><td colspan='3'>%s</td></tr>", T(S_SD_EMPTY));
+        snprintf(row, sizeof(row), "<tr data-fix='1'><td colspan='3'>%s</td></tr>", T(S_SD_EMPTY));
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
 
-    httpd_resp_send_chunk(req, "</table></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
+    send_dir_sort_script(req);
+    /* Own chunk so the closing tag of the page's group is findable. */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -7813,8 +9027,10 @@ static esp_err_t tar_download(httpd_req_t *req, const char *mount)
     httpd_resp_set_type(req, "application/x-tar");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"download.tar\"");
 
-    char query[1024];
-    char sel[1024] = "";
+    /* Own statics, see sdcard_delete_handler: this one serves on the worker. */
+    static EXT_RAM_BSS_ATTR char query[4096];
+    static EXT_RAM_BSS_ATTR char sel[4096];
+    sel[0] = '\0';
     char pdir[SD_PATH_MAX] = "";
     bool have_sel = false;
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
@@ -7938,6 +9154,9 @@ static esp_err_t defer_to_worker(httpd_req_t *req, esp_err_t (*fn)(httpd_req_t *
     {
         httpd_resp_set_status(req, "503 Busy");
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        /* Same header the deferred handlers set themselves: without it a peer's
+         * browser drops the 503 as a CORS error and never sees the reason. */
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         httpd_resp_sendstr(req, "Beschäftigt – eine andere Übertragung läuft noch. / "
                                 "Busy – another transfer is still running.");
         return ESP_OK;
@@ -8269,6 +9488,8 @@ static esp_err_t internal_tar_async(httpd_req_t *req)     { return defer_to_work
 static esp_err_t internal_download_async(httpd_req_t *req){ return defer_to_worker(req, internal_download_handler); }
 static esp_err_t partimg_download_async(httpd_req_t *req) { return defer_to_worker(req, partimg_download_handler); }
 static esp_err_t playback_get_async(httpd_req_t *req)     { return defer_to_worker(req, playback_get_handler); }
+/* 7.5 s at days=7, all of it on the one httpd task before this. */
+static esp_err_t tracks_get_async(httpd_req_t *req)       { return defer_to_worker(req, tracks_get_handler); }
 
 /* ================================================================== */
 /*  /logs  -- view the SD log files inline in the browser             */
@@ -8355,14 +9576,34 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     if (!check_update_auth(req))
         return send_auth_required(req);
 
-    const char *path = CONFIG_SNIFFER_MOUNT_POINT "/logs/system.log";
+    /* Whitelist, never a path from the query: ?f=1 selects the rotated file
+     * and nothing else, so no ?p=-style traversal can reach fopen() here. */
+    char q[256] = {0}, fv[8] = {0};
+    bool old = false;
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "f", fv, sizeof(fv)) == ESP_OK)
+        old = (strcmp(fv, "1") == 0);
+
+    const char *path = old ? CONFIG_SNIFFER_MOUNT_POINT "/logs/system.1.log"
+                           : CONFIG_SNIFFER_MOUNT_POINT "/logs/system.log";
     const char *lc = current_lang == LANG_DE ? "de" : "en";
 
     send_page_header(req, T(S_TITLE_LOGS));
 
-    char nav[320];
-    snprintf(nav, sizeof(nav), "<p><b>%s</b> &middot; <a href='/logs?lang=%s'>%s</a></p>",
-             T(S_LOGS_SYS), lc, T(S_LOGS_REFRESH));
+    /* Links go out before fopen() so the switch to the other file stays
+     * reachable when this one is missing; the filter controls do not (see below). */
+    char nav[512];
+    HTML_PRINTF(nav,
+        /* The group opens after the links: they must stay reachable when the
+         * file is missing, and that branch closes the group itself. */
+        "<p class='jump'><b>%s</b> &middot; <a href='/logs?f=%s&amp;lang=%s'>%s</a>"
+        " &middot; <a href='/logs?f=%s&amp;lang=%s'>%s</a>"
+        " &middot; <a href='/sdcard/download?p=logs/%s'>&#8595; %s</a></p>"
+        "<div class='grp top'>",
+        old ? T(S_LOGS_OLD) : T(S_LOGS_SYS),
+        old ? "1" : "0", lc, T(S_LOGS_REFRESH),
+        old ? "0" : "1", lc, old ? T(S_LOGS_SYS) : T(S_LOGS_OLD),
+        old ? "system.1.log" : "system.log", T(S_LOGS_DOWNLOAD));
     httpd_resp_send_chunk(req, nav, HTTPD_RESP_USE_STRLEN);
 
     /* Counted reader -- the tail stream sends many chunks with the FILE open;
@@ -8373,8 +9614,8 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     {
         if (rd)
             sdcard_read_end();
-        char msg[128];
-        snprintf(msg, sizeof(msg), "<p>%s</p>", T(S_LOGS_NONE));
+        char msg[192];
+        snprintf(msg, sizeof(msg), "<p class='note'>%s</p></div>", T(S_LOGS_NONE));
         httpd_resp_send_chunk(req, msg, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, NULL, 0);
@@ -8385,11 +9626,30 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     long size = ftell(f);
     long start = size > (LOGS_TAIL_KB * 1024) ? size - (LOGS_TAIL_KB * 1024) : 0;
 
-    char note[128];
-    httpd_resp_send_chunk(req, "<p><small>", HTTPD_RESP_USE_STRLEN);
+    /* Only now that the file is open: on the error path above there is no
+     * <pre> and no filter script, so live controls there would be dead. */
+    /* disabled until that script defines lgf(): a live-looking dead button is
+     * worse than one that visibly is not ready yet (CSS: #lgb0:disabled). */
+    char tools[640];
+    HTML_PRINTF(tools,
+        "<p class='btnrow tools'><button id='lgb0' disabled onclick='lgf(0)'>%s</button> "
+        "<button id='lgb1' disabled onclick='lgf(1)'>%s</button> "
+        "<input id='lgq' disabled oninput='lgf()' placeholder='%s' size='16'> "
+        "<span id='lgcnt' class='cap'>%s</span> <small>%s</small></p>",
+        T(S_LOGS_F_ALL), T(S_LOGS_F_PROB), T(S_LOGS_SEARCH),
+        T(S_LOGS_LOADING), T(S_LOGS_LINES));
+    httpd_resp_send_chunk(req, tools, HTTPD_RESP_USE_STRLEN);
+
+    /* Two buffers, not one appended: both formats come from T(), and only a
+     * hand-clamped snprintf return would keep a long translation in bounds. */
+    char note[128], hint[256];
+    httpd_resp_send_chunk(req, "<p class='note'>", HTTPD_RESP_USE_STRLEN);
     snprintf(note, sizeof(note), T(S_LOGS_TAIL), LOGS_TAIL_KB);
     httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</small></p><pre style='white-space:pre-wrap;word-break:break-all;background:#000;padding:1em;border:1px solid #444;max-height:70vh;overflow:auto'>",
+    httpd_resp_send_chunk(req, " ", HTTPD_RESP_USE_STRLEN);
+    snprintf(hint, sizeof(hint), T(S_LOGS_FILTER_HINT), LOGS_TAIL_KB);
+    httpd_resp_send_chunk(req, hint, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</p><pre id='lgpre' class='logpre'>",
                           HTTPD_RESP_USE_STRLEN);
 
     stream_tail_escaped(req, f, start);
@@ -8397,6 +9657,37 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     sdcard_read_end();
 
     httpd_resp_send_chunk(req, "</pre>", HTTPD_RESP_USE_STRLEN);
+    /* Filtering happens in the browser on the text already delivered. Read and
+     * written via textContent only -- log lines are unescaped foreign material. */
+    httpd_resp_send_chunk(req,
+        "<script>(function(){"
+        "var pre=document.getElementById('lgpre');"
+        "var lines=pre.textContent.split('\\n'),mode=0,total=0;"
+        /* Matches the ESP-IDF prefix "W (05:12:44) "; the server already
+         * trimmed the milliseconds, so the shape is fixed. */
+        "function lvl(s){return (s.length>2&&s[0]>='A'&&s[0]<='Z'&&s[1]===' '&&s[2]==='(')?s[0]:'';}"
+        "for(var i=0;i<lines.length;i++)if(lvl(lines[i]))total++;"
+        "window.lgf=function(m){"
+        "if(m!==undefined)mode=m;"
+        "var q=document.getElementById('lgq').value.toLowerCase(),out=[],n=0;"
+        /* Lines without a prefix (backtraces, wrapped long lines) inherit the
+         * visibility of the line above; unfiltered they must start visible. */
+        "var keep=(mode===0&&!q);"
+        "for(var i=0;i<lines.length;i++){var s=lines[i],l=lvl(s);"
+        /* The daily marker has no prefix and would be inherited away, taking
+         * the only date reference in the filtered view with it. */
+        "if(s.indexOf('=====')===0){out.push(s);continue;}"
+        "if(l){keep=(mode===0)||(l==='W'||l==='E');"
+        "if(keep&&q)keep=s.toLowerCase().indexOf(q)>=0;"
+        "if(keep)n++;}"
+        "if(keep)out.push(s);}"
+        "pre.textContent=out.join('\\n');"
+        "document.getElementById('lgcnt').textContent=n+' / '+total;};"
+        "['lgb0','lgb1','lgq'].forEach(function(i){"
+        "document.getElementById(i).disabled=false;});"
+        "lgf(0);})();</script>", HTTPD_RESP_USE_STRLEN);
+    /* Own chunk so the closing tag of the page's group is findable. */
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -8439,11 +9730,13 @@ void webserver_init(void)
     config.server_port = 80;
     config.stack_size = 16384;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 58; /* 50 routes today, plus headroom */
+    config.max_uri_handlers = 58; /* 51 routes today, plus headroom */
     /* /messages and /map each hold a /ws socket open for as long as the tab
      * is open -- 8 proved too tight once /map existed (accept() failures as
      * dead WS sessions piled up, see the reaping in ws_broadcast_work). */
     config.max_open_sockets = 11;
+    /* sdkconfig raises CONFIG_HTTPD_MAX_URI_LEN to 4096 for bulk selections;
+     * req->uri is sized at compile time, config.max_uri_len cannot lift it. */
     /* Wildcard matching lets one handler answer all the icon variants a browser
      * probes (/favicon*, /apple-touch-icon*). Exact routes still match exactly. */
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -8499,6 +9792,7 @@ void webserver_init(void)
 #endif
         { .uri = "/leaflet.js",  .method = HTTP_GET, .handler = leaflet_js_get_handler },
         { .uri = "/leaflet.css", .method = HTTP_GET, .handler = leaflet_css_get_handler },
+        { .uri = "/s.css",       .method = HTTP_GET, .handler = s_css_get_handler },
         { .uri = "/favicon*",          .method = HTTP_GET, .handler = favicon_get_handler },
         { .uri = "/apple-touch-icon*", .method = HTTP_GET, .handler = apple_icon_get_handler },
         { .uri = "/icon-192.png",      .method = HTTP_GET, .handler = icon192_get_handler },
@@ -8509,7 +9803,7 @@ void webserver_init(void)
 #endif
 #if CONFIG_ENABLE_SD
         { .uri = "/map/playback",    .method = HTTP_GET,  .handler = playback_get_async },
-        { .uri = "/tracks.json",     .method = HTTP_GET,  .handler = tracks_get_handler },
+        { .uri = "/tracks.json",     .method = HTTP_GET,  .handler = tracks_get_async },
         { .uri = "/markers.json",    .method = HTTP_GET,  .handler = markers_json_handler },
         { .uri = "/sdcard",          .method = HTTP_GET,  .handler = sdcard_get_handler },
         { .uri = "/sdcard/download", .method = HTTP_GET,  .handler = sdcard_download_async },

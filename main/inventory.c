@@ -148,6 +148,28 @@ int inventory_snapshot(inv_station_t *out)
     return n;
 }
 
+int inventory_lookup_mac(const uint8_t mac[6], char *out, size_t cap,
+                         uint32_t *id_out)
+{
+    if (out && cap) out[0] = 0;
+    if (id_out) *id_out = 0;
+    /* Short timeout, never portMAX_DELAY: this is asked per table row on the
+     * httpd task while inv_save may hold the lock for a whole rewrite. */
+    if (!s_lock || !mac || xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE)
+        return -1;
+    int found = 0;
+    for (int i = 0; i < s_count; i++)
+        if (s_tab[i].has_mac && memcmp(s_tab[i].mac, mac, 6) == 0)
+        {
+            if (out && cap) snprintf(out, cap, "%s", s_tab[i].name);
+            if (id_out) *id_out = s_tab[i].station_id;
+            found = 1;
+            break;
+        }
+    xSemaphoreGive(s_lock);
+    return found;
+}
+
 uint32_t inventory_vehicle_frames(void) { return s_veh_frames; }
 
 bool inventory_overflow(void) { return s_overflow; }

@@ -39,6 +39,9 @@ int ptlog_snapshot(pt_line_t *out);
 /* Vehicles currently being tracked as an ongoing passage. */
 int ptlog_open_count(void);
 
+/* Completed passages the append queue could not take, since boot. */
+uint32_t ptlog_passages_dropped(void);
+
 /* One completed passage, newest first, read back from the log on the card. */
 typedef struct {
     uint32_t seconds;
@@ -47,6 +50,10 @@ typedef struct {
     int8_t   deviation;
     uint16_t secs_in_range;
 } pt_pass_t;
+
+/* Passage rows kept on the card; ~40 bytes per row, so ~80 KB. In the header
+ * because a caller sizing its array smaller only throws rows away. */
+#define PT_PASS_KEEP 2000
 
 /* Reads up to `max` most recent passages. Returns the count written. */
 int ptlog_read_passages(pt_pass_t *out, int max);

@@ -43,6 +43,13 @@ void inventory_note(uint32_t seconds, int rssi, const its_decoded_t *d);
  * Returns the number written, newest activity first. */
 int inventory_snapshot(inv_station_t *out);
 
+/* Name of the stationary sender with this MAC, "" when the address has none or
+ * is not in the table at all -- vehicles never get a row here. */
+/* 1 = MAC is listed, 0 = not listed, -1 = list was busy. The name may be
+ * empty for a listed sender, so only the return value means "found". */
+int inventory_lookup_mac(const uint8_t mac[6], char *out, size_t cap,
+                         uint32_t *id_out);
+
 /* Frames from senders that never get a row of their own (vehicles). */
 uint32_t inventory_vehicle_frames(void);
 

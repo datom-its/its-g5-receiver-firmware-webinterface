@@ -44,10 +44,12 @@ typedef struct {
 /* Measured phase durations per signal group -- the controller never states them.
  * Kept out of the cache entry: display data, four internal-RAM copies cost ~28 KB. */
 typedef struct {
-    uint32_t secs[ITS_SPAT_MAX_SG][3];   /* 0 = green, 1 = amber, 2 = red */
-    uint32_t cnt[ITS_SPAT_MAX_SG][3];    /* never scaled: halving it made the
+    /* 0 = green, 1 = red-amber (pre-movement), 2 = amber, 3 = red. Red-amber
+     * kept apart: mixed in, the amber column is a blend, not a duration. */
+    uint32_t secs[ITS_SPAT_MAX_SG][4];
+    uint32_t cnt[ITS_SPAT_MAX_SG][4];    /* never scaled: halving it made the
                                           * shown observation count a lie */
-    uint32_t max[ITS_SPAT_MAX_SG][3];    /* seconds; 16 bit overflowed at a
+    uint32_t max[ITS_SPAT_MAX_SG][4];    /* seconds; 16 bit overflowed at a
                                           * light resting in one phase */
     /* Start of the running phase on the MONOTONIC clock (uptime seconds), not
      * wall clock: an NTP step must not lengthen or shorten a measured phase. */
@@ -61,7 +63,14 @@ typedef struct {
     uint8_t  n_rows;
     uint8_t  phase[ITS_SPAT_MAX_SG];      /* eventState when last seen */
     uint32_t last_mono[ITS_SPAT_MAX_SG];  /* monotonic time of that sighting */
+    /* mono_now() at the instant of the copy: the caller cannot read that clock
+     * and would otherwise time a running phase against the wall clock. */
+    uint32_t now_mono;
 } spatem_phases_t;
+
+/* Reception gap that voids a running phase measurement: beyond this we cannot
+ * tell whether the light flipped while we were not listening. */
+#define SPAT_GAP_SEC 10
 
 /* Copies the phase tallies for one cached intersection (by region+id) under
  * the module lock. False = that intersection is not cached. */

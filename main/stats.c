@@ -201,6 +201,7 @@ void tstat_tick(void)
 
     /* Guards append and prune rewrite against unmount/format and the other SD
      * writers. Bounded: this runs on the sysmon (watchdog) task. */
+    /* Non-recursive, so it also holds a second tstat_tick off until the flag clears. */
     if (!sdcard_io_begin_timeout(2000))
         return;
 
@@ -294,9 +295,14 @@ void tstat_flush_now(void)
     }
     s_pending = s_current;
     s_have_pending = true;
+    /* s_seen[] and the sender counts SURVIVE: /poweroff and an aborted rollback
+     * flush and keep running, and the rest of the hour must not recount. */
+    uint32_t keep[STAT_NCAT];
+    memcpy(keep, s_current.senders, sizeof(keep));
+    bool keep_capped = s_current.senders_capped;
     memset(&s_current, 0, sizeof(s_current));
-    memset(s_seen, 0, sizeof(s_seen));
-    s_seen_used = 0;
+    memcpy(s_current.senders, keep, sizeof(keep));
+    s_current.senders_capped = keep_capped;
     s_current.hour = s_pending.hour;    /* same hour keeps accumulating */
     xSemaphoreGive(s_lock);
     tstat_tick();
@@ -317,7 +323,9 @@ static void stat_hour_merge(stat_hour_t *dst, const stat_hour_t *src)
          * both halves. The larger half is the honest lower bound. */
         if (src->senders[c] > dst->senders[c]) dst->senders[c] = src->senders[c];
     }
-    dst->senders_capped = dst->senders_capped || src->senders_capped;
+    /* Merging only happens for two parts of the SAME hour, and s_seen[] is gone
+     * across the cut -- the merged count is a lower bound by definition. */
+    dst->senders_capped = true;
     dst->speed_legacy   = dst->speed_legacy   || src->speed_legacy;
 }
 

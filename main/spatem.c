@@ -25,10 +25,6 @@ static bool s_geom_ready[SPATEM_MAX_INT];
 static SemaphoreHandle_t s_geom_lock;
 static const char TAG[] = "SPATEM";
 
-/* Reception gap that voids a running phase measurement: beyond this we cannot
- * tell whether the light flipped while we were not listening. */
-#define SPAT_GAP_SEC 10
-
 /* Silence -- neither SPATEM nor MAPEM -- after which a slot may be evicted.
  * NTP sync steps the seconds base once, so older slots look dead for one message. */
 #define SPAT_DEAD_SEC 60
@@ -61,6 +57,7 @@ bool spatem_phases(uint16_t region, uint16_t id, spatem_phases_t *out)
         if (s_int[i].id == id && s_int[i].region == region && s_int[i].n)
         {
             memcpy(out, &s_ph[i], sizeof(*out));
+            out->now_mono = mono_now();
             found = true;
             break;
         }
@@ -95,15 +92,16 @@ void spatem_geometry_unlock(void)
         xSemaphoreGive(s_geom_lock);
 }
 
-/* green / amber / red, or -1 for anything else (dark, flashing, unknown). */
+/* green / red-amber / amber / red, or -1 for anything else (dark, flashing). */
 static int spat_phase_class(uint8_t phase)
 {
     switch (phase)
     {
-    case 5: case 6:                 return 0;
-    case 4: case 7: case 8: case 9: return 1;
-    case 2: case 3:                 return 2;
-    default:                        return -1;
+    case 5: case 6:          return 0;
+    case 4:                  return 1;   /* pre-movement = red+amber */
+    case 7: case 8: case 9:  return 2;   /* clearance / caution = amber */
+    case 2: case 3:          return 3;
+    default:                 return -1;
     }
 }
 

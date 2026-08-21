@@ -30,7 +30,7 @@ typedef struct {
     /* Distinct sender identities per category. Pseudonyms rotate every few
      * minutes, so this is an estimate of the vehicle count -- never call it exact. */
     uint32_t senders[STAT_NCAT];
-    bool     senders_capped;    /* set table full: counts are a lower bound */
+    bool     senders_capped;    /* counts are a lower bound: table full, or hour merged from parts */
     /* Row predates the rule that counts standing vehicles towards the average;
      * its sums follow the older, higher-reading definition. */
     bool     speed_legacy;

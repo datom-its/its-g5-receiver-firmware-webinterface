@@ -53,6 +53,10 @@ static void sd_lock_give(void)
  * because every user just returns quietly on timeout. */
 static volatile uint32_t s_fail_streak;
 static volatile int64_t  s_held_since_us;
+/* Peaks, because both live values read 0 whenever anyone looks: every
+ * successful acquire clears the streak, every release clears the hold. */
+static volatile uint32_t s_fail_max;
+static volatile uint32_t s_held_max_ms;
 
 static void sd_mark_held(void) { s_held_since_us = esp_timer_get_time(); }
 
@@ -108,7 +112,11 @@ bool sdcard_io_begin_timeout(uint32_t timeout_ms)
         return false;
     if (xSemaphoreTake(sd_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
     {
-        s_fail_streak++;
+        uint32_t st = ++s_fail_streak;
+        /* Same mask long_end applies: misses behind an archive walk, mount or
+         * format are expected and must not latch a peak for the whole uptime. */
+        if (!long_op_active() && st > s_fail_max)
+            s_fail_max = st;
         return false;
     }
     if (card == NULL)
@@ -123,6 +131,16 @@ bool sdcard_io_begin_timeout(uint32_t timeout_ms)
 
 void sdcard_io_end(void)
 {
+    /* Peak first: the stamp is cleared below, and long_end has already re-stamped
+     * a hold that spanned a long op, so only the short remainder is measured. */
+    int64_t since = s_held_since_us;
+    if (since && !long_op_active())
+    {
+        int64_t d = esp_timer_get_time() - since;
+        uint32_t ms = d > 0 ? (uint32_t)(d / 1000) : 0;
+        if (ms > s_held_max_ms)
+            s_held_max_ms = ms;
+    }
     /* A completed transaction proves the bus is alive. Clearing here and not only
      * in begin_timeout() also covers the blocking sdcard_io_begin() path. */
     s_fail_streak = 0;
@@ -155,6 +173,9 @@ void sdcard_io_long_end(void)
 }
 
 uint32_t sdcard_io_fail_streak(void) { return long_op_active() ? 0 : s_fail_streak; }
+
+uint32_t sdcard_io_fail_max(void)    { return s_fail_max; }
+uint32_t sdcard_io_held_max_ms(void) { return s_held_max_ms; }
 
 uint32_t sdcard_io_held_ms(void)
 {

@@ -197,6 +197,10 @@ static void note_drop(drop_stat_t *st, const char *what, unsigned len)
 static drop_stat_t s_drop_notify;   /* writer task only */
 static drop_stat_t s_drop_enqueue;  /* publisher (sniffer packet path) only */
 
+/* Read-only for the loss table; each counter has a single writer task. */
+uint32_t bt_stream_dropped_notify(void)  { return s_drop_notify.count; }
+uint32_t bt_stream_dropped_enqueue(void) { return s_drop_enqueue.count; }
+
 static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {

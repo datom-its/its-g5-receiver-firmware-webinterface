@@ -53,5 +53,6 @@ idf_component_register(
         "assets/icon-512.png"
         "assets/leaflet.js"
         "assets/leaflet.css"
+        "assets/s.css"
 )
 

@@ -47,6 +47,11 @@ bool sdcard_io_begin_timeout(uint32_t timeout_ms);
 uint32_t sdcard_io_fail_streak(void);
 uint32_t sdcard_io_held_ms(void);
 
+/* The same two as peaks since boot, for the loss table: the live pair reads 0
+ * almost always, so a poll would never catch the warning signs. */
+uint32_t sdcard_io_fail_max(void);
+uint32_t sdcard_io_held_max_ms(void);
+
 /* Marks a legitimately long hold (archive walk, mount, format) so the stall
  * watchdog does not mistake it for a wedged writer. Must be paired. */
 void sdcard_io_long_begin(void);
