@@ -3,8 +3,7 @@
 Modified firmware for the **opentrafficmap ITS-G5 receiver** (official board)
 — a passive 802.11p / ITS-G5 (V2X) sniffer on ESP32-C5 that forwards raw frames
 over MQTT. This fork adds a built-in web interface, a live map, on-device PCAP
-recording with playback, optional Bluetooth streaming to a phone, and a number
-of bug fixes on top of the upstream firmware.
+recording with playback, and optional Bluetooth streaming to a phone.
 
 Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 
@@ -23,8 +22,7 @@ Pre-compiled binaries are available under
 — the newest release is at the top of that page. Download
 `its-g5-receiver-firmware.bin` and flash it via the web interface (`/update`),
 or grab all four `.bin` files for an initial flash over USB (see below).
-No build environment needed. The version history below lists what changed in
-each release.
+No build environment needed.
 
 > ⚠️ **Coming from the original opentrafficmap firmware, or from 0.16.0 or
 > earlier, flash all four `.bin` files once over USB** (see
@@ -54,15 +52,15 @@ Older entries, back to the first web-UI firmware, are in [CHANGELOG.md](CHANGELO
 ## Web interface
 
 Once the device has an IP address, a built-in web interface is available on
-port 80. German by default; append `?lang=en` (or use the language link) for
-English.
+port 80. It is in German. The flags in the top right corner switch to English.
 
-- `/` — status dashboard: node ID, MAC, firmware version, sniffer state, active
-  channel, MQTT status, uptime, packets received, packet rate (last 60 s), free
-  heap, temperature. Auto-refreshes (interval configurable on `/settings`);
-  Start/Stop sniffer and Reboot buttons. If the running firmware was installed
-  via update and not yet confirmed, a banner with a **Confirm update** button
-  appears here.
+- `/` — status dashboard: frames received, rate over the last minute, uptime,
+  active channel, sniffer state, MQTT, SD card usage, temperature, node ID, MAC
+  and firmware version. A sparkline draws the last minute of traffic, and every
+  other receiver on the network gets a row with its rate and uptime.
+  Start/Stop sniffer, reboot and power-off buttons. If the running firmware was
+  installed via update and not yet confirmed, a banner with a **Confirm update**
+  button appears here.
 - `/messages` — the last 20 received frames (time, RSSI, length, type, hex
   preview), newest first, live over WebSocket. Times are real local `HH:MM:SS`
   once NTP has synced (see 0.6.2).
@@ -74,14 +72,20 @@ English.
   play button; a **Live** button returns to the real-time feed. Map tiles
   need the browser to have internet access (OpenStreetMap) — the device
   itself does not.
-- `/traffic` — how much of each road-user category was received per hour, rolled
-  up per day beyond 48 hours, with distinct radio identifiers per hour and the
-  green/red phase durations measured from the traffic lights themselves.
+- `/traffic` — how many vehicles of each category were seen per hour, rolled up
+  per day beyond 48 hours. Green, red-amber, amber and red phase durations are
+  measured from the traffic lights themselves, and a chip says how long the
+  current phase has been running. Stored warnings are listed with the station
+  that sent them and, over a window longer than a day, as a profile by hour of
+  day and by weekday.
 - `/senders` — every stationary sender heard (traffic light or roadside unit),
-  with the message types it transmits, signal level, position and how long it
-  has been known. Survives restarts on the SD card and can be reset.
+  with the message types it transmits, signal level, position, radio address
+  and how long it has been known. Vehicles use locally administered addresses
+  and roadside units carry a vendor prefix, so the two are easy to tell apart.
+  Survives restarts on the SD card and can be reset.
 - `/transit` — the public-transport telegrams (VDV R09) decoded into passages
-  per line, schedule deviation, and a log of individual passages.
+  per line, schedule deviation, headway, operating hours, the two most common
+  destinations, and a log of individual passages.
 - `/settings` — view and change node ID, MQTT URI, autostart channel, LED
   brightness (applied live), the web password, network (DHCP / static IP /
   DNS), NTP server, SD logging, and **rolling PCAP capture** (off by default:
@@ -92,16 +96,18 @@ English.
 - `/system` — chip/CPU info, ESP-IDF version, last reset reason, uptime,
   internal + PSRAM memory, and a per-task CPU-load table. Shows a banner with
   a download/delete link if a crash dump is available.
-- `/sdcard` — browse the SD card, see usage, upload/delete files (single or
-  multi-select), download files/folders as a `.tar`, format the card
+- `/sdcard` — browse the SD card, sort by name or size, walk back up through
+  the path line, see usage, upload/delete files (single or multi-select),
+  download files/folders as a `.tar`, format the card
   (requires the web password). Recorded PCAP files live under `/sdcard/pcap/`
   and can be downloaded here and opened in Wireshark/tshark.
 - `/logs` — view the SD log files (`system.log`, `frames.csv`) inline in the
-  browser. Logging is toggled on `/settings`.
+  browser, filter them down to warnings and errors, search them, or reach the
+  previous log file. Logging is toggled on `/settings`.
 
-A configurable auto-refresh (interval on `/settings`, `0` = off) with a floating
-pause/resume button keeps the status page live; `/messages` and `/map` update
-over a WebSocket without reloading.
+`/messages` and `/map` update over a WebSocket. The other pages fetch
+themselves again on a timer, with a pause button in the corner. Setting the
+interval to `0` on `/settings` switches that off.
 
 ### Bluetooth (off by default)
 
@@ -121,8 +127,8 @@ via the status-page button, or `ota --confirm` on the console.
 
 ### Password protection
 
-By default `/update` and the `/settings` write action are open to anyone on the
-network. To require a password (HTTP Basic Auth, username `admin`), either:
+By default `/update`, reboot, power-off and the `/settings` write action are
+open to anyone on the network. To require a password (HTTP Basic Auth, username `admin`), either:
 
 - set it on the **`/settings`** page (Web password field), or
 - run on the USB console:
@@ -160,9 +166,9 @@ field device.
 - Ethernet: **KSZ8851SNL** over SPI on this board. The `sdkconfig.proto-*`
   files build for the W5500 and ENC28J60 prototypes instead. The network-LED
   switch is KSZ8851SNL-only and is hidden in those builds.
-- The SD card shares the SPI bus with the Ethernet controller. Under
-  concurrent traffic this bus is timing-sensitive; since 0.26.0 the SD clock
-  is back at the 20 MHz default (0.22.7 fixed the underlying bus errors).
+- The SD card shares the SPI bus with the Ethernet controller. That bus is
+  timing-sensitive under concurrent traffic. The SD clock runs at the 20 MHz
+  default.
 - Flash: **8 MB**, partition table `partitions_8M.csv` (A/B OTA slots plus a
   small coredump partition).
 - The correct board config lives in the project's `sdkconfig`
@@ -191,10 +197,8 @@ the ESP-IDF environment for the `esptool` command.
 
 ## Building
 
-This project needs ESP-IDF at the exact commit `0d928780081` (a v6.1-dev
-snapshot; as of 0.20.0 this is a newer commit on the same `release/v6.1` line
-than earlier releases used, now including an upstream fix for a multi-device
-SPI bus-lock bug) and Python 3.10+. Stable releases (v5.5.x) do **not** work
+This project needs ESP-IDF at the exact commit `0d928780081`, a snapshot of the
+`release/v6.1` line, and Python 3.10+. Stable releases (v5.5.x) do **not** work
 unmodified, because the project uses v6.1-only APIs, and the 802.11p
 promiscuous-mode hack is sensitive to Wi-Fi-stack changes, so the pin is
 deliberate.
