@@ -248,7 +248,9 @@ void events_tick(void)
 
     /* Copy WITHOUT consuming; clear the queue only once the rows are on the
      * card, or a failed fopen throws the warnings away for good. */
-    static event_rec_t batch[EV_QUEUE];
+    /* PSRAM: 1792 bytes of scarce internal RAM for a buffer only the sysmon
+     * tick touches, never the packet path. */
+    static EXT_RAM_BSS_ATTR event_rec_t batch[EV_QUEUE];
     int count;
     if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE)
     {

@@ -268,3 +268,29 @@ th.srt:focus{outline:2px solid #4fb8e0;outline-offset:-2px}
 .chip small{color:var(--dim)}
 /* Share bar under a number in a table cell. */
 .bar{height:3px;background:#f2b134;border-radius:2px;min-width:2px;margin-top:5px;opacity:.85}
+/* ---- action tiers. Appended last: button.dngr and .btnrow button share a
+ * specificity, so source position is what decides which one wins. */
+/* Outline, never a fill -- four filled red buttons would read as an error
+ * state; the inset ring keeps them the same height as an amber neighbour. */
+button.dngr{background:none;color:var(--alarm);box-shadow:inset 0 0 0 1px rgba(255,107,107,.6)}
+button.dngr:hover{background:rgba(255,107,107,.12);box-shadow:inset 0 0 0 1px var(--alarm)}
+.btnrow button.dngr{border-color:rgba(255,107,107,.6);box-shadow:none}
+.btnrow button.dngr:hover{background:rgba(255,107,107,.12);border-color:var(--alarm);box-shadow:none}
+/* Interrupts the service but destroys nothing. Fainter ring than .dngr, not
+ * just another hue -- the two have the same brightness. */
+button.pwr{background:none;color:var(--warn);box-shadow:inset 0 0 0 1px rgba(224,122,79,.3)}
+button.pwr:hover{background:rgba(224,122,79,.12);box-shadow:inset 0 0 0 1px var(--warn)}
+.btnrow button.pwr{border-color:rgba(224,122,79,.3);box-shadow:none}
+.btnrow button.pwr:hover{background:rgba(224,122,79,.12);border-color:var(--warn);box-shadow:none}
+/* Re-arms the amber fill inside a quiet .btnrow: /sdcard with no card, where
+ * mounting is the action and formatting sits beside it. The flash button on
+ * /update keeps the fill without this class -- it is that page's only action. */
+.btnrow button.act{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;border-color:transparent}
+.btnrow button.act:hover{background:linear-gradient(160deg,#ffc861,#e2a52b)}
+/* Secondary chart: three 74px boxes on the status page would be half a phone
+ * screen, so the minute line stays the tall one. */
+.spark.sm svg{height:56px}
+
+/* Dark map from the plain OSM tiles: a keyless dark basemap with this many
+ * street names does not exist any more. Only .leaflet-tile-pane is inverted. */
+.mapdark .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg)}

@@ -5,6 +5,7 @@ the [README](README.md).
 
 | Version       | Changes |
 |---------------|---------|
+| **0.30.0-webui** | The status page draws the last hour of traffic and temperature. Destructive buttons are red outlines now, long explanations fold away, and the long pages carry a jump bar. The dark map draws the OpenStreetMap tiles inverted in the browser, instead of the CARTO ones it used before. General bug fixes. |
 | **0.29.0-webui** | New look for the whole web interface: no framed cards, values under small labels with a status dot, the stylesheet in a cached file. Red-amber has its own column on `/traffic`, warnings record their sender, and the SD card bulk delete works again. General bug fixes. |
 | **0.28.0-webui** | The Bluetooth branch is merged in. BLE live streaming of received frames is part of this build, off by default and switched on under `/settings`. With it off the radio stays on 802.11p alone and 8 KB more internal memory is free than before. With it on, BLE and reception share the one radio, so frames are missed. |
 | **0.27.7-webui** | The "confirm update" banner now appears on every page, not just the status page. Confirming is behind the web password, where one is set. Tables inside the new boxes are shaded, and the SD line reads "12.3 GB of 59.5 GB used" instead of two bare numbers. |

@@ -201,6 +201,8 @@ typedef enum {
     S_EVT_BYHOUR, S_EVT_BYWDAY, S_EVT_PERHOUR, S_EVT_PROFILE_HINT, S_TRF_WDAYS,
     S_PT_HEADWAY, S_PT_HEADWAY_NONE, S_PT_DIR, S_PT_OPS_FIRST, S_PT_OPS_HINT,
     S_MAP_BUSY, S_MAP_TRACK_DUR, S_SINCE_BOOT,
+    S_LOSS_SUM, S_PT_OPS_SUM,
+    S_HIST_HOUR, S_HIST_TEMP, S_HIST_WAIT, S_HIST_IDLE,
     S_COUNT
 } str_id_t;
 
@@ -386,6 +388,17 @@ static const char *STR[S_COUNT][2] = {
     [S_COL_TYPE]        = { "Typ",                       "Type" },
     [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t",            "Activity" },
     [S_ACTIVITY_SPARK]  = { "Letzte Minute",            "Last minute" },
+    [S_HIST_HOUR]       = { "Letzte Stunde",            "Last hour" },
+    [S_HIST_TEMP]       = { "Temperatur, letzte Stunde",
+                            "Temperature, last hour" },
+    /* Not S_ACTIVITY_NONE: an empty ring right after a boot is not the same
+     * statement as an hour in which nothing arrived. */
+    [S_HIST_WAIT]       = { "noch keine volle Minute",
+                            "less than a minute of history" },
+    /* Not "none yet": the hour is empty, the counter above it is not.
+     * Goes to textContent, so plain UTF-8 and no entities. */
+    [S_HIST_IDLE]       = { "in dieser Stunde nichts empfangen",
+                            "nothing received this hour" },
     /* Two sinks: an HTML chunk AND a single-quoted JS literal set via
      * textContent -- so no apostrophes, no umlauts, no entities. */
     [S_ACTIVITY_SCALE]  = { "Skala bis",                "scale to" },
@@ -700,6 +713,10 @@ static const char *STR[S_COUNT][2] = {
                             "The two SD rows are peaks since power-on, not current values: the "
                             "live figure is almost always 0 because every successful access "
                             "clears it." },
+    /* Names both halves on purpose: a bare "Details" would hide that the
+     * legend for the "thinned" row is what sits inside. */
+    [S_LOSS_SUM]        = { "Was die Zahlen bedeuten und welche Zeilen keine Fehler sind",
+                            "What the figures mean, and which rows are not faults" },
     [S_NAV_SYSTEM]      = { "System",                   "System" },
     [S_TITLE_SYSTEM]    = { "System-Info",              "System info" },
     [S_SYS_CHIP]        = { "Chip",                     "Chip" },
@@ -860,6 +877,10 @@ static const char *STR[S_COUNT][2] = {
                             "both directions at this point, rounded down to whole minutes: "
                             "single very short gaps appear when a vehicle "
                             "changes its pseudonym or a passage is cut in two." },
+    /* Destinations are named here too: the table shows a "Ziel" column whose
+     * bracketed count is explained nowhere else. */
+    [S_PT_OPS_SUM]      = { "Woher Takt, Betriebszeiten und Ziele kommen",
+                            "Where headway, operating hours and destinations come from" },
     [S_PT_CLEAR]        = { "Statistik zur&uuml;cksetzen", "Reset statistics" },
     [S_PT_CLEAR_CONFIRM] = { "Öffi-Statistik wirklich zurücksetzen?",
                              "Really reset the transit statistics?" },
@@ -1303,6 +1324,57 @@ static uint32_t rate_packets_last_minute(void)
         if (rate_buckets[i].sec != 0 && now_sec - rate_buckets[i].sec < RATE_WINDOW_SECS)
             sum += rate_buckets[i].count;
     return sum;
+}
+
+/* Minute history behind the two hour sparklines: one writer (hist_tick, on the
+ * esp_timer task), one reader (httpd) -- ordering is spelled out at both ends. */
+#define HIST_MINUTES    60
+#define HIST_RATE_MIN   60          /* msgs/min floor, so a quiet hour stays flat */
+#define HIST_TEMP_SPAN  5           /* K, narrowest band -- else noise fills the box */
+#define HIST_TEMP_NONE  INT16_MIN
+/* Compiler-only barrier -- unicore, so no CPU fence is needed. Not
+ * __atomic_signal_fence: that orders atomics, and clang sinks plain loads past it. */
+#define HIST_BARRIER()  __asm__ __volatile__("" ::: "memory")
+
+typedef struct {
+    uint32_t stamp;     /* sample number held here; 0 = empty or being written */
+    uint32_t rate;      /* frames counted in that minute */
+    int16_t  temp_dc;   /* 0.1 C, HIST_TEMP_NONE if the sensor did not answer */
+    int16_t  pad;
+} hist_slot_t;
+
+/* PSRAM: 720 bytes of internal RAM buy more elsewhere. Every field is 32 or
+ * 16 bit and aligned, so no single field can tear on this RV32 part. */
+static EXT_RAM_BSS_ATTR hist_slot_t hist_ring[HIST_MINUTES];
+static uint32_t hist_count;     /* samples taken; newest sits at (hist_count-1)%60 */
+
+/* Once a minute from its own timer. Reads only counters the packet path already
+ * keeps, so webserver_handle_packet is not touched and takes no extra lock. */
+static void hist_tick(void *arg)
+{
+    (void)arg;
+    uint32_t n = hist_count + 1;
+    hist_slot_t *s = &hist_ring[(n - 1) % HIST_MINUTES];
+    /* Stamp voided first and written last, so a reader that catches the slot
+     * mid-write sees a number matching no sample and drops it as a gap. */
+    s->stamp = 0;
+    HIST_BARRIER();
+    s->rate = rate_packets_last_minute();
+#ifdef CONFIG_ENABLE_TEMPERATURE
+    float t = temperature_get();
+    /* Same range guard as the status cell: a wild reading must not become a
+     * band that flattens the whole hour. */
+    s->temp_dc = (t == t && t > -100.0f && t < 200.0f)
+                 ? (int16_t)(t * 10.0f + (t < 0.0f ? -0.5f : 0.5f))
+                 : HIST_TEMP_NONE;
+#else
+    s->temp_dc = HIST_TEMP_NONE;
+#endif
+    HIST_BARRIER();
+    s->stamp = n;
+    /* Count last: it is what tells the reader the slot is worth looking at. */
+    HIST_BARRIER();
+    hist_count = n;
 }
 
 /* One place maps a decode result onto a message entry -- the live ring and
@@ -1932,6 +2004,149 @@ static void build_spark_points(char *out, size_t out_size, uint32_t *peak_out)
     }
 }
 
+/* What one pass over the minute ring found; peak and band have to come from the
+ * same pass as the points, or a label names a scale the line was not drawn to. */
+typedef struct {
+    uint32_t peak;      /* msgs/min the rate line was scaled against */
+    uint32_t nvalid;    /* minutes the ring actually holds */
+    uint32_t nrate;     /* of those, minutes with at least one frame */
+    int      tlo, thi;  /* whole-degree band the temperature line was scaled to */
+    bool     ttemp;     /* any usable temperature sample in the window */
+} hist_view_t;
+
+/* Snapshots the minute ring into two polyline point lists. Lock-free by
+ * design: taking msg_ring_mutex here could make the sniffer drop a frame. */
+static void build_hour_points(char *rout, size_t rsize, char *tout, size_t tsize,
+                              hist_view_t *v)
+{
+    uint32_t n = hist_count;
+    uint32_t r[HIST_MINUTES];
+    int16_t  t[HIST_MINUTES];
+    bool     ok[HIST_MINUTES];
+    int lo = 0, hi = 0;
+
+    memset(v, 0, sizeof(*v));
+    v->peak = HIST_RATE_MIN;
+
+    for (uint32_t k = 0; k < HIST_MINUTES; k++)
+    {
+        ok[k] = false;
+        /* k = 59 is the newest minute. k = 0 is also the slot the writer takes
+         * next, which is why the stamp is read again below the values. */
+        if (n + k < HIST_MINUTES)
+            continue;
+        uint32_t m = n + k - (HIST_MINUTES - 1);
+        hist_slot_t *s = &hist_ring[(m - 1) % HIST_MINUTES];
+        uint32_t st = s->stamp;
+        if (st != m)
+            continue;
+        HIST_BARRIER();
+        uint32_t rv = s->rate;
+        int16_t  tv = s->temp_dc;
+        HIST_BARRIER();
+        /* Second look, and it is not belt and braces: a reader preempted right
+         * here comes back to the values of a minute an hour younger. */
+        if (s->stamp != st)
+            continue;
+        r[k] = rv;
+        t[k] = tv;
+        ok[k] = true;
+        v->nvalid++;
+        if (rv)
+        {
+            v->nrate++;
+            if (rv > v->peak) v->peak = rv;
+        }
+        if (tv != HIST_TEMP_NONE)
+        {
+            if (!v->ttemp) { lo = hi = tv; v->ttemp = true; }
+            else { if (tv < lo) lo = tv; if (tv > hi) hi = tv; }
+        }
+    }
+
+    /* Whole degrees outwards, then widened to HIST_TEMP_SPAN: a fixed 0..100
+     * scale would be a straight line, an exact one would magnify sensor noise. */
+    if (v->ttemp)
+    {
+        v->tlo = (lo >= 0 ? lo : lo - 9) / 10;
+        v->thi = (hi >= 0 ? hi + 9 : hi) / 10;
+        if (v->thi - v->tlo < HIST_TEMP_SPAN)
+        {
+            int mid = (v->tlo + v->thi) / 2;
+            v->tlo = mid - HIST_TEMP_SPAN / 2;
+            v->thi = v->tlo + HIST_TEMP_SPAN;
+        }
+    }
+
+    rout[0] = tout[0] = '\0';
+    size_t ro = 0, to = 0;
+    unsigned rn = 0, tn = 0, ry = 0, ty = 0, tk = 0;
+    int span_dc = (v->thi - v->tlo) * 10;
+    for (uint32_t k = 0; k < HIST_MINUTES; k++)
+    {
+        if (!ok[k])
+            continue;   /* only ever at the left, while the first hour fills */
+        /* h stays in 1..36 like the minute line, so the 2 px stroke never
+         * clips at the viewBox edge and a silent minute sits on the floor. */
+        uint32_t h = r[k] ? 4 + (r[k] * 32) / v->peak : 1;
+        if (h > 36) h = 36;
+        ry = (unsigned)(40 - h);
+        if (ro + 12 < rsize)
+        {
+            ro += (size_t)snprintf(rout + ro, rsize - ro, "%s%u,%u",
+                                   ro ? " " : "", (unsigned)(k * 4), ry);
+            rn++;
+        }
+        if (t[k] == HIST_TEMP_NONE || span_dc <= 0)
+            continue;
+        int th = 4 + ((t[k] - v->tlo * 10) * 32) / span_dc;
+        if (th < 1) th = 1;
+        if (th > 36) th = 36;
+        ty = (unsigned)(40 - th);
+        tk = k;
+        if (to + 12 < tsize)
+        {
+            to += (size_t)snprintf(tout + to, tsize - to, "%s%u,%u",
+                                   to ? " " : "", (unsigned)(k * 4), ty);
+            tn++;
+        }
+    }
+    /* A polyline with one point draws nothing, so the first minute after a
+     * boot would show an empty box -- repeat it as a short dash instead. */
+    if (rn == 1) snprintf(rout, rsize, "232,%u 236,%u", ry, ry);
+    /* At the sample's own x, not at the right edge: a lone temperature reading
+     * can sit anywhere in the hour, and a dash on the right claims "now". */
+    if (tn == 1)
+    {
+        unsigned x = tk * 4;
+        snprintf(tout, tsize, "%u,%u %u,%u", x >= 4 ? x - 4 : 0, ty, x, ty);
+    }
+}
+
+/* One place decides which of the three states the hour label reports, so the
+ * page and /status.json can never disagree about it. */
+static void hist_scale_text(const hist_view_t *v, char *out, size_t size)
+{
+    if (!v->nvalid)     snprintf(out, size, "%s", T(S_HIST_WAIT));
+    /* Not S_ACTIVITY_NONE: that one says "none since boot" and would contradict
+     * the message counter right above it. Goes to textContent, so no entities. */
+    else if (!v->nrate) snprintf(out, size, "%s", T(S_HIST_IDLE));
+    else snprintf(out, size, "%s %lu/min", T(S_ACTIVITY_SCALE),
+                  (unsigned long)v->peak);
+}
+
+#ifdef CONFIG_ENABLE_TEMPERATURE
+/* Two sinks: the page needs entities, /status.json literal UTF-8 because
+ * arApply writes it with textContent -- so the caller passes the pieces. */
+static void hist_band_text(const hist_view_t *v, char *out, size_t size,
+                           const char *dash, const char *deg)
+{
+    if (v->ttemp)       snprintf(out, size, "%d%s%d%s", v->tlo, dash, v->thi, deg);
+    else if (v->nvalid) snprintf(out, size, "%s", dash);
+    else                snprintf(out, size, "%s", T(S_HIST_WAIT));
+}
+#endif
+
 /* Builds the per-type count breakdown text, e.g. "CAM 812 &middot; RSU
  * SPATEM 449" (empty if nothing received yet -- caller substitutes the
  * "no activity" string). Shared between the page and /status.json. */
@@ -1963,10 +2178,12 @@ static void build_typeline_html(char *out, size_t out_size)
     }
 }
 
-/* Renders the status page's "Activity" sparkline + message-type breakdown,
- * from counters rate_record_packet/msg_type_stats_record already fill in
- * webserver_handle_packet. */
-static void render_activity_stats(httpd_req_t *req)
+/* The status page's "Activity" sparklines and message-type breakdown, from
+ * the counters webserver_handle_packet already fills in. */
+/* The hour line arrives finished: its caller draws the temperature line from
+ * the SAME snapshot, and a second pass here could disagree with it. */
+static void render_activity_stats(httpd_req_t *req, const char *hourpts,
+                                  const char *hourscale)
 {
     /* Sent as separate chunks: the point list is built before the label,
      * because the label has to name the scale it was drawn against. */
@@ -1983,7 +2200,7 @@ static void render_activity_stats(httpd_req_t *req)
      * this function, so everything in between belongs to the group. */
     char sparklbl[320];
     HTML_PRINTF(sparklbl,
-        "<div class='grp'><h2>%s</h2>"
+        "<div class='grp' id='sec-act'><h2>%s</h2>"
         "<div class='lbl'>%s &middot; <span id='st-sparkmax'>%s</span></div>",
         T(S_ACTIVITY_TITLE), T(S_ACTIVITY_SPARK), scaletxt);
     httpd_resp_send_chunk(req, sparklbl, HTTPD_RESP_USE_STRLEN);
@@ -1998,7 +2215,27 @@ static void render_activity_stats(httpd_req_t *req)
         " vector-effect='non-scaling-stroke' points='",
         (SPARK_POINTS - 1) * 4);
     httpd_resp_send_chunk(req, svgopen, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, spark, HTTPD_RESP_USE_STRLEN);
+    /* Same guard as the hour list below: today this one always fills, but an
+     * empty string here would silently truncate the page. */
+    if (spark[0])
+        httpd_resp_send_chunk(req, spark, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "'/></svg></div>", HTTPD_RESP_USE_STRLEN);
+
+    /* Same quantity one window up: the minute line answers "is it receiving
+     * now", the hour line "has it been receiving all along". */
+    char hourlbl[512];
+    HTML_PRINTF(hourlbl,
+        "<div class='lbl sp'>%s &middot; <span id='st-hourmax'>%s</span></div>"
+        "<div class='spark sm'>"
+        "<svg viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>"
+        "<polyline id='st-hourl' fill='none' stroke='#f2b134' stroke-width='2'"
+        " vector-effect='non-scaling-stroke' points='",
+        T(S_HIST_HOUR), hourscale, (HIST_MINUTES - 1) * 4);
+    httpd_resp_send_chunk(req, hourlbl, HTTPD_RESP_USE_STRLEN);
+    /* Never send this one blind: a zero-length chunk ENDS the response, and the
+     * list is empty for the first minute after a boot, before any sample. */
+    if (hourpts[0])
+        httpd_resp_send_chunk(req, hourpts, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "'/></svg></div>", HTTPD_RESP_USE_STRLEN);
 
     static EXT_RAM_BSS_ATTR char typeline[1024];
@@ -2061,6 +2298,25 @@ static esp_err_t status_page_handler(httpd_req_t *req)
     send_page_header_refresh(req, T(S_TITLE_STATUS),
                              current_lang == LANG_EN ? "/status.json?lang=en"
                                                      : "/status.json?lang=de");
+
+    {
+        /* Three charts stand between the top of the page and the device group,
+         * so the figures most often looked up sit below a screenful. */
+        char peers_probe[CONFIG_PEERS_BUFFER_SIZE] = "";
+        size_t pp = sizeof(peers_probe);
+        config_get_str(CONFIG_INDEX_PEERS, peers_probe, &pp);
+        char stjump[320];
+        HTML_PRINTF(stjump,
+            "<p class='jump'>%s: <a href='#sec-act'>%s</a> &middot; "
+            "<a href='#sec-dev'>%s</a>%s%s%s</p>",
+            T(S_TRF_JUMP), T(S_ACTIVITY_TITLE), T(S_SYS_GRP_DEVICE),
+            /* The peer group is only emitted with peers configured; without
+             * them the third link would point at nothing. */
+            peers_probe[0] ? " &middot; <a href='#sec-peer'>" : "",
+            peers_probe[0] ? T(S_PEER_TITLE) : "",
+            peers_probe[0] ? "</a>" : "");
+        httpd_resp_send_chunk(req, stjump, HTTPD_RESP_USE_STRLEN);
+    }
 
     /* SD usage instead of the static hardware variant that stood here: it
      * answers "is the card filling up" at a glance. */
@@ -2142,12 +2398,26 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         running ? T(S_RUNNING) : T(S_STOPPED));
     httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
 
-    render_activity_stats(req);
+    /* ONE snapshot for both hour charts: the rate line below and the
+     * temperature line further down have to describe the same minute. */
+    /* Only the httpd task ever runs this handler (no defer_to_worker), so
+     * static is safe here and keeps 1 KB off its 16 KB stack. */
+    static EXT_RAM_BSS_ATTR char hourr[512], hourt[512];
+    hist_view_t hv;
+    build_hour_points(hourr, sizeof(hourr), hourt, sizeof(hourt), &hv);
+    char hscale[64];
+    hist_scale_text(&hv, hscale, sizeof(hscale));
+#ifdef CONFIG_ENABLE_TEMPERATURE
+    char hband[48];
+    hist_band_text(&hv, hband, sizeof(hband), "&ndash;", "&nbsp;&deg;C");
+#endif
+
+    render_activity_stats(req, hourr, hscale);
 
     /* The SD value gets no state class: /status.json carries no SD field, so a
      * coloured 36px number would keep asserting the share from page load. */
     snprintf(body, sizeof(body),
-        "<div class='grp'><h2>%s</h2><div class='grid'>"
+        "<div class='grp' id='sec-dev'><h2>%s</h2><div class='grid'>"
         "<div class='cell'><div class='l %s' id='st-sdl' title='%s'>%s</div>"
         "<div class='v'>%s</div><div class='d'>%s</div></div>"
 #ifdef CONFIG_ENABLE_TEMPERATURE
@@ -2159,7 +2429,9 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         "<div class='cell'><div class='l'>%s</div><div class='v'>%s</div>"
         "<div class='d'>%s %02x:%02x:%02x:%02x:%02x:%02x</div></div>"
         "<div class='cell'><div class='l'>%s</div><div class='v'>%s</div></div>"
-        "</div></div>",
+        /* Closes .grid only. The group stays open past this chunk so the
+         * temperature strip below can still land inside it. */
+        "</div>",
         T(S_SYS_GRP_DEVICE),
         sdcls, sdtitle, T(S_SD_CARD), sdval, sdtxt,
 #ifdef CONFIG_ENABLE_TEMPERATURE
@@ -2173,10 +2445,31 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         T(S_FW_VERSION), app_desc->version);
     httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
 
+#ifdef CONFIG_ENABLE_TEMPERATURE
+    /* Own chunk, and only when there is something to draw: a sensor that never
+     * answers would leave a labelled 56px box with nothing in it. */
+    if (hv.ttemp || !hv.nvalid)
+    {
+        /* Reuses body: it went out as a chunk a few lines up, and a second
+         * kilobyte on the httpd stack would buy nothing. */
+        HTML_PRINTF(body,
+            "<div class='lbl sp'>%s &middot; <span id='st-tempband'>%s</span></div>"
+            "<div class='spark sm'>"
+            "<svg viewBox='0 0 %d 40' width='100%%' height='40' preserveAspectRatio='none'>"
+            /* Link blue, not --warn: a permanently orange curve reads as a
+             * standing warning about the temperature. */
+            "<polyline id='st-temphl' fill='none' stroke='#4fb8e0' stroke-width='2'"
+            " vector-effect='non-scaling-stroke' points='%s'/></svg></div>",
+            T(S_HIST_TEMP), hband, (HIST_MINUTES - 1) * 4, hourt);
+        httpd_resp_send_chunk(req, body, HTTPD_RESP_USE_STRLEN);
+    }
+#endif
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+
     /* No reload on click -- fetch the toggle, then let window.stSetSniff
      * (defined in applyscript below) update the button + status span from
      * the action just taken, same as a poll would. */
-    /* 1152: the German worst case is 985 bytes, and a truncated onclick would
+    /* 1152: the German worst case is 1009 bytes, and a truncated onclick would
      * silently produce a dead button rather than an error. */
     char buttons[1152];
     snprintf(buttons, sizeof(buttons),
@@ -2187,11 +2480,11 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         /* r.ok, not "it returned": /sniffer is password-gated, and a rejected
          * request must not flip the label. The status poll re-asserts the truth. */
         "fetch('/sniffer?action='+a,{method:'POST'}).then(function(r){if(r.ok&&window.stSetSniff)window.stSetSniff(a==='start');})\">%s</button> "
-        "<button onclick=\"itsReboot('%s','%s','%s','%s')\">%s</button>"
+        "<button class='pwr' onclick=\"itsReboot('%s','%s','%s','%s')\">%s</button>"
 #if CONFIG_ENABLE_SD
         /* Result goes into its own span rather than replacing the page: if the
          * unmount fails the operator has to stay on the page and see why. */
-        " <button onclick=\"if(!confirm('%s'))return;"
+        " <button class='pwr' onclick=\"if(!confirm('%s'))return;"
         "var s=document.getElementById('po-res');s.innerText='%s';"
         "fetch('/poweroff',{method:'POST'}).then(function(r){return r.text();})"
         ".then(function(t){s.innerText=t;}).catch(function(){s.innerText='%s';})\">%s</button>"
@@ -2211,8 +2504,10 @@ static esp_err_t status_page_handler(httpd_req_t *req)
      * entities, and the Start/Stop button swaps label+action in the same pass. */
     /* className REPLACES the class list, so every id that also carries a layout
      * class ('v', 'l') has to get that class written back with it. */
-    char applyscript[1792];
-    snprintf(applyscript, sizeof(applyscript),
+    /* Off the stack and grown: the two hour charts add ~380 bytes of JS, and a
+     * truncated script would take the whole poll down, not just one cell. */
+    static EXT_RAM_BSS_ATTR char applyscript[2560];
+    HTML_PRINTF(applyscript,
         "<script>(function(){"
         "var RUN='%s',STOP='%s',CONN='%s',DISC='%s',BSTART='%s',BSTOP='%s',SCL='%s';"
         "function cls(i,c){var e=document.getElementById(i);if(e)e.className=c;}"
@@ -2235,6 +2530,16 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         "if(sl&&d.sparkp!==undefined)sl.setAttribute('points',d.sparkp);"
         "var sm=document.getElementById('st-sparkmax');"
         "if(sm&&d.smax!==undefined)sm.textContent=SCL+' '+d.smax+'/s';"
+        /* The hour label arrives finished -- it has three forms, and picking
+         * between them in JS would need the texts a second time. */
+        "var hl=document.getElementById('st-hourl');"
+        "if(hl&&d.hrp!==undefined)hl.setAttribute('points',d.hrp);"
+        "var hm=document.getElementById('st-hourmax');"
+        "if(hm&&d.hrs!==undefined)hm.textContent=d.hrs;"
+        "var tl=document.getElementById('st-temphl');"
+        "if(tl&&d.htp!==undefined)tl.setAttribute('points',d.htp);"
+        "var tb=document.getElementById('st-tempband');"
+        "if(tb&&d.htb!==undefined)tb.textContent=d.htb;"
         "document.getElementById('st-type').innerHTML=d.types;"
         "window.stSetSniff(d.sniff);"
         "document.getElementById('st-mqtt').innerHTML=d.mqtt?CONN:DISC;"
@@ -2287,7 +2592,7 @@ static esp_err_t status_page_handler(httpd_req_t *req)
             HTML_PRINTF(peerblk,
                 /* Stays a table: its four column heads are firmware texts and
                  * rows compare across peers better than tiles would. */
-                "<div class='grp'><h2>%s</h2>"
+                "<div class='grp' id='sec-peer'><h2>%s</h2>"
                 "<div class='scroll'><table id='peertbl'><thead><tr>"
                 "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead>"
                 "<tbody id='peerbody'></tbody></table></div>"
@@ -2386,6 +2691,18 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
     static EXT_RAM_BSS_ATTR char typeline[1024];
     build_typeline_html(typeline, sizeof(typeline));
 
+    /* Only the httpd task answers this route, so static is safe here too. */
+    static EXT_RAM_BSS_ATTR char hourr[512], hourt[512];
+    hist_view_t hv;
+    build_hour_points(hourr, sizeof(hourr), hourt, sizeof(hourt), &hv);
+    char hscale[64];
+    hist_scale_text(&hv, hscale, sizeof(hscale));
+#ifdef CONFIG_ENABLE_TEMPERATURE
+    /* Literal UTF-8, not entities: arApply writes this one with textContent. */
+    char hband[48];
+    hist_band_text(&hv, hband, sizeof(hband), "\u2013", " \u00b0C");
+#endif
+
     /* -1 = nothing ever received (0 would read as "just now"); clamped at 0
      * because a frame arriving between the two reads would underflow. */
     uint32_t last1 = msg_last_sec1, now32 = (uint32_t)uptime_s;
@@ -2400,8 +2717,10 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
         /* Literal UTF-8, not an entity: arApply writes it with textContent,
          * which would show "&middot;" verbatim. */
         ",\"clk\":\"%s\""
+        ",\"hrp\":\"%s\",\"hrs\":\"%s\""
 #ifdef CONFIG_ENABLE_TEMPERATURE
         ",\"temp\":%s,\"tcl\":\"%s\""
+        ",\"htp\":\"%s\",\"htb\":\"%s\""
 #endif
         "}",
         (unsigned long)msg_total_count, (unsigned long)rate, uptime_str,
@@ -2409,9 +2728,9 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
         mqtt_connected_state ? "true" : "false",
         spark, (unsigned long)peak, idle,
         typeline[0] ? typeline : T(S_ACTIVITY_NONE),
-        clkj
+        clkj, hourr, hscale
 #ifdef CONFIG_ENABLE_TEMPERATURE
-        , tval, temp_class(tc)
+        , tval, temp_class(tc), hourt, hband
 #endif
     );
     /* The peer row on another node's status page reads this cross-origin,
@@ -2808,6 +3127,17 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
      * position. */
     send_page_header(req, T(S_TITLE_MESSAGES));
 
+#if CONFIG_ENABLE_SD
+    /* Only with a card: without one the two archive groups are never emitted,
+     * and the links would point at nothing. */
+    char mjump[256];
+    HTML_PRINTF(mjump,
+        "<p class='jump'>%s: <a href='#m-srch'>%s</a> &middot; "
+        "<a href='#m-rsu'>%s</a></p>",
+        T(S_TRF_JUMP), T(S_SRCH_TITLE), T(S_RSU_UP_TITLE));
+    httpd_resp_send_chunk(req, mjump, HTTPD_RESP_USE_STRLEN);
+#endif
+
     /* Opens the page's first group; closed once before the archive block. */
     char intro[256];
     snprintf(intro, sizeof(intro), "<div class='grp top'><p class='note'>");
@@ -2937,7 +3267,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
          * checked, because a cut here swallows the rest of the page. */
         static EXT_RAM_BSS_ATTR char arch[6144];
         HTML_PRINTF(arch,
-            "<div class='grp'><h2>%s</h2><p class='note'>%s</p>"
+            "<div class='grp' id='m-srch'><h2>%s</h2><p class='note'>%s</p>"
             "<p class='tools'><input type='datetime-local' id='sf'> &ndash; "
             "<input type='datetime-local' id='st'> <span class='cap'>%s:</span> "
             "<input id='sq' size='14' maxlength='32'> "
@@ -2945,7 +3275,7 @@ static esp_err_t messages_get_handler(httpd_req_t *req)
             "<button onclick='expp()'>%s</button></p>"
             "<p class='note'>%s</p>"
             "<div id='sr'></div></div>"
-            "<div class='grp'><h2>%s</h2><p class='note'>%s</p>"
+            "<div class='grp' id='m-rsu'><h2>%s</h2><p class='note'>%s</p>"
             "<p class='tools'><input type='datetime-local' id='rf'> &ndash; "
             "<input type='datetime-local' id='rt'> <span class='cap'>%s:</span> "
             "<select id='rth'><option value='0' selected>%s</option>"
@@ -3271,19 +3601,29 @@ static esp_err_t map_get_handler(httpd_req_t *req)
         "var tz='';try{tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){}"
         "var g=TZVIEW[tz]||TZVIEW[tz.split('/')[0]]||[20,0,2];"
         "var map=L.map('map').setView([g[0],g[1]],g[2]);"
-        "var streets=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',"
-        "{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});"
+        /* Dark and streets are the SAME tiles -- dark just inverts them in CSS.
+         * Switching between the two is free, the browser already has them. */
+        "var OSMU='https://tile.openstreetmap.org/{z}/{x}/{y}.png';"
+        "var OSMA='&copy; OpenStreetMap contributors';"
+        "var streets=L.tileLayer(OSMU,{maxZoom:19,attribution:OSMA});"
+        "var dark=L.tileLayer(OSMU,{maxZoom:19,attribution:OSMA}).addTo(map);"
         "var sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/"
         "World_Imagery/MapServer/tile/{z}/{y}/{x}',"
         "{maxZoom:19,attribution:'Tiles &copy; Esri'});"
-        /* Dark CARTO layer by default (the overlays read better on it); light sibling
-         * for daylight, same external-tile arrangement as OSM/satellite. */
-        "var dark=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',"
-        "{maxZoom:20,subdomains:'abcd',"
-        "attribution:'&copy; OpenStreetMap contributors, &copy; CARTO'}).addTo(map);"
-        "var light=L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',"
-        "{maxZoom:20,subdomains:'abcd',"
-        "attribution:'&copy; OpenStreetMap contributors, &copy; CARTO'});"
+        /* Esri Canvas for the quiet light map: CARTO now stamps "API KEY
+         * REQUIRED" across its free tiles. Its data stops at zoom 16. */
+        "var ECV='https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';"
+        "var ECO={maxZoom:19,maxNativeZoom:16,"
+        "attribution:'Tiles &copy; Esri &mdash; '+OSMA};"
+        "var light=L.layerGroup(["
+        "L.tileLayer(ECV+'World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',ECO),"
+        "L.tileLayer(ECV+'World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',ECO)]);"
+        /* Only the tile pane is inverted, so tracks, pins and popups keep the
+         * colours that carry meaning. Leaflet 1.1.1 has no className option. */
+        "function paintDark(on){var c=map.getContainer();"
+        "L.DomUtil[on?'addClass':'removeClass'](c,'mapdark');}"
+        "paintDark(true);"
+        "map.on('baselayerchange',function(e){paintDark(e.layer===dark);});"
         /* Listed with the default first, so the checked entry is the one at
          * the top rather than somewhere in the middle. */
         "var baseLayers={};baseLayers[ITS_MAP_L_DARK]=dark;"
@@ -5655,7 +5995,7 @@ static esp_err_t senders_get_handler(httpd_req_t *req)
     HTML_PRINTF(clr,
         /* r.ok: this page is ungated but the POST is not -- reloading after a
          * 401 would show the untouched list as if the reset had happened. */
-        "<p class='btnrow'><button onclick=\"if(confirm('%s'))fetch('/senders/clear',"
+        "<p class='btnrow'><button class='dngr' onclick=\"if(confirm('%s'))fetch('/senders/clear',"
         "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p></div>",
         T(S_SND_CLEAR_CONFIRM), T(S_SND_CLEAR));
     httpd_resp_send_chunk(req, clr, HTTPD_RESP_USE_STRLEN);
@@ -5745,6 +6085,16 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
             o->dcnt[d]++;
             break;
         }
+    }
+
+    /* The only link worth having here: the passage table is 20 k of markup
+     * below, and it is not emitted at all when nothing was stored. */
+    if (pn > 0)
+    {
+        char ptjump[192];
+        HTML_PRINTF(ptjump, "<p class='jump'>%s: <a href='#pt-pass'>%s</a></p>",
+                    T(S_TRF_JUMP), T(S_PT_PASSAGES));
+        httpd_resp_send_chunk(req, ptjump, HTTPD_RESP_USE_STRLEN);
     }
 #endif
 
@@ -5872,8 +6222,12 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
         httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
         if (any_ops)
         {
-            char ohint[640];
-            HTML_PRINTF(ohint, "<p class='note'>%s</p>", T(S_PT_OPS_HINT));
+            /* 1024, not 640: the collapsed wrapper plus the summary leaves only
+             * 27 bytes there, and a cut-off </details> eats the rest of the page. */
+            char ohint[1024];
+            HTML_PRINTF(ohint,
+                "<details class='dtl'><summary>%s</summary><p class='note'>%s</p></details>",
+                T(S_PT_OPS_SUM), T(S_PT_OPS_HINT));
             httpd_resp_send_chunk(req, ohint, HTTPD_RESP_USE_STRLEN);
         }
     }
@@ -5887,7 +6241,7 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
             HTML_PRINTF(ph,
                 /* Closes the intro group and opens its own -- the one
                  * unconditional </div> below then balances either path. */
-                "</div><div class='grp'><h2>%s</h2><div class='scroll'><table><thead><tr><th>%s</th>"
+                "</div><div class='grp' id='pt-pass'><h2>%s</h2><div class='scroll'><table><thead><tr><th>%s</th>"
                 "<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>"
                 "</tr></thead><tbody>",
                 T(S_PT_PASSAGES), T(S_PT_WHEN), T(S_PT_LINE), T(S_PT_COURSE),
@@ -5930,7 +6284,7 @@ static esp_err_t transit_get_handler(httpd_req_t *req)
     HTML_PRINTF(clr,
         /* r.ok: this page is ungated but the POST is not -- reloading after a
          * 401 would show the untouched list as if the reset had happened. */
-        "<p class='btnrow'><button onclick=\"if(confirm('%s'))fetch('/transit/clear',"
+        "<p class='btnrow'><button class='dngr' onclick=\"if(confirm('%s'))fetch('/transit/clear',"
         "{method:'POST'}).then(function(r){if(r.ok)location.reload();});\">%s</button></p></div>",
         T(S_PT_CLEAR_CONFIRM), T(S_PT_CLEAR));
     httpd_resp_send_chunk(req, clr, HTTPD_RESP_USE_STRLEN);
@@ -6155,6 +6509,24 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     snprintf(intro, sizeof(intro), "<p class='note'>%s</p>", T(S_SET_INTRO));
     httpd_resp_send_chunk(req, intro, HTTPD_RESP_USE_STRLEN);
 
+    /* Six form groups of up to eleven rows each. Storage/Traffic are SD-only
+     * below, so their links carry the same #if -- else they point at nothing. */
+    char setjump[384];
+    HTML_PRINTF(setjump,
+        "<p class='jump'>%s: <a href='#g-gen'>%s</a> &middot; <a href='#g-net'>%s</a>"
+        " &middot; <a href='#g-mqtt'>%s</a>"
+#if CONFIG_ENABLE_SD
+        " &middot; <a href='#g-sto'>%s</a> &middot; <a href='#g-trf'>%s</a>"
+#endif
+        " &middot; <a href='#g-sec'>%s</a></p>",
+        T(S_TRF_JUMP), T(S_SET_GROUP_GENERAL), T(S_SET_GROUP_NETWORK),
+        T(S_SET_GROUP_MQTT),
+#if CONFIG_ENABLE_SD
+        T(S_SET_GROUP_STORAGE), T(S_SET_GROUP_TRAFFIC),
+#endif
+        T(S_SET_GROUP_SECURITY));
+    httpd_resp_send_chunk(req, setjump, HTTPD_RESP_USE_STRLEN);
+
     /* Each section is its own chunk, same multi-chunk pattern as
      * render_activity_stats; EXT_RAM_BSS_ATTR/static keeps them off the
      * httpd task's stack. */
@@ -6164,7 +6536,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
      * node ID 378); HTML_PRINTF only logs a truncation, so headroom is cheap. */
     static EXT_RAM_BSS_ATTR char general[6144];
     HTML_PRINTF(general,
-        "<div class='grp top'><h2>%s</h2><table class='kv set'>"
+        "<div class='grp top' id='g-gen'><h2>%s</h2><table class='kv set'>"
         /* size='16', not the field's full width: the HTML size attribute
          * skews auto-layout column width even under a CSS width:100% rule
          * (size=40 alone pushed the table wider than a phone screen). */
@@ -6215,7 +6587,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Network --- */
     static EXT_RAM_BSS_ATTR char network[4096];
     snprintf(network, sizeof(network),
-        "<div class='grp'><h2>%s</h2><table class='kv set'>"
+        "<div class='grp' id='g-net'><h2>%s</h2><table class='kv set'>"
         "<tr><th></th><td>%s</td></tr>"
         "<tr><th>%s</th><td><input type='checkbox' id='dhcp'%s onchange='dhcpToggle()'></td></tr>"
         "<tr><th>%s</th><td><input class='ipfield' id='ethip' value='%s' size='16' maxlength='15'></td></tr>"
@@ -6251,7 +6623,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- MQTT --- */
     static EXT_RAM_BSS_ATTR char mqtt_block[2048];
     snprintf(mqtt_block, sizeof(mqtt_block),
-        "<div class='grp'><h2>%s</h2><table class='kv set'>"
+        "<div class='grp' id='g-mqtt'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td><input id='mqtturi' value='%s' size='16'></td></tr>"
         "</table></div>",
         T(S_SET_GROUP_MQTT), T(S_MQTT_URI), mqtt_uri);
@@ -6261,7 +6633,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Storage (SD): logging + PCAP capture --- */
     static EXT_RAM_BSS_ATTR char storage[3072];
     HTML_PRINTF(storage,
-        "<div class='grp'><h2>%s</h2><table class='kv set'>"
+        "<div class='grp' id='g-sto'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td><input type='checkbox' id='logsys'%s></td></tr>"
         "<tr><th>%s</th><td><input id='logmaxmb' type='number' min='1' max='512' value='%lu' size='6'>"
         "<br><small>%s</small></td></tr>"
@@ -6301,7 +6673,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Traffic page retention --- */
     char trfset[768];
     snprintf(trfset, sizeof(trfset),
-        "<div class='grp'><h2>%s</h2><table class='kv set'>"
+        "<div class='grp' id='g-trf'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td><input id='statsdays' type='number' min='1' max='30' value='%lu' size='6'></td></tr>"
         "<tr><th>%s</th><td><input id='eventdays' type='number' min='1' max='30' value='%lu' size='6'></td></tr>"
         "</table></div>",
@@ -6314,7 +6686,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     /* --- Security --- */
     static EXT_RAM_BSS_ATTR char security[1024];
     snprintf(security, sizeof(security),
-        "<div class='grp'><h2>%s</h2><table class='kv set'>"
+        "<div class='grp' id='g-sec'><h2>%s</h2><table class='kv set'>"
         "<tr><th>%s</th><td>"
         "<input type='password' id='webpasswd' size='16' autocomplete='new-password'>"
         "<br><small>%s</small>"
@@ -6336,7 +6708,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "<p><button onclick=\"save()\">%s</button> "
         /* Dirty asks about the lost edits, clean asks the plain question --
          * never both, so itsReboot gets null once we already confirmed. */
-        "<button onclick=\"var d=document.body.classList.contains('dirty');"
+        "<button class='pwr' onclick=\"var d=document.body.classList.contains('dirty');"
         "if(d&&!confirm(ITS_UNSAVED_WARN))return;"
         "itsReboot(d?null:'%s','%s','%s','%s')\">%s</button> "
         "<span id='result'></span></p>"
@@ -6355,7 +6727,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         /* No confirm: the click IS the intent. Reboots only on success --
          * answered is not succeeded. */
         "<div id='savebar'><div class='in'><button onclick=\"save()\">%s</button>"
-        "<button onclick=\"var b=this;if(b.disabled)return;b.disabled=true;"
+        "<button class='pwr' onclick=\"var b=this;if(b.disabled)return;b.disabled=true;"
         "var pr=save();if(!pr){b.disabled=false;return;}"
         "pr.then(function(res){if(!res||!res.ok){b.disabled=false;return;}"
         "itsReboot(null,'%s','%s','%s').then(function(go){if(!go)b.disabled=false;});"
@@ -7138,12 +7510,22 @@ static esp_err_t system_get_handler(httpd_req_t *req)
         snprintf(banner, sizeof(banner),
             "<div class='warn'><p>%s%s</p>"
             "<a href='/fs/part?label=coredump'>&#8595; %s</a> "
-            "<button onclick=\"if(confirm('%s'))fetch('/system/coredump/clear',{method:'POST'}).then(()=>location.reload());\">%s</button>"
+            "<button class='dngr' onclick=\"if(confirm('%s'))fetch('/system/coredump/clear',{method:'POST'}).then(()=>location.reload());\">%s</button>"
             "</div>",
             T(S_SYS_COREDUMP), detail, T(S_SYS_COREDUMP_DOWNLOAD),
             T(S_SYS_COREDUMP_CLEAR_CONFIRM), T(S_SYS_COREDUMP_CLEAR));
         httpd_resp_send_chunk(req, banner, HTTPD_RESP_USE_STRLEN);
     }
+
+    /* Below the crash banner on purpose: a crash report must stay the first
+     * thing on the page. Eighteen task rows and twelve loss rows sit far down. */
+    char sysjump[320];
+    HTML_PRINTF(sysjump,
+        "<p class='jump'>%s: <a href='#s-dev'>%s</a> &middot; <a href='#s-stab'>%s</a>"
+        " &middot; <a href='#s-load'>%s</a> &middot; <a href='#s-loss'>%s</a></p>",
+        T(S_TRF_JUMP), T(S_SYS_GRP_DEVICE), T(S_SYS_GRP_STABILITY),
+        T(S_SYS_GRP_LOAD), T(S_LOSS_TITLE));
+    httpd_resp_send_chunk(req, sysjump, HTTPD_RESP_USE_STRLEN);
 
     esp_chip_info_t chip;
     esp_chip_info(&chip);
@@ -7192,7 +7574,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
      * is gone: app->idf_ver in the firmware row is the same string. */
     char devblk[1024];
     HTML_PRINTF(devblk,
-        "<div class='grp top'><h2>%s</h2><table class='kv'>"
+        "<div class='grp top' id='s-dev'><h2>%s</h2><table class='kv'>"
         "<tr><th>%s</th><td>%s rev %d, %s</td></tr>"
         "<tr><th>%s</th><td>%d</td></tr>"
         "<tr><th>%s</th><td>%d MHz</td></tr>"
@@ -7240,7 +7622,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
     uint32_t crashes = sysstat_crash_count();
     char stabblk[1152];
     HTML_PRINTF(stabblk,
-        "<div class='grp'><h2>%s</h2><div class='grid'>"
+        "<div class='grp' id='s-stab'><h2>%s</h2><div class='grid'>"
         "<div class='cell'><div class='l %s'>%s</div><div class='v'>%lu</div>"
         "<div class='d'>%s: %lu &middot; %s: %s</div></div>"
         "<div class='cell'><div class='l'>%s</div><div class='v'>%s</div></div>"
@@ -7257,7 +7639,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
 
     char statsbtn[384];
     snprintf(statsbtn, sizeof(statsbtn),
-        "<p class='btnrow'><button onclick=\"if(confirm('%s'))fetch('/system/stats/clear',{method:'POST'}).then(()=>location.reload());\">%s</button></p>",
+        "<p class='btnrow'><button class='dngr' onclick=\"if(confirm('%s'))fetch('/system/stats/clear',{method:'POST'}).then(()=>location.reload());\">%s</button></p>",
         T(S_STAT_RESET_CONFIRM), T(S_STAT_RESET));
     httpd_resp_send_chunk(req, statsbtn, HTTPD_RESP_USE_STRLEN);
     /* Closes the stability section opened above. */
@@ -7273,7 +7655,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
 
     char loadblk[1024];
     HTML_PRINTF(loadblk,
-        "<div class='grp'><h2>%s</h2><div class='grid'>"
+        "<div class='grp' id='s-load'><h2>%s</h2><div class='grid'>"
         "<div class='cell'><div class='l'>%s</div><div class='v' id='sys-cpu'>%s</div></div>"
         "</div><table class='kv'>"
         "<tr><th>%s (%s)</th><td class='%s' id='sys-ram-i'>%s / %s / %s</td></tr>"
@@ -7318,10 +7700,11 @@ static esp_err_t system_get_handler(httpd_req_t *req)
                  (unsigned long long)(paused_ms / 1000),
                  current_lang == LANG_DE ? "," : ".",
                  (unsigned long long)(paused_ms % 1000));
-        /* 1792, not 1280: six more rows and the SD sentence in the German hint. */
-        char loss[1792];
+        /* 2048: 1396 measured in German, plus the jump anchor and the collapsed
+         * wrapper. HTML_PRINTF only logs a truncation, so headroom is cheap. */
+        char loss[2048];
         HTML_PRINTF(loss,
-            "<div class='grp'><h2>%s</h2><div class='scroll'><table class='kv'>"
+            "<div class='grp' id='s-loss'><h2>%s</h2><div class='scroll'><table class='kv'>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%s</td></tr>"
@@ -7336,7 +7719,8 @@ static esp_err_t system_get_handler(httpd_req_t *req)
             "<tr><th>%s</th><td>%lu</td></tr>"
             "<tr><th>%s</th><td>%lu ms</td></tr>"
 #endif
-            "</table></div><p class='note'>%s</p></div>",
+            "</table></div><details class='dtl'><summary>%s</summary>"
+            "<p class='note'>%s</p></details></div>",
             T(S_LOSS_TITLE),
             T(S_LOSS_SNIFFER), (unsigned long)sniffer_dropped(),
             T(S_LOSS_MQTT), (unsigned long)mqtt_tx_dropped(),
@@ -7352,7 +7736,7 @@ static esp_err_t system_get_handler(httpd_req_t *req)
             T(S_LOSS_SD_FAILS), (unsigned long)sdcard_io_fail_max(),
             T(S_LOSS_SD_HELD), (unsigned long)sdcard_io_held_max_ms(),
 #endif
-            T(S_LOSS_HINT));
+            T(S_LOSS_SUM), T(S_LOSS_HINT));
         httpd_resp_send_chunk(req, loss, HTTPD_RESP_USE_STRLEN);
     }
 
@@ -7858,8 +8242,10 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
              * paragraph early, and the row would fall apart. */
             "<div class='btnrow tools'>"
             "<form method='post' action='/sdcard/mount' style='display:inline-block'>"
-            "<button>%s</button></form>"
-            "<button onclick=\"if(confirm('%s')){"
+            /* .act: mounting is what this branch is for, so it keeps the amber
+             * fill the quiet .btnrow would otherwise take away from it. */
+            "<button class='act'>%s</button></form>"
+            "<button class='dngr' onclick=\"if(confirm('%s')){"
             "var x=new XMLHttpRequest();x.open('POST','/sdcard/format');"
             "x.onload=function(){location.reload();};"
             "this.innerText='%s';x.send();}\">%s</button></div></div>",
@@ -7909,9 +8295,9 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
         "<p class='tools'><span class='cap'>%s:</span><input type='file' id='fw'>"
         "<button onclick='up()'>%s</button> "
         "<span id='ur'></span></p>"
-        "<p class='btnrow tools'><button onclick='fmt()'>%s</button> <span id='fr'></span></p>"
+        "<p class='btnrow tools'><button class='dngr' onclick='fmt()'>%s</button> <span id='fr'></span></p>"
         "<p class='btnrow tools'><button onclick='seltar()'>&#8595; %s</button> "
-        "<button onclick='seldel()'>%s</button></p>"
+        "<button class='dngr' onclick='seldel()'>%s</button></p>"
         "<p class='note'>%s</p>"
         "<script>"
         "var P='%s';var ITS_SD_FAIL='%s';"
@@ -8044,7 +8430,7 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
                 snprintf(row, sizeof(row),
                     "<tr data-d='0' data-sz='%llu'><td><input type='checkbox' class='sel' value='%s'></td>"
                     "<td><a href='/sdcard/download?p=%s'>%s</a></td><td>%s</td>"
-                    "<td><button onclick=\"del('%s')\">%s</button></td></tr>",
+                    "<td><button class='dngr' onclick=\"del('%s')\">%s</button></td></tr>",
                     (unsigned long long)st.st_size,
                     relhtml, relenc2, nameesc, sz, relenc2, T(S_SD_DELETE));
             }
@@ -9717,6 +10103,20 @@ void webserver_init(void)
         .callback = reboot_timer_cb, .arg = NULL, .name = "web_reboot"
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &reboot_timer_handle));
+
+    /* Own timer, not sysmon's 5 s pass: that one writes to the SD card in the
+     * same round, so a stalling card would silently stretch a "minute". */
+    /* Task dispatch, not ISR: the ring is in PSRAM. Started before httpd so a
+     * server that fails to come up still leaves an hour of history behind. */
+    static esp_timer_handle_t hist_tick_handle;
+    esp_timer_create_args_t hist_args = {
+        .callback = hist_tick, .arg = NULL, .name = "hist_tick",
+        /* A missed minute stays a gap. Catching up would write the same
+         * 60-second window into several slots and stretch the hour. */
+        .skip_unhandled_events = true
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&hist_args, &hist_tick_handle));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(hist_tick_handle, 60000000ull));
 
     ESP_ERROR_CHECK(esp_event_handler_register(MQTT_EVENT_BASE, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
 
