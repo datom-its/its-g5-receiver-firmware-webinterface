@@ -21,6 +21,7 @@
 
 #include "config.h"
 #include "events.h"
+#include "esp_attr.h"
 #include "sdcard.h"
 
 static const char TAG[] = "SDLOG";
@@ -123,6 +124,55 @@ static stream_t sys_stream   = { SYS_LOG,   SYS_LOG_OLD,   0, {0} };
 static volatile bool s_ready;
 static volatile bool cfg_log_sys;
 
+/* The last console lines, kept in RAM. The SD log needs the card, so a failed
+ * mount would otherwise erase its own explanation. */
+#define RLOG_LINES 64
+#define RLOG_LEN   160
+static EXT_RAM_BSS_ATTR char rlog[RLOG_LINES][RLOG_LEN];
+static uint32_t rlog_next;      /* number of lines ever written */
+static portMUX_TYPE rlog_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void rlog_put(const char *line, int n)
+{
+    if (n <= 0) return;
+    if (n > RLOG_LEN - 1) n = RLOG_LEN - 1;
+    /* Trailing newline would double-space the page; the reader adds its own. */
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
+    portENTER_CRITICAL_SAFE(&rlog_mux);
+    memcpy(rlog[rlog_next % RLOG_LINES], line, (size_t)n);
+    rlog[rlog_next % RLOG_LINES][n] = '\0';
+    rlog_next++;
+    portEXIT_CRITICAL_SAFE(&rlog_mux);
+}
+
+size_t sdlog_recent(char *out, size_t cap)
+{
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    size_t o = 0;
+    /* Only the index is read under the lock: rlog lives in PSRAM, and copying
+     * 10 KB of it with interrupts off would stall the packet path. */
+    portENTER_CRITICAL_SAFE(&rlog_mux);
+    uint32_t total = rlog_next;
+    portEXIT_CRITICAL_SAFE(&rlog_mux);
+
+    uint32_t have = total < RLOG_LINES ? total : RLOG_LINES;
+    for (uint32_t i = 0; i < have; i++)
+    {
+        /* Full-width copy plus a forced terminator: a line the writer is
+         * replacing right now may be torn, but it can never run off the slot. */
+        char slot[RLOG_LEN];
+        memcpy(slot, rlog[(total - have + i) % RLOG_LINES], RLOG_LEN);
+        slot[RLOG_LEN - 1] = '\0';
+        size_t len = strlen(slot);
+        if (o + len + 2 > cap) break;
+        memcpy(out + o, slot, len); o += len;
+        out[o++] = '\n';
+    }
+    out[o] = '\0';
+    return o;
+}
+
 static vprintf_like_t s_orig_vprintf;
 
 /* IDF log timestamps are time-only, so inject a dated header line at local
@@ -192,6 +242,13 @@ static void flush_stream(stream_t *s)
 
     FILE *f = fopen(s->path, "a");
     if (!f)
+    {
+        /* A format wipes /logs with the card still mounted, so the task's
+         * one-shot mkdir never re-runs. Retry once before calling it a failure. */
+        mkdir(LOG_DIR, 0777);
+        f = fopen(s->path, "a");
+    }
+    if (!f)
         return;
 
     char scratch[1024];
@@ -199,7 +256,7 @@ static void flush_stream(stream_t *s)
     while ((n = ring_drain(&s->ring, scratch, sizeof(scratch))) > 0)
     {
         if (fwrite(scratch, 1, n, f) != n)
-            break;  /* write error (card full/removed): stop, retry next cycle */
+            break;  /* write error: this chunk is lost, the ring keeps the rest */
     }
     fclose(f);
 
@@ -263,10 +320,14 @@ static int sdlog_vprintf(const char *fmt, va_list args)
     int ret = s_orig_vprintf ? s_orig_vprintf(fmt, ap) : vprintf(fmt, ap);
     va_end(ap);
 
+    char line[256];
+    int n = vsnprintf(line, sizeof(line), fmt, args);
+    /* Before the s_ready gate on purpose: without a card there is no other
+     * place left where the operator could read why. */
+    rlog_put(line, n);
+
     if (s_ready && cfg_log_sys)
     {
-        char line[256];
-        int n = vsnprintf(line, sizeof(line), fmt, args);
         if (n > 0)
         {
             if (n > (int)sizeof(line) - 1)
@@ -315,5 +376,8 @@ void sdlog_init(void)
 
 void sdlog_init(void) {}
 void sdlog_flush_now(void) {}
+
+/* Without a card there is no logger, but the getter must still link. */
+size_t sdlog_recent(char *out, size_t cap) { if (out && cap) out[0] = '\0'; return 0; }
 
 #endif

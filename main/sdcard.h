@@ -68,6 +68,10 @@ void sdcard_read_end(void);
 /* Total and free bytes of the mounted filesystem. */
 esp_err_t sdcard_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 
+/* Why the last mount attempt failed, ESP_OK if none did. ESP_FAIL = the card
+ * answered but has no usable FAT; anything else = the card never answered. */
+esp_err_t sdcard_last_mount_error(void);
+
 #ifdef __cplusplus
 }
 #endif

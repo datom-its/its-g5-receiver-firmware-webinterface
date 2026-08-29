@@ -244,6 +244,10 @@ static bool sd_wait_readers(void)
     }
 }
 
+/* ESP_OK until a mount has failed. The mount path writes it and the httpd
+ * task reads it, so it has to be volatile. */
+static volatile esp_err_t s_last_mount_err = ESP_OK;
+
 /* format_if_failed = true is reserved for the user's explicit format request
  * on a card that never mounted (e.g. factory exFAT) -- never automatic. */
 static esp_err_t sdcard_mount_internal(bool format_if_failed)
@@ -291,6 +295,9 @@ static esp_err_t sdcard_mount_internal(bool format_if_failed)
 
     sdcard_io_long_end();
     if (ret != ESP_OK) {
+        /* Kept for the web page: ESP_FAIL means the card answered but carries no
+         * usable FAT, anything else means it never answered at all. */
+        s_last_mount_err = ret;
         if (ret == ESP_FAIL)
             ESP_LOGE(TAG, "Failed to mount filesystem (card present and FAT-formatted?)");
         else
@@ -300,10 +307,13 @@ static esp_err_t sdcard_mount_internal(bool format_if_failed)
         sd_lock_give();
         return ret;
     }
+    s_last_mount_err = ESP_OK;
     ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
     sd_lock_give();
     return ESP_OK;
 }
+
+esp_err_t sdcard_last_mount_error(void) { return s_last_mount_err; }
 
 esp_err_t sdcard_mount(void)
 {

@@ -153,7 +153,9 @@ typedef enum {
     S_RSU_UP_THIN, S_RSU_UP_ONCE, S_RSU_UP_BUSY,
     S_SRCH_TITLE, S_SRCH_HINT, S_SRCH_FILTER, S_SRCH_BTN, S_SRCH_RUN,
     S_SRCH_NONE, S_SRCH_LIMIT, S_SRCH_PARTIAL, S_SRCH_EXPORT, S_SRCH_EXPORT_HINT,
-    S_SD_NOT_MOUNTED, S_SD_UNMOUNTED_HINT, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
+    S_SD_NOT_MOUNTED, S_SD_MOUNT, S_SD_USAGE, S_SD_USED_OF,
+    S_SD_ERR_NOFS, S_SD_ERR_NOCARD, S_SD_ERR_UNMOUNTED, S_SD_ERR_USAGE,
+    S_LOGS_CONSOLE, S_LOGS_CONSOLE_HINT,
     S_SD_NAME, S_SD_SIZE, S_SD_EMPTY, S_SD_PARENT, S_SD_DELETE, S_SD_DELETE_CONFIRM,
     S_SD_FORMAT, S_SD_FORMAT_CONFIRM, S_SD_FORMATTING, S_SD_UP_HERE, S_SD_UP_BTN,
     S_PEER_TITLE, S_PEER_NODE, S_PEER_RATE, S_PEER_UPTIME, S_PEER_MQTT,
@@ -590,12 +592,30 @@ static const char *STR[S_COUNT][2] = {
                              "Larger downloads take several minutes. The UI stays usable; further "
                              "downloads run one after another, and are refused when too many pile up." },
     [S_SD_NOT_MOUNTED]  = { "Keine SD-Karte eingebunden.", "No SD card mounted." },
-    [S_SD_UNMOUNTED_HINT] = { "L&auml;sst sich eine steckende Karte nicht einbinden, ist sie "
-                              "vermutlich nicht FAT (fabrikneue &uuml;ber 32&nbsp;GB kommen "
-                              "als exFAT) &ndash; einmal formatieren richtet sie ein.",
-                              "If a card is inserted but cannot be mounted, it is probably not "
-                              "FAT (factory-fresh cards above 32&nbsp;GB come as exFAT) "
-                              "&ndash; formatting once sets it up." },
+    /* Four different situations, and only the first is worth formatting for. */
+    [S_SD_ERR_NOFS]     = { "Die Karte antwortet, tr&auml;gt aber kein brauchbares "
+                            "FAT-Dateisystem. Einmal formatieren richtet sie ein &ndash; "
+                            "dabei geht alles darauf verloren.",
+                            "The card answers but carries no usable FAT filesystem. "
+                            "Formatting it once sets it up, and erases everything on it." },
+    [S_SD_ERR_NOCARD]   = { "Die Karte antwortet gar nicht. Steckt sie richtig? "
+                            "Formatieren hilft in diesem Fall nicht.",
+                            "The card does not answer at all. Is it seated properly? "
+                            "Formatting does not help here." },
+    [S_SD_ERR_UNMOUNTED] = { "Die Karte wurde absichtlich ausgeh&auml;ngt &ndash; etwa "
+                             "mit &bdquo;Zum Ausschalten vorbereiten&ldquo;. Einbinden "
+                             "holt sie zur&uuml;ck, formatieren ist nicht n&ouml;tig.",
+                             "The card was unmounted on purpose, e.g. by "
+                             "&ldquo;Prepare for power-off&rdquo;. Mounting brings it "
+                             "back; formatting is not needed." },
+    [S_SD_ERR_USAGE]    = { "Karte eingebunden, Belegung nicht lesbar.",
+                            "Card mounted, usage cannot be read." },
+    [S_LOGS_CONSOLE]    = { "Konsole", "Console" },
+    [S_LOGS_CONSOLE_HINT] = { "Die letzten Meldungen des Ger&auml;ts, im Arbeitsspeicher "
+                              "gehalten. Sie stehen auch dann hier, wenn die Karte fehlt "
+                              "&ndash; das Systemlog oben braucht sie n&auml;mlich.",
+                              "The device's last messages, kept in RAM. They appear here "
+                              "even with no card, which the system log above needs." },
     [S_SD_MOUNT]        = { "Einbinden",               "Mount" },
     [S_SD_USAGE]        = { "Belegung",                 "Usage" },
     [S_SD_USED_OF]      = { "%s von %s belegt (%s frei)", "%s of %s used (%s free)" },
@@ -1529,6 +1549,48 @@ static const char *ram_int_class(void)
     return lvl_class((unsigned)(((uint64_t)(tot - fre) * 100) / tot), 85, 92);
 }
 
+#if CONFIG_ENABLE_SD
+/* One predicate for the SD state, so '/', /sdcard and /status.json cannot
+ * disagree. A failed usage query is NOT the same as a missing card. */
+typedef enum {
+    SDST_OK,         /* mounted, size readable */
+    SDST_NO_USAGE,   /* mounted, but esp_vfs_fat_info failed or reported 0 */
+    SDST_NO_FS,      /* not mounted: answered, carries no usable FAT */
+    SDST_NO_CARD,    /* not mounted: never answered */
+    SDST_UNMOUNTED   /* not mounted on purpose (/poweroff, console unmount) */
+} sd_state_t;
+
+/* total/free may be NULL. If nothing is mounted and no mount ever failed,
+ * somebody unmounted on purpose: sdcard_unmount() leaves the error at OK. */
+static sd_state_t sd_state(uint64_t *total, uint64_t *freeb)
+{
+    if (!sdcard_is_mounted())
+    {
+        esp_err_t e = sdcard_last_mount_error();
+        return e == ESP_OK   ? SDST_UNMOUNTED
+             : e == ESP_FAIL ? SDST_NO_FS
+                             : SDST_NO_CARD;
+    }
+    uint64_t t = 0, f = 0;
+    esp_err_t e = sdcard_usage(&t, &f);
+    if (total) *total = t;
+    if (freeb) *freeb = f;
+    return (e == ESP_OK && t) ? SDST_OK : SDST_NO_USAGE;
+}
+
+/* The same states as /status.json reasons. "not_mounted" keeps its 0.30.3
+ * meaning (card never answered); "unmounted" is the deliberate one. */
+static const char *sd_state_reason(sd_state_t st)
+{
+    switch (st) {
+    case SDST_NO_USAGE:  return "usage_error";
+    case SDST_NO_FS:     return "no_fs";
+    case SDST_UNMOUNTED: return "unmounted";
+    default:             return "not_mounted";
+    }
+}
+#endif
+
 #ifdef CONFIG_ENABLE_TEMPERATURE
 /* Enclosure temperature, not a chip limit: the LM75 sits on the board next
  * to it, so these are the values at which the operator should look. */
@@ -2332,7 +2394,8 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 #if CONFIG_ENABLE_SD
     {
         uint64_t sd_total = 0, sd_free = 0;
-        if (sdcard_usage(&sd_total, &sd_free) == ESP_OK && sd_total)
+        sd_state_t sdst = sd_state(&sd_total, &sd_free);
+        if (sdst == SDST_OK)
         {
             char u[24], t[24], f[24];
             unsigned pct = (unsigned)(((sd_total - sd_free) * 100ull) / sd_total);
@@ -2346,7 +2409,10 @@ static esp_err_t status_page_handler(httpd_req_t *req)
         }
         else
         {
-            snprintf(sdtxt, sizeof(sdtxt), "%s", T(S_SD_NOT_MOUNTED));
+            /* A mounted card whose size query failed is not a missing one. */
+            snprintf(sdtxt, sizeof(sdtxt), "%s",
+                     sdst == SDST_NO_USAGE ? T(S_SD_ERR_USAGE)
+                                           : T(S_SD_NOT_MOUNTED));
             /* Grey, not red: running without a card is a normal setup for
              * someone else, not a fault of this one. */
             sdcls = "v-off";
@@ -2414,8 +2480,8 @@ static esp_err_t status_page_handler(httpd_req_t *req)
 
     render_activity_stats(req, hourr, hscale);
 
-    /* The SD value gets no state class: /status.json carries no SD field, so a
-     * coloured 36px number would keep asserting the share from page load. */
+    /* The SD value gets no state class: arApply never rewrites this cell (the
+     * sd field in /status.json is for monitors), so a colour would freeze. */
     snprintf(body, sizeof(body),
         "<div class='grp' id='sec-dev'><h2>%s</h2><div class='grid'>"
         "<div class='cell'><div class='l %s' id='st-sdl' title='%s'>%s</div>"
@@ -2708,6 +2774,31 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
     uint32_t last1 = msg_last_sec1, now32 = (uint32_t)uptime_s;
     long idle = last1 ? (long)(now32 > last1 - 1 ? now32 - (last1 - 1) : 0) : -1;
 
+    /* Machine-readable SD state, same states the file page names. 176 carries
+     * the worst case GCC assumes: 61 literal + 10 + 20 + 20 + 10 + 10 + NUL. */
+    char sdj[176] = ",\"sd\":{\"ok\":false,\"reason\":\"no_sd_build\"}";
+#if CONFIG_ENABLE_SD
+    {
+        uint64_t sdt = 0, sdf = 0;
+        sd_state_t sdst = sd_state(&sdt, &sdf);
+        if (sdst == SDST_OK)
+            snprintf(sdj, sizeof(sdj),
+                ",\"sd\":{\"ok\":true,\"pct\":%u,\"used\":%llu,\"total\":%llu,"
+                "\"fails\":%lu,\"held_ms\":%lu}",
+                (unsigned)(((sdt - sdf) * 100ull) / sdt),
+                (unsigned long long)(sdt - sdf), (unsigned long long)sdt,
+                /* Both peaks since boot, like the loss table: the live streak
+                 * reads 0 during long ops, so a poll would never see it. */
+                (unsigned long)sdcard_io_fail_max(),
+                (unsigned long)sdcard_io_held_max_ms());
+        else
+            /* usage_error = mounted but unreadable size, no_fs = no FAT,
+             * not_mounted = never answered, unmounted = on purpose. */
+            snprintf(sdj, sizeof(sdj), ",\"sd\":{\"ok\":false,\"reason\":\"%s\"}",
+                     sd_state_reason(sdst));
+    }
+#endif
+
     static EXT_RAM_BSS_ATTR char json[8192];
     snprintf(json, sizeof(json),
         "{\"msgs\":%lu,\"rate\":%lu,\"uptime\":\"%s\",\"sniff\":%s,\"chan\":\"%s\",\"mqtt\":%s,"
@@ -2722,7 +2813,7 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
         ",\"temp\":%s,\"tcl\":\"%s\""
         ",\"htp\":\"%s\",\"htb\":\"%s\""
 #endif
-        "}",
+        "%s}",
         (unsigned long)msg_total_count, (unsigned long)rate, uptime_str,
         running ? "true" : "false", chan_str,
         mqtt_connected_state ? "true" : "false",
@@ -2732,6 +2823,8 @@ static esp_err_t status_json_get_handler(httpd_req_t *req)
 #ifdef CONFIG_ENABLE_TEMPERATURE
         , tval, temp_class(tc), hourt, hband
 #endif
+        /* Last, so the temperature block above keeps its argument order. */
+        , sdj
     );
     /* The peer row on another node's status page reads this cross-origin,
      * exactly like /markers.json and /tracks.json already allow. */
@@ -8230,7 +8323,12 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     snprintf(sdhdr, sizeof(sdhdr), "<div class='grp'><h2>%s</h2>", T(S_FS_SDCARD));
     httpd_resp_send_chunk(req, sdhdr, HTTPD_RESP_USE_STRLEN);
 
-    if (!sdcard_is_mounted())
+    /* One state read for both halves of this page, so the reason text and the
+     * usage tile below cannot come from two different samples. */
+    uint64_t total = 0, freeb = 0;
+    sd_state_t sdst = sd_state(&total, &freeb);
+
+    if (sdst != SDST_OK && sdst != SDST_NO_USAGE)   /* i.e. not mounted */
     {
         /* The format button must be reachable HERE: an unreadable card never
          * mounts, and since 0.22.7 nothing formats it automatically. */
@@ -8249,7 +8347,12 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
             "var x=new XMLHttpRequest();x.open('POST','/sdcard/format');"
             "x.onload=function(){location.reload();};"
             "this.innerText='%s';x.send();}\">%s</button></div></div>",
-            T(S_SD_NOT_MOUNTED), T(S_SD_UNMOUNTED_HINT),
+            /* The reason instead of a guess. A deliberate unmount leaves no
+             * mount error, so it must not be reported as a dead card. */
+            T(S_SD_NOT_MOUNTED),
+            sdst == SDST_NO_FS       ? T(S_SD_ERR_NOFS)
+            : sdst == SDST_UNMOUNTED ? T(S_SD_ERR_UNMOUNTED)
+                                     : T(S_SD_ERR_NOCARD),
             T(S_SD_MOUNT),
             T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING), T(S_SD_FORMAT));
         httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
@@ -8259,10 +8362,9 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
     }
 
     /* Usage + upload form + format button */
-    uint64_t total = 0, freeb = 0;
     char usage[384] = "";
-    /* total != 0 guards the percentage below against a divide by zero. */
-    if (sdcard_usage(&total, &freeb) == ESP_OK && total)
+    /* SDST_OK already means total != 0, so the percentage cannot divide by zero. */
+    if (sdst == SDST_OK)
     {
         char t[24], u[24], f[24];
         unsigned pct = (unsigned)(((total - freeb) * 100ull) / total);
@@ -8279,6 +8381,10 @@ static esp_err_t sdcard_get_handler(httpd_req_t *req)
                  "<div class='d'>%s</div></div></div>",
                  lvl_class(pct, 80, 92), T(S_SD_USAGE), pct, used_of);
     }
+    else
+        /* Says so instead of dropping the tile silently. /status.json
+         * calls this same case "usage_error". */
+        snprintf(usage, sizeof(usage), "<p class='note'>%s</p>", T(S_SD_ERR_USAGE));
 
     /* These scratch buffers are large; keeping them on the stack overflowed the
      * single httpd task. esp_http_server handles requests sequentially in one
@@ -9956,6 +10062,48 @@ static void stream_tail_escaped(httpd_req_t *req, FILE *f, long start)
     }
 }
 
+#define RLOG_SNAP 10496   /* 64 lines of 160 plus separators */
+#define RLOG_ESC  1200    /* one line, worst case 6x through html_escape */
+
+/* The RAM console, as its own group. Streamed line by line: 64 lines can reach
+ * 60 KB once escaped, which no single buffer here should have to hold. */
+static void send_console_block(httpd_req_t *req)
+{
+    char head[512];
+    HTML_PRINTF(head,
+        "<div class='grp'><h2>%s</h2><p class='note'>%s</p>"
+        "<div class='scroll'><pre class='logpre'>",
+        T(S_LOGS_CONSOLE), T(S_LOGS_CONSOLE_HINT));
+    httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+
+    /* Only the httpd task reaches this page (no defer_to_worker), so static is
+     * safe and keeps 10 KB off the 16 KB stack. */
+    static EXT_RAM_BSS_ATTR char raw[RLOG_SNAP];
+    size_t n = sdlog_recent(raw, sizeof(raw));
+    char *line = raw;
+    while (n && line < raw + n)
+    {
+        char *nl = memchr(line, '\n', (size_t)(raw + n - line));
+        size_t len = nl ? (size_t)(nl - line) : (size_t)(raw + n - line);
+        if (len)
+        {
+            char esc[RLOG_ESC];
+            char tmp[192];
+            if (len > sizeof(tmp) - 1) len = sizeof(tmp) - 1;
+            memcpy(tmp, line, len);
+            tmp[len] = '\0';
+            html_escape(tmp, esc, sizeof(esc));
+            httpd_resp_send_chunk(req, esc, HTTPD_RESP_USE_STRLEN);
+            httpd_resp_send_chunk(req, "\n", HTTPD_RESP_USE_STRLEN);
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    if (!n)
+        httpd_resp_send_chunk(req, "&ndash;", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</pre></div></div>", HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t logs_get_handler(httpd_req_t *req)
 {
     resolve_language(req);
@@ -10003,6 +10151,7 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
         char msg[192];
         snprintf(msg, sizeof(msg), "<p class='note'>%s</p></div>", T(S_LOGS_NONE));
         httpd_resp_send_chunk(req, msg, HTTPD_RESP_USE_STRLEN);
+        send_console_block(req);
         httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, NULL, 0);
         return ESP_OK;
@@ -10074,6 +10223,7 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
         "lgf(0);})();</script>", HTTPD_RESP_USE_STRLEN);
     /* Own chunk so the closing tag of the page's group is findable. */
     httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+    send_console_block(req);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;

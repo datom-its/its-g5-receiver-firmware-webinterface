@@ -36,6 +36,7 @@ Newest first.
 
 | Version       | Changes |
 |---------------|---------|
+| **0.30.5-webui** | Built on ESP-IDF v6.1. The log page now also includes the device's console: the last 64 messages, kept in RAM and readable with no card in the slot. The file page names the reason a card is not in use. Formatting a card no longer stops the log and the recording. |
 | **0.30.0-webui** | The status page draws the last hour of traffic and temperature. Destructive buttons are red outlines now, long explanations fold away, and the long pages carry a jump bar. The dark map draws the OpenStreetMap tiles inverted in the browser, instead of the CARTO ones it used before. General bug fixes. |
 | **0.29.0-webui** | New look for the whole web interface: no framed cards, values under small labels with a status dot, the stylesheet in a cached file. Red-amber has its own column on `/traffic`, warnings record their sender, and the SD card bulk delete works again. General bug fixes. |
 | **0.28.0-webui** | The Bluetooth branch is merged in. BLE live streaming of received frames is part of this build, off by default and switched on under `/settings`. With it off the radio stays on 802.11p alone and 8 KB more internal memory is free than before. With it on, BLE and reception share the one radio, so frames are missed. |
@@ -44,7 +45,6 @@ Newest first.
 | **0.27.5-webui** | Reboot and power-off now sit behind the web password, where one is set, like the firmware update. Settings that were rejected are reported separately from those that were saved. On `/transit`, the zero-deviation column is called "no value", with a footnote on what it counts. |
 | **0.27.4-webui** | The floating unsaved-changes bar gets a "Save & reboot" button, for settings that only take effect after a restart. |
 | **0.27.3-webui** | Reboot button on `/settings`. The page shown during a restart polls the device and reloads itself once it answers. |
-| **0.27.2-bt** | *On the `experimental` branch, not on `main`.* Adds a Bluetooth Low Energy live stream of received frames, so a phone app can show them without a network in between. Bluetooth is off by default, and with the switch off this firmware behaves exactly like the release above. Only while it is switched on does the receiver have to share its single radio, which costs capture rate — `BLUETOOTH.md` on that branch has the numbers. The BLE code is adapted from [V2Xtend](https://github.com/githubapache2/V2Xtend) and, through it, [V2X2MAP](https://github.com/pit711/V2X2MAP), both MIT — see `NOTICE`. |
 
 Older entries, back to the first web-UI firmware, are in [CHANGELOG.md](CHANGELOG.md).
 
@@ -163,6 +163,29 @@ device: pick a from/to time range, click **Load**, and scrub or auto-play the
 recorded positions over the map. Capture is off by default. Writing to the
 card around the clock wears it out and fills it up. On a device standing in
 the field, nobody notices either one.
+
+## Machine-readable data
+
+The device serves its own figures as JSON, without a password. I use this myself
+for a separate dashboard.
+
+- `/status.json` — the status dashboard: frames, rate, uptime, channel, sniffer
+  and MQTT state, temperature, and the card — how full it is, or why there is
+  none.
+- `/spatem.json` — one entry per traffic light heard, with its name, revision
+  and the current phase of each signal group.
+- `/markers.json` — the last positions decoded, one per sender.
+- `/lanes.json` — the lane geometry of the intersections, in 1e-7 degrees.
+- `/tracks.json` — recorded vehicle tracks. Reads from the SD card.
+- `/system.json` — uptime, CPU load and memory. Half of it is HTML meant for the
+  page.
+
+`/status.json` is built from values already in memory. The status page itself
+fetches it every five seconds. `/tracks.json` reads from the SD card on every
+request, so leave a few minutes between them. `/tracks.json?days=2` asks for the
+last two days. Without it you get whatever `/settings` keeps.
+
+If I ever change one of these, I will note it here.
 
 ## Hardware
 

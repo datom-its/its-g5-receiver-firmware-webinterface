@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 #include "cmd_sniffer.h"
 
 #ifdef __cplusplus
@@ -17,6 +19,10 @@ void sdlog_init(void);
 /* Writes the system-log ring to the card immediately rather than waiting for
  * the next 2 s writer cycle. Used by the prepare-for-power-off path. */
 void sdlog_flush_now(void);
+
+/* Copies the last console lines (newline-separated) into out, returns the
+ * length. Filled even without a card, which is the point of it. */
+size_t sdlog_recent(char *out, size_t cap);
 
 #ifdef __cplusplus
 }

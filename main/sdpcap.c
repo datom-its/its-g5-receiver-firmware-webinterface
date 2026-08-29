@@ -456,6 +456,13 @@ static bool sdpcap_flush_to(const char *path, size_t limit, size_t *consumed)
         *consumed = 0;
     FILE *f = fopen(path, "ab");
     if (!f)
+    {
+        /* A format wipes /pcap with the card still mounted, so the task's
+         * one-shot mkdir never re-runs. Same retry as sdlog's flush_stream. */
+        mkdir(PCAP_DIR, 0777);
+        f = fopen(path, "ab");
+    }
+    if (!f)
         return false;
 
     struct stat st;
