@@ -68,7 +68,7 @@ static bool ring_init(ring_t *r, size_t size)
     return r->lock != NULL;
 }
 
-/* Append bytes; drops the whole chunk if it does not fit (best effort). */
+/* Append bytes, or drop the whole chunk if it does not fit (best effort). */
 static void ring_append(ring_t *r, const char *data, size_t len, TickType_t wait)
 {
     if (len == 0 || !r->buf)
@@ -91,7 +91,7 @@ static void ring_append(ring_t *r, const char *data, size_t len, TickType_t wait
     xSemaphoreGive(r->lock);
 }
 
-/* Copy out up to max bytes; returns number copied. */
+/* Copy out up to max bytes and return the number copied. */
 static size_t ring_drain(ring_t *r, char *out, size_t max)
 {
     if (xSemaphoreTake(r->lock, portMAX_DELAY) != pdTRUE)
@@ -124,19 +124,34 @@ static stream_t sys_stream   = { SYS_LOG,   SYS_LOG_OLD,   0, {0} };
 static volatile bool s_ready;
 static volatile bool cfg_log_sys;
 
-/* The last console lines, kept in RAM. The SD log needs the card, so a failed
- * mount would otherwise erase its own explanation. */
+/* The last console lines, kept in RAM. The SD log needs the card, so it cannot
+ * record why a mount failed. */
 #define RLOG_LINES 64
 #define RLOG_LEN   160
 static EXT_RAM_BSS_ATTR char rlog[RLOG_LINES][RLOG_LEN];
 static uint32_t rlog_next;      /* number of lines ever written */
 static portMUX_TYPE rlog_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* Tags that log on a timer fill the 64-line ring within minutes, until it holds
+ * nothing but temperature. Only their info lines are dropped, so a failing
+ * sensor still shows. Every line still reaches the UART and the SD log. */
+static bool rlog_noisy(const char *line)
+{
+    /* The level letter comes first because log colours are off in every
+     * sdkconfig. With colours on, nothing is dropped. */
+    if (line[0] != 'I')
+        return false;
+    static const char *const tags[] = { ") TEMPERATURE: " };
+    for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++)
+        if (strstr(line, tags[i])) return true;
+    return false;
+}
+
 static void rlog_put(const char *line, int n)
 {
     if (n <= 0) return;
     if (n > RLOG_LEN - 1) n = RLOG_LEN - 1;
-    /* Trailing newline would double-space the page; the reader adds its own. */
+    /* sdlog_recent() adds a newline to each line, so strip the logged one. */
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
     portENTER_CRITICAL_SAFE(&rlog_mux);
     memcpy(rlog[rlog_next % RLOG_LINES], line, (size_t)n);
@@ -150,7 +165,7 @@ size_t sdlog_recent(char *out, size_t cap)
     if (!out || cap == 0) return 0;
     out[0] = '\0';
     size_t o = 0;
-    /* Only the index is read under the lock: rlog lives in PSRAM, and copying
+    /* Only the index is read under the lock. rlog is in PSRAM, and copying
      * 10 KB of it with interrupts off would stall the packet path. */
     portENTER_CRITICAL_SAFE(&rlog_mux);
     uint32_t total = rlog_next;
@@ -175,8 +190,8 @@ size_t sdlog_recent(char *out, size_t cap)
 
 static vprintf_like_t s_orig_vprintf;
 
-/* IDF log timestamps are time-only, so inject a dated header line at local
- * midnight (and after NTP sync); the boundary is cached so localtime runs once a day. */
+/* IDF log timestamps have no date. Insert a dated header line at local midnight
+ * and after NTP sync. The cached boundary means localtime runs once a day. */
 static time_t s_next_day_boundary;
 
 /* Called from the vprintf hook (any task). Suppressed until the clock is
@@ -197,7 +212,7 @@ static void sdlog_emit_date_marker_if_needed(void)
     if (mn > 0)
         ring_append(&sys_stream.ring, marker, (size_t)mn, 0);
 
-    /* Next local midnight; tm_isdst=-1 lets mktime resolve DST correctly. */
+    /* Next local midnight. tm_isdst=-1 lets mktime resolve DST correctly. */
     lt.tm_mday += 1;
     lt.tm_hour = 0;
     lt.tm_min = 0;
@@ -215,7 +230,7 @@ static void reload_config(void)
     cfg_log_sys = sys;
 
     /* Per-file cap is half the budget because 2 rotated files are kept. Clamped
-     * because the settings field allows values that overflow 32-bit byte math. */
+     * because "config set" on the console accepts values that overflow 32-bit math. */
     uint32_t sys_mb = mb ? mb : 1;
     if (sys_mb > SYS_BUDGET_MAX_MB) sys_mb = SYS_BUDGET_MAX_MB;
     sys_stream.file_cap = (size_t)((uint64_t)sys_mb * 1024u * 1024u / 2u);
@@ -249,18 +264,27 @@ static void flush_stream(stream_t *s)
         f = fopen(s->path, "a");
     }
     if (!f)
+    {
+        sdcard_note_write(false);
         return;
+    }
 
     char scratch[1024];
     size_t n;
+    bool ok = true;
     while ((n = ring_drain(&s->ring, scratch, sizeof(scratch))) > 0)
     {
         if (fwrite(scratch, 1, n, f) != n)
-            break;  /* write error: this chunk is lost, the ring keeps the rest */
+        {
+            ok = false;
+            break;  /* write error: this chunk is lost, but the ring keeps the rest */
+        }
     }
-    fclose(f);
+    if (fclose(f) != 0)
+        ok = false;
+    sdcard_note_write(ok);
 
-    /* Rotate: current file full -> drop the old backup, current becomes backup. */
+    /* Rotate once the file is full. It replaces the old backup. */
     struct stat st;
     if (stat(s->path, &st) == 0 && (size_t)st.st_size >= s->file_cap)
     {
@@ -322,9 +346,10 @@ static int sdlog_vprintf(const char *fmt, va_list args)
 
     char line[256];
     int n = vsnprintf(line, sizeof(line), fmt, args);
-    /* Before the s_ready gate on purpose: without a card there is no other
-     * place left where the operator could read why. */
-    rlog_put(line, n);
+    /* Ahead of the SD-log check on purpose, so the RAM copy also fills while the
+     * SD log is off. After a failed mount it is the only place that shows why. */
+    if (n > 0 && !rlog_noisy(line))
+        rlog_put(line, n);
 
     if (s_ready && cfg_log_sys)
     {
@@ -346,8 +371,8 @@ static int sdlog_vprintf(const char *fmt, va_list args)
 
 void sdlog_init(void)
 {
-    /* Leftover frames.csv from the removed frame log is left ALONE: outside the
-     * /logs budget, but it is captured data -- deleting is the operator's call. */
+    /* A frames.csv from older firmware is kept on purpose. It is outside the /logs
+     * budget, but it is captured data. Only the operator should delete it. */
 
     reload_config();
 
@@ -363,7 +388,7 @@ void sdlog_init(void)
         return;
     }
 
-    /* Install the log hook last, so it is only active once buffers exist. */
+    /* Install the log hook only after the ring buffer and writer task exist. */
     s_orig_vprintf = esp_log_set_vprintf(sdlog_vprintf);
     s_ready = true;
 
@@ -377,7 +402,7 @@ void sdlog_init(void)
 void sdlog_init(void) {}
 void sdlog_flush_now(void) {}
 
-/* Without a card there is no logger, but the getter must still link. */
+/* Without SD support there is no logger, but the getter must still link. */
 size_t sdlog_recent(char *out, size_t cap) { if (out && cap) out[0] = '\0'; return 0; }
 
 #endif

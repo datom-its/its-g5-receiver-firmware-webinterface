@@ -13,16 +13,16 @@
 extern "C" {
 #endif
 
-/* Starts the BLE peripheral. No-op when CONFIG_INDEX_BT_ENABLE is off — then
- * neither NimBLE's heap nor the duty-cycled sniffer is paid for. */
+/* Starts the BLE peripheral. No-op when CONFIG_INDEX_BT_ENABLE is off, so
+ * NimBLE's heap stays unclaimed and nothing duty-cycles the sniffer. */
 void bt_stream_init(void);
 
 /* Hands one captured frame to the BLE stream. Cheap no-op while bt_stream_init
  * has not succeeded. Called from the sniffer packet path. */
 void bt_stream_publish_packet(const uint8_t *payload, uint16_t len, uint32_t sec, uint32_t usec);
 
-/* Frames dropped since boot: notify failed on the connection / publish queue
- * was full. Both stay 0 while the BLE stream is off. */
+/* Frames dropped since boot: notify for a failed notification, enqueue for a
+ * full publish queue. Both stay 0 while the BLE stream is off. */
 uint32_t bt_stream_dropped_notify(void);
 uint32_t bt_stream_dropped_enqueue(void);
 

@@ -23,8 +23,8 @@
 
 static const char TAG[] = "ETHERNET";
 
-/* KSZ8851SNL port-1 control register and its "all port LEDs off" bit --
- * datasheet values; the component's own ksz8851.h is not on the include path. */
+/* KSZ8851SNL port-1 control register and its "all port LEDs off" bit, taken from
+ * the datasheet. The component's own ksz8851.h is not on the include path. */
 #define KSZ8851_REG_P1CR    0xF6
 #define KSZ8851_P1CR_LED_OFF 0x8000U
 
@@ -68,8 +68,8 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
             {
                 ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
             }
-            /* Static IP has no DHCP lease, hence no GOT_IP event on reconnect -- raise
-             * it here or MQTT never restarts. DHCP units must not get a duplicate. */
+            /* A static IP gets no DHCP lease and no GOT_IP event on reconnect.
+             * Post it here, or MQTT never restarts. A DHCP device already gets one. */
             if (static_ip)
             {
                 post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
@@ -132,9 +132,9 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
             // If this is the management netif, post an event to start MQTT etc.
             if (netif == mgmt_netif)
             {
-                /* DHCP just (re)set the DNS servers; if the user configured a
-                 * manual DNS, re-apply it so it takes precedence. Guarded so an
-                 * unset manual DNS never wipes the DHCP-provided one. */
+                /* DHCP has just (re)set the DNS servers. If the user configured
+                 * a manual DNS, re-apply it so it takes precedence. Guarded so
+                 * an unset manual DNS never wipes the DHCP-provided one. */
                 if (has_manual_dns())
                     eth_config_dns(netif);
 
@@ -213,17 +213,15 @@ static void set_hostname_from_config(esp_netif_t *netif)
         ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(res));
 }
 
-/* Takes the handle itself (esp_eth_handle_t is already an opaque pointer) --
- * an earlier signature declared `esp_eth_handle_t *` while callers passed the
- * handle; that only compiled because both are void*-compatible. */
+/* Takes the handle itself, since esp_eth_handle_t is already an opaque pointer. */
 static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
 {
     ESP_ERROR_CHECK(esp_netif_init());
 
     esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
     esp_netif_config.route_prio -= idx * 5;
-    /* .mtu config field was added in ESP-IDF v6.0; on v5.5 the default MTU
-     * (1500) is used. Jumbo frames are not needed for normal operation. */
+    /* The .mtu field is left unset, so the netif keeps the 1500-byte default.
+     * Jumbo frames are not needed here. */
 
     char ip_str[CONFIG_IPV4_BUFFER_SIZE] = {0};
     char nm_str[CONFIG_IPV4_BUFFER_SIZE] = {0};
@@ -270,8 +268,8 @@ static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 
-    /* Also applied on every link-up; this covers the case where no cable is
-     * plugged in yet, so the setting takes hold without waiting for one. */
+    /* Also applied on every link-up. This call makes the setting take effect
+     * even when no cable is plugged in yet. */
     ethernet_apply_led_setting();
 
     if (static_ip)
@@ -301,7 +299,7 @@ void initialize_ethernet(void)
         {
             /* start Ethernet driver state machine */
             ESP_ERROR_CHECK(esp_eth_start(eth_handles[i]));
-            /* Register Ethernet interface to could be used by sniffer */
+            /* Register the Ethernet interface so the sniffer can use it */
             ESP_ERROR_CHECK(sniffer_reg_eth_intf(eth_handles[i]));
         }
         else
@@ -316,8 +314,8 @@ void initialize_ethernet(void)
 esp_err_t ethernet_apply_led_setting(void)
 {
 #if !CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
-    /* The LED-off bit exists only on the KSZ8851SNL; on MDIO PHYs the
-     * address would alias to an unrelated register, so don't try. */
+    /* The LED-off bit exists only on the KSZ8851SNL. On an MDIO PHY the same
+     * address would alias to an unrelated register. */
     return ESP_ERR_NOT_SUPPORTED;
 #else
     if (!mgmt_eth)
@@ -410,6 +408,6 @@ void ethernet_get_mac(uint8_t mac[6])
 {
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_ETH));
 
-    // Espressif...
+    // Mark the address as locally administered (bit 1 of the first octet).
     mac[0] |= 2;
 }

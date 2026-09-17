@@ -24,15 +24,15 @@ typedef struct {
     /* Last time ANYTHING was heard, SPATEM or MAPEM: an RSU whose SPATEM we
      * cannot decode is still alive and must not be evicted first. */
     uint32_t last_seen;
-    /* Last time PHASES were decoded -- the age beside the phase dots must use
-     * this; last_seen there made stale phases read as fresh. 0 = never. */
+    /* Last time PHASES were decoded. The age beside the phase dots uses this,
+     * since a MAPEM alone also refreshes last_seen. 0 = never. */
     uint32_t phase_seen;
     uint32_t station_id;                 /* ItsPduHeader.stationId (map-marker key) */
     char     name[ITS_MAP_NAME_LEN];     /* from MAPEM, "" until one arrives */
     uint16_t lane_width_cm;              /* from MAPEM, 0 = not sent */
     uint16_t speed_max_kmh, speed_min_kmh;
     /* What each signal group controls, from the MAPEM lane geometry.
-     * Indexed independently of sg[]/phase[] above -- look up by group id. */
+     * Indexed independently of sg[]/phase[] above. Look up by group id. */
     uint8_t  map_n;
     uint8_t  map_sg[ITS_SPAT_MAX_SG];
     uint16_t map_man[ITS_SPAT_MAX_SG];
@@ -41,8 +41,8 @@ typedef struct {
     int32_t  lat_e7, lon_e7;             /* RSU position (0 if unknown) */
 } spatem_intersection_t;
 
-/* Measured phase durations per signal group -- the controller never states them.
- * Kept out of the cache entry: display data, four internal-RAM copies cost ~28 KB. */
+/* Measured phase durations per signal group. The controller never states them.
+ * Kept out of the cache entry: display data, four internal-RAM copies cost ~58 KB. */
 typedef struct {
     /* 0 = green, 1 = red-amber (pre-movement), 2 = amber, 3 = red. Red-amber
      * kept apart: mixed in, the amber column is a blend, not a duration. */
@@ -73,7 +73,7 @@ typedef struct {
 #define SPAT_GAP_SEC 10
 
 /* Copies the phase tallies for one cached intersection (by region+id) under
- * the module lock. False = that intersection is not cached. */
+ * the module lock. False = no phases have been decoded for it. */
 bool spatem_phases(uint16_t region, uint16_t id, spatem_phases_t *out);
 
 void spatem_init(void);
@@ -97,14 +97,14 @@ bool spatem_movement(const spatem_intersection_t *e, uint8_t sg,
 int spatem_snapshot(spatem_intersection_t *out, int max);
 
 /* Decodes a MAPEM's lane geometry only on first sight of an intersection or of
- * a new revision -- the layout repeats in every message. ~5.5 KB each, in PSRAM. */
+ * a new revision. The layout repeats in every message. ~5.5 KB each, in PSRAM. */
 void spatem_note_geometry(const uint8_t *frame, size_t len, const its_map_t *m);
 
-/* Cached geometry or NULL. Re-decoded IN PLACE on a new revision -- hold
- * spatem_geometry_lock() while using the pointer, unlock on every path. */
 /* Bounded variant for the packet path: it runs with msg_ring_mutex held, so
  * waiting forever here would stall reception behind any reader. */
 bool spatem_geometry_lock_timeout(uint32_t ms);
 void spatem_geometry_lock(void);
 void spatem_geometry_unlock(void);
+/* Cached geometry or NULL. It is re-decoded IN PLACE on a new revision, so hold
+ * spatem_geometry_lock() while using the pointer. Unlock on every path. */
 const its_map_geom_t *spatem_geometry(uint16_t region, uint16_t id);

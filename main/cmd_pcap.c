@@ -156,7 +156,7 @@ esp_err_t sniff_packet_start(pcap_link_type_t link_type)
 #if CONFIG_SNIFFER_PCAP_DESTINATION_JTAG
     uint32_t retry = 0;
 
-    /* wait until apptrace communication established or timeout */
+    /* Wait until the apptrace host is connected or the retries run out */
     while (!esp_apptrace_host_is_connected() && (retry < SNIFFER_APPTRACE_RETRY)) {
         retry++;
         ESP_LOGW(CMD_PCAP_TAG, "waiting for apptrace established");
@@ -173,11 +173,10 @@ esp_err_t sniff_packet_start(pcap_link_type_t link_type)
         ESP_GOTO_ON_FALSE(!pcap_cmd_rt.is_writing, ESP_ERR_INVALID_STATE, err, CMD_PCAP_TAG, "still sniffing");
     } else {
         pcap_cmd_rt.link_type = link_type;
-        /* Create file to write, binary format */
+        /* Write the pcap header on the first start after the stream is opened */
 #if CONFIG_SNIFFER_PCAP_DESTINATION_JTAG
-        /* Ethernet Link layer traffic amount may be much less than on Wi-Fi (no link management msgs.) and trace data is sent to listener
-        only after filling trace buffer. Hence the trace buffer might not be filled prior listener's timeout. This condition is resolved by
-        flushing the trace buffer periodically. */
+        /* Ethernet has less traffic than Wi-Fi because it has no management frames. Apptrace sends
+        data only when its buffer is full, so flush it periodically or the host may time out. */
         if (link_type == PCAP_LINK_TYPE_ETHERNET) {
             int timer_id = 0xFEED;
             pcap_cmd_rt.trace_flush_timer = xTimerCreate("flush_apptrace_timer",
@@ -246,7 +245,7 @@ static int do_pcap_cmd(int argc, char **argv)
         ESP_LOGW(CMD_PCAP_TAG, "pcap file name too long, try to enlarge memory in menuconfig");
     }
 
-    /* Check if needs to be parsed and shown: "--summary" option */
+    /* Check whether to parse and show the summary: "--summary" option */
     if (pcap_args.summary->count) {
         ESP_LOGI(CMD_PCAP_TAG, "%s is to be parsed", pcap_cmd_rt.filename);
         if (pcap_cmd_rt.is_opened) {
@@ -270,7 +269,7 @@ static int do_pcap_cmd(int argc, char **argv)
 #endif // CONFIG_SNIFFER_PCAP_DESTINATION_SD
 
 #if CONFIG_SNIFFER_PCAP_DESTINATION_MEMORY
-    /* Check if needs to be parsed and shown: "--summary" option */
+    /* Check whether to parse and show the summary: "--summary" option */
     if (pcap_args.summary->count) {
         ESP_LOGI(CMD_PCAP_TAG, "Memory is to be parsed");
         ESP_GOTO_ON_ERROR(pcap_print_summary(pcap_cmd_rt.pcap_handle, stdout), err, CMD_PCAP_TAG, "pcap print summary failed");
@@ -283,7 +282,7 @@ static int do_pcap_cmd(int argc, char **argv)
 err:
     return ret;
 }
-#endif // CONFIG_SNIFFER_PCAP_DESTINATION_JTAG
+#endif // !CONFIG_SNIFFER_PCAP_DESTINATION_JTAG
 
 void register_pcap_cmd(void)
 {
@@ -302,5 +301,5 @@ void register_pcap_cmd(void)
         .argtable = &pcap_args
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&pcap_cmd));
-#endif // #if CONFIG_SNIFFER_PCAP_DESTINATION_JTAG
+#endif // !CONFIG_SNIFFER_PCAP_DESTINATION_JTAG
 }

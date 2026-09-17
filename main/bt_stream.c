@@ -113,8 +113,8 @@ typedef struct {
 } qframe_t;
 
 static uint8_t          s_addr_type;
-/* volatile: written from the NimBLE host task, read by the coex and writer
- * tasks without a lock. */
+/* volatile: written from the NimBLE host task, read by the coex, writer and
+ * publisher tasks without a lock. */
 static volatile uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 /* Bumped on every accepted connect so coex_window_task can tell a fresh link
  * from the one whose settle window it has already spent. */
@@ -145,7 +145,7 @@ static volatile uint16_t s_cycle_ms[4] = { 3000, 1000, 500, 400 };
 
 
 /* Driven from chunked_delay() so it can never fire mid radio transition.
- * Repeating is safe: a request, not an accumulating operation, and bounded. */
+ * Repeating only re-sends the request, and UPD_MAX_TRIES bounds the tries. */
 static void maybe_request_update(void)
 {
     TickType_t due = s_upd_due;
@@ -197,7 +197,7 @@ static void note_drop(drop_stat_t *st, const char *what, unsigned len)
 static drop_stat_t s_drop_notify;   /* writer task only */
 static drop_stat_t s_drop_enqueue;  /* publisher (sniffer packet path) only */
 
-/* Read-only for the loss table; each counter has a single writer task. */
+/* The loss table reads these. Each counter has a single writer task. */
 uint32_t bt_stream_dropped_notify(void)  { return s_drop_notify.count; }
 uint32_t bt_stream_dropped_enqueue(void) { return s_drop_enqueue.count; }
 
@@ -254,7 +254,7 @@ static int cfg_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         }
         for (int i = 0; i < 4; i++) s_cycle_ms[i] = next[i];
         /* Deliberately NOT persisted: a hostile duty cycle must not survive a
-         * power cycle — that is the operator's only recovery, the UI has none. */
+         * power cycle. The UI cannot reset it, so that is the only recovery. */
         ESP_LOGI(TAG, "cfg write: %u/%u %u/%u",
                  (unsigned)CYC_DISC_SNIFF, (unsigned)CYC_DISC_BLE,
                  (unsigned)CYC_CONN_SNIFF, (unsigned)CYC_CONN_BLE);
@@ -492,7 +492,7 @@ static void host_task(void *param)
 
 /* Single RF transceiver: Wi-Fi promisc and BLE adv cannot coexist, so the radio
  * is time-shared. sniffer_pause() stops only the RX path, not the task. */
-/* Sleeps in chunks and returns early on a link state change: sitting out a
+/* chunked_delay() sleeps in chunks and returns early on a link state change: a
  * whole window would starve a link that connected or dropped mid-sniff. */
 #define COEX_CHUNK_MS 200
 /* Connected-mode interleaving (see coex_window_task): max radio-hold per
@@ -534,8 +534,8 @@ static void coex_window_task(void *arg)
             grace_gen = s_conn_gen;
             grace_expired_logged = false;   /* NOT grace_ms: see above */
         }
-        /* Hold the radio on BLE until the link has settled. 0 must count as
-         * fragile: it means "not read yet", i.e. when we know least. */
+        /* Hold the radio on BLE until the link has settled. Treat 0 as fragile:
+         * the supervision timeout has not been read yet. */
         bool link_fragile = (s_supv_10ms < SUPV_MIN_10MS);
         if (connected && (!s_notify_enabled || link_fragile) && grace_ms > 0) {
             TickType_t t0 = xTaskGetTickCount();
@@ -546,7 +546,7 @@ static void coex_window_task(void *arg)
         if (connected && (!s_notify_enabled || link_fragile) && !grace_expired_logged) {
             grace_expired_logged = true;
             /* Prints the budget LEFT, not the constant: after a reconnect the
-             * two differ, and the constant would misreport the field case. */
+             * two differ, and the constant would hide how little is left. */
             ESP_LOGW(TAG, "grace exhausted (%d ms left): subscribed=%d supv=%u (10 ms) "
                      "— resuming capture%s", (int)grace_ms,
                      (int)s_notify_enabled, (unsigned)s_supv_10ms,
@@ -564,7 +564,7 @@ static void coex_window_task(void *arg)
         sniffer_resume();
         if (connected) {
             /* Never hold the radio off BLE longer than a slice or the link dies
-             * of supervision timeout; split evenly, no starving last slice. */
+             * of supervision timeout. Split evenly so no last slice starves. */
             uint32_t nslices = (sniff_ms + CONN_SNIFF_SLICE_MS - 1) / CONN_SNIFF_SLICE_MS;
             if (nslices < 1) nslices = 1;
             uint32_t slice = sniff_ms / nslices;
@@ -667,7 +667,7 @@ static void writer_send_frame(qframe_t *qf, bool from_drain)
         }
         if (pace) vTaskDelay(pdMS_TO_TICKS(pace));
     } else {
-        /* Aborted mid-frame: the phone's FrameReader resyncs on the next ITS5
+        /* Aborted mid-frame: the reader on the phone resyncs on the next ITS5
          * magic, so only this frame is lost. */
         note_drop(&s_drop_notify, from_drain ? "BLE notify (drain)" : "BLE notify (live)",
                   wire_len);
@@ -679,8 +679,8 @@ static void writer_task(void *arg)
     (void)arg;
     qframe_t *qf = NULL;
     for (;;) {
-        /* Priority: cache-drain → live DENM → other live.
-         * DENM never blocks the publisher (no HoL wait on enqueue). */
+        /* Priority: cache-drain → live DENM → other live. DENMs have their own
+         * queue, so enqueuing one never makes the publisher wait. */
         if (xQueueReceive(s_drain_queue, &qf, 0) == pdTRUE) {
             writer_send_frame(qf, true);
             continue;
@@ -846,7 +846,7 @@ void bt_stream_publish_packet(const uint8_t *payload, uint16_t len, uint32_t sec
     if (qf == NULL) return;
 
     /* Non-blocking: DENMs go on their own queue so a full CAM live queue
-     * never drops hazards, and we never stall the sniffer/replay task. */
+     * never drops hazards, and we never stall the sniffer task. */
     if (denm) {
         if (xQueueSend(s_live_denm_queue, &qf, 0) != pdTRUE) {
             note_drop(&s_drop_enqueue, "live DENM queue full", len);

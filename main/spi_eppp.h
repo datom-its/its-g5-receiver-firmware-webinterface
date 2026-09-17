@@ -7,8 +7,8 @@
 
 #ifdef CONFIG_USE_SPI_EPPP
 
-/* Configures the EPPP SPI master and blocks until the PPP link is up; posts
- * APP_ETHERNET_MGMT_INTERFACE_GOT_IP so MQTT etc. start normally. */
+/* Configures the EPPP SPI master and blocks until the PPP link is up. Its IP
+ * handler posts APP_ETHERNET_MGMT_INTERFACE_GOT_IP, so MQTT etc. start normally. */
 void initialize_spi_eppp(void);
 
 #endif /* CONFIG_USE_SPI_EPPP */

@@ -3,8 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Vehicle track log, appended live -- deriving it from the PCAP archive would
- * walk a gigabyte over the fragile SD bus. Off by default; RSUs skipped. */
+/* Vehicle track log, appended live. Deriving it from the PCAP archive would
+ * walk a gigabyte over the fragile SD bus. Off by default. RSUs are skipped. */
 
 typedef struct {
     uint32_t seconds;
@@ -25,11 +25,11 @@ void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
 void tracklog_tick(void);
 
 /* Losses since boot: queue full, could not queue at all, and batches that did
- * not reach the card (retried, so a rate rather than a total loss). */
+ * not reach the card. A failed batch stays queued, so its points are not lost. */
 void tracklog_losses(uint32_t *evicted, uint32_t *dropped, uint32_t *write_fail);
 
-/* Reads points from the last `days` into `out`, oldest first -- the order a
- * drawn path needs. Returns the count written. */
+/* Reads points from the last `days` into `out`, oldest first. That is the
+ * order a drawn path needs. Returns the count written. */
 /* `wrapped` (optional): the ring really did overwrite points. A return of
  * exactly `max` does NOT imply that by itself. */
 int tracklog_read(uint32_t days, track_pt_t *out, int max, bool *wrapped);

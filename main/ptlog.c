@@ -31,7 +31,7 @@ static const char TAG[] = "PTLOG";
  * well above the vehicles realistically in range at once. */
 #define PT_OPEN         32      /* vehicles trackable at the same time */
 #define PT_GAP_SEC      90      /* silence after which a passage is over */
-#define PT_PASS_MAX_SEC 900     /* a parked vehicle must not hold a slot forever */
+#define PT_PASS_MAX_SEC 900     /* longer than this and the passage is split in two */
 
 /* One vehicle in range. Identity is station id + line + course, so two trams
  * of one line never merge (a pseudonym change splits the sighting instead). */
@@ -44,7 +44,7 @@ typedef struct {
     bool     used;
 } pt_open_t;
 
-/* Closed passages waiting for the tick to append them; a summary alone never
+/* Closed passages waiting for the tick to append them. A summary alone never
  * answers "WHEN was it late". */
 #define PT_PQ 32
 static pt_pass_t s_pq[PT_PQ];
@@ -76,7 +76,7 @@ static void fold_locked(const pt_open_t *p)
         s_lines[idx] = (pt_line_t){ .line = p->line, .first_seen = p->first_sec };
     }
 
-    /* Logged even when the per-line table is full -- the passage happened. */
+    /* The passage happened, so it is logged even when the per-line table is full. */
     if (s_pq_count < PT_PQ)
     {
         int q = (s_pq_head + s_pq_count) % PT_PQ;
@@ -89,8 +89,8 @@ static void fold_locked(const pt_open_t *p)
     }
     else
     {
-        /* Queue full: only the individual row is lost, the aggregate line
-         * below still gets the passage. Counted so it is never silent. */
+        /* Queue full: only the individual row is lost. The aggregate line below
+         * still gets the passage. The counter keeps the loss visible. */
         s_pass_dropped++;
         ESP_LOGW(TAG, "passage queue full, %lu individual rows lost so far",
                  (unsigned long)s_pass_dropped);
@@ -135,8 +135,8 @@ void ptlog_note(uint32_t seconds, uint32_t station_id, const its_decoded_t *d)
         if (s_open[i].station_id == station_id && s_open[i].line == d->pt_line &&
             s_open[i].course == d->pt_course)
         {
-            /* Still the same passage -- unless it has been going on far too
-             * long, which means a vehicle parked in range with a live unit. */
+            /* Still the same passage. If it has been running far too long, a
+             * vehicle is parked in range with a live unit, so split it. */
             if (seconds - s_open[i].first_sec > PT_PASS_MAX_SEC)
             {
                 fold_locked(&s_open[i]);
@@ -322,12 +322,12 @@ static bool pt_load(void)
     return !lost;
 }
 
-/* Appends the queued passages and trims now and then. Append, not rewrite:
- * a passage row never changes once written, unlike the per-line summary. */
 /* File scope so ptlog_flush_now() honours it too: pt_save() is a FULL
  * rewrite, so saving before the load succeeded discards the stored lines. */
 static bool s_loaded;
 
+/* Appends the queued passages and trims now and then. Append, not rewrite:
+ * a passage row never changes once written, unlike the per-line summary. */
 static void pass_flush(void)
 {
     pt_pass_t batch[PT_PQ];
@@ -427,8 +427,8 @@ static void pass_flush(void)
                         while (fgets(line, sizeof(line), r))
                             if (i++ >= skip && fputs(line, w) == EOF) { tok = false; break; }
                         if (fclose(w) != 0) tok = false;
-                        /* Rename first where possible; the reader falls back to
-                         * the temp file if a power cut lands between the two. */
+                        /* remove() runs first, so only the temp file exists for
+                         * a moment. ptlog_read_passages() falls back to it. */
                         if (tok) { fclose(r); r = NULL; remove(PT_PASS); rename(PT_PASS_TMP, PT_PASS); }
                         else     remove(PT_PASS_TMP);
                     }
@@ -570,8 +570,8 @@ void ptlog_tick(void)
     if (!s_lock)
         return;
 
-    /* A passage that went quiet is over -- fold it so it shows up even when
-     * no other vehicle follows. */
+    /* A passage that went quiet is over. Fold it so it shows up even when no
+     * other vehicle follows. */
     if (xSemaphoreTake(s_lock, 0) == pdTRUE)
     {
         uint32_t now = (uint32_t)time(NULL);
@@ -608,17 +608,17 @@ void ptlog_tick(void)
 #endif
 }
 
-/* Folds every open passage and writes out -- call before a planned restart.
+/* Folds every open passage and writes out. Call before a planned restart.
  * Splitting a running passage beats losing it and the unsaved aggregates. */
 void ptlog_flush_now(void)
 {
 #if CONFIG_ENABLE_SD
-    /* Never write back a table we have not read yet -- same rule the tick
-     * follows, and a restart is exactly when it would bite. */
+    /* Never write back a table we have not read yet. The tick follows the same
+     * rule, and a restart is exactly when it matters most. */
     if (!s_lock || !s_loaded)
         return;
-    /* A deferred wipe must win here: s_wipe_pending dies with the reboot that
-     * follows, and writing now would put the cleared rows back on the card. */
+    /* A deferred wipe must win here: s_wipe_pending is RAM only and does not
+     * survive the reboot that follows, so the deleted rows would stay. */
     if (s_wipe_pending)
     {
         pt_wipe();

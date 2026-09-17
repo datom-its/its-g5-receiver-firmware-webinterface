@@ -25,13 +25,13 @@ static const char TAG[] = "TRACKS";
 #define TR_DIR   CONFIG_SNIFFER_MOUNT_POINT "/logs"
 #define TR_CSV   TR_DIR "/tracks.csv"
 
-/* Points awaiting a write, drained by the sysmon tick so SD I/O never runs on
- * the sniffer path. On overflow the oldest queued point is dropped. */
+/* Points awaiting a write, drained by the sysmon tick so SD I/O never runs on the sniffer
+ * path. On overflow the oldest point is dropped, or the new one if the writer holds it. */
 #define TR_QUEUE 96
 static track_pt_t s_queue[TR_QUEUE];
 
-/* ABSOLUTE, monotone counters -- never reduce a COUNT modulo TR_QUEUE, only a
- * sequence to its slot; occupancy is (uint32_t)(s_seq_in - s_seq_out). */
+/* Absolute, monotone counters. Only a sequence is taken modulo TR_QUEUE to find
+ * its slot, never a count. Occupancy is (uint32_t)(s_seq_in - s_seq_out). */
 static uint32_t s_seq_in;      /* points ever accepted */
 static uint32_t s_seq_out;     /* points ever removed (written or evicted) */
 /* Sequences [s_busy_lo, s_busy_hi) are being written right now: the producer
@@ -42,7 +42,7 @@ static uint32_t s_busy_lo, s_busy_hi;
 static portMUX_TYPE s_cur = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_lock;   /* guards s_last[] and the slot payloads */
 
-/* Loss counters. Unexported ones are worth nothing -- see /system. */
+/* Loss counters for tracklog_losses(). /system shows only the first two. */
 static uint32_t s_evicted;      /* oldest dropped because the queue was full */
 static uint32_t s_note_dropped; /* could not queue at all (busy or locked) */
 static uint32_t s_write_fail;   /* a batch that did not reach the card */
@@ -56,13 +56,13 @@ static struct {
 } s_last[TR_STATIONS];
 static int s_nlast;
 
-/* Roughly 8 m at this latitude, and at least 2 s apart. Below that the points
- * would be visually indistinguishable on the map but would multiply the file. */
+/* About 9 m north-south (less east-west), and at least 2 s apart. Below that the
+ * points would look the same on the map but would multiply the file. */
 #define TR_MIN_MOVE_E7 800
 #define TR_MIN_GAP_SEC 2
 
-/* Cached: config_get_u8 does a real flash read under the ONE global NVS lock,
- * so on the packet path a concurrent NVS write stalls reception. Like sdpcap. */
+/* Cached, as in sdpcap. config_get_u8 reads flash under the one global NVS lock,
+ * so a concurrent NVS write would stall reception on the packet path. */
 static volatile bool cfg_tracks_on;
 
 static void reload_config(void)
@@ -113,8 +113,8 @@ static uint32_t tracks_days(void)
 void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
                    int32_t lat_e7, int32_t lon_e7)
 {
-    /* Station type 15 is roadside infrastructure -- it never moves, and its
-     * message rate would swamp everything the vehicles say. */
+    /* Station type 15 is roadside infrastructure. It never moves, so it has no
+     * track to log. */
     if (station_type == 15 || station_id == 0 || (!lat_e7 && !lon_e7))
         return;
     if (!s_lock || !tracks_enabled())
@@ -145,7 +145,8 @@ void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
     }
     else
     {
-        /* Table full: evict the least recently updated station. */
+        /* New station. Take a free entry, or evict the least recently updated
+         * one when the table is full. */
         if (s_nlast < TR_STATIONS)
             slot = s_nlast++;
         else
@@ -165,8 +166,8 @@ void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
     portENTER_CRITICAL(&s_cur);
     if (s_seq_in - s_seq_out >= TR_QUEUE)
     {
-        /* Full: drop the oldest, except one the writer holds -- recycling that
-         * slot loses it outright if the write fails, so drop the new one. */
+        /* Queue full: drop the oldest point, unless the writer holds it. Dropping
+         * a held point loses it if the write fails, so drop the new one instead. */
         if (s_seq_out != s_busy_lo || s_busy_lo == s_busy_hi)
         {
             s_seq_out++;
@@ -197,8 +198,8 @@ void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
     xSemaphoreGive(s_lock);
 }
 
-/* Prunes by streaming to a temp file and swapping it in: a fixed-size read-all
- * buffer fails to alloc or silently drops the NEWEST rows. */
+/* Prunes by streaming to a temp file and swapping it in. Reading the whole file
+ * into a fixed buffer would fail to allocate or silently drop the NEWEST rows. */
 #define TR_TMP   TR_DIR "/tracks.tmp"
 
 static void prune(uint32_t keep_from_sec)
@@ -222,12 +223,14 @@ static void prune(uint32_t keep_from_sec)
             continue;
         if (fputs(line, w) == EOF) { ok = false; break; }
     }
+    if (ferror(f))
+        ok = false;   /* a read error ends fgets like EOF would */
     fclose(f);
     if (fclose(w) != 0)
         ok = false;
 
-    /* Only replace the live file once the copy is known-complete; a failed
-     * write must not cost the existing data. */
+    /* Replace the live file only if it was read to the end and every row was
+     * written. A failed read or write must not cost the existing data. */
     if (ok)
     {
         remove(TR_CSV);
@@ -242,13 +245,13 @@ void tracklog_tick(void)
     if (!s_lock || !sdcard_is_mounted())
         return;
 
-    /* Bounded wait, NOT unlimited: this runs on the sysmon (watchdog) task; a
-     * skipped cycle is free, the points stay queued. */
+    /* Bounded wait. sysmon is the watchdog task, and the flush before a restart
+     * must not hang either. On sysmon a skipped cycle only delays the points. */
     if (!sdcard_io_begin_timeout(2000))
         return;
 
     /* Static, not a stack local: sysmon's stack cannot hold the batch plus
-     * stdio. Safe only because sysmon alone calls this, sequentially. */
+     * stdio. Safe because it is only used while the SD lock is held. */
     static track_pt_t batch[TR_QUEUE];
     int count = 0;
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE)
@@ -256,8 +259,8 @@ void tracklog_tick(void)
         sdcard_io_end();
         return;
     }
-    /* Copy WITHOUT consuming, and RESERVE the copied range: otherwise a full
-     * ring during a failing write loses the points from card and queue both. */
+    /* Copy WITHOUT consuming, and RESERVE the copied range. If a write fails while
+     * the queue is full, the points would otherwise miss the card and lose their slots. */
     uint32_t first;
     portENTER_CRITICAL(&s_cur);
     first = s_seq_out;
@@ -292,8 +295,8 @@ void tracklog_tick(void)
                 ok = false;
         }
 
-        /* Monotone max(), never a plain assignment: evictions during the write
-         * only push s_seq_out forward. Release the reservation on both paths. */
+        /* Only moves s_seq_out forward. The reservation already blocks evictions
+         * during the write, so this is a guard. Release the reservation on both paths. */
         portENTER_CRITICAL(&s_cur);
         if (ok && (int32_t)(first + (uint32_t)count - s_seq_out) > 0)
             s_seq_out = first + (uint32_t)count;
@@ -314,15 +317,15 @@ void tracklog_tick(void)
     }
 
     /* Counted in sysmon ticks of 5 s. Pre-loaded so the FIRST sweep runs a
-     * minute after boot -- a device that reboots often never prunes otherwise. */
+     * minute after boot. Otherwise a device that reboots often never prunes. */
 #define TR_PRUNE_TICKS   720   /* 1 h */
 #define TR_PRUNE_FIRST    12   /* 1 min after boot */
     static uint32_t prune_ticks = TR_PRUNE_TICKS - TR_PRUNE_FIRST;
     if (++prune_ticks >= TR_PRUNE_TICKS)
     {
         time_t now = time(NULL);
-        /* prune() unlinks tracks.csv; a /sdcard download holds it open under
-         * the reader guard alone, so pruning under it truncates the transfer. */
+        /* prune() unlinks tracks.csv. A /sdcard download holds it open under
+         * the reader guard alone, so pruning during it truncates the transfer. */
         if (now > 1600000000 && sdcard_read_active() == 0)
         {
             prune_ticks = 0;
@@ -332,8 +335,8 @@ void tracklog_tick(void)
             prune((uint32_t)(now - (time_t)tracks_days() * 86400));
             sdcard_io_long_end();
         }
-        /* Both skips leave the counter armed on purpose (reset only inside the
-         * if): retry next tick instead of waiting another hour. */
+        /* A skip (clock not set, or a download running) leaves the counter armed
+         * on purpose. The sweep retries next tick instead of an hour later. */
     }
     sdcard_io_end();
 }
@@ -366,8 +369,8 @@ int tracklog_read(uint32_t days, track_pt_t *out, int max, bool *wrapped)
     uint32_t from = (now > 1600000000 && days)
                     ? (uint32_t)(now - (time_t)days * 86400) : 0;
 
-    /* Keep the NEWEST points -- stopping at `max` returns the oldest. Ring plus
-     * one rotate: a per-row shift holds the SD lock for minutes on httpd. */
+    /* Keep the NEWEST points. Stopping at `max` would return the oldest. The ring
+     * avoids a per-row shift, which would hold the SD lock on httpd for minutes. */
     int n = 0, head = 0;
     char line[64];
     while (fgets(line, sizeof(line), f))
@@ -394,7 +397,7 @@ int tracklog_read(uint32_t days, track_pt_t *out, int max, bool *wrapped)
     fclose(f);
     sdcard_io_end();
 
-    /* Restore chronological order in place -- no second buffer fits here. */
+    /* Restore chronological order in place. A second buffer would not fit here. */
     if (n == max && head > 0)
     {
         track_pt_reverse(out, 0, head - 1);

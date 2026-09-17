@@ -63,7 +63,7 @@ static SemaphoreHandle_t sem_task_over;
 static esp_eth_handle_t eth_handles[SNIFFER_MAX_ETH_INTFS];
 
 /* BLE co-existence: true while only the RX path is off. The sniffer task keeps
- * looping either way -- its heartbeat is the watchdog input. */
+ * looping either way, so its heartbeat keeps feeding the watchdog. */
 static bool s_paused;
 /* Own spinlock, so the web getter never waits on ctl_lock (held across SD work). */
 static portMUX_TYPE s_pause_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -80,8 +80,8 @@ static void queue_packet(void *recv_packet, sniffer_packet_info_t *packet_info)
         memcpy(packet_to_queue, recv_packet, packet_info->length);
         packet_info->payload = packet_to_queue;
         if (work_queue) {
-            /* Runs in the WiFi driver's task: never block on a full queue -- drop and
-             * count instead (blocking stalls RX, per-frame logs flood the SD). */
+            /* Runs in the WiFi driver's task: never wait on a full queue, drop
+             * and count instead. Blocking stalls RX, and a log per frame floods the SD. */
 
             if (xQueueSend(work_queue, packet_info, 0) != pdTRUE) {
                 free(packet_info->payload);
@@ -115,9 +115,9 @@ static void wifi_sniffer_cb(void *recv_buf, wifi_promiscuous_pkt_type_t type)
     packet_info.length = packet->rx_ctrl.sig_len - SNIFFER_PAYLOAD_FCS_LEN;
 #endif
 
-    /* For now, the sniffer only dumps the length of the MISC type frame */
+    /* Drop MISC frames, and any frame the hardware flagged in rx_state. */
     if (type != WIFI_PKT_MISC && !packet->rx_ctrl.rx_state) {
-        // Ignore non-broadcast frames
+        // Ignore non-broadcast frames when the broadcast-only setting is on
         if (only_capture_broadcast &&
                 (packet_info.length < (4 + 6) || memcmp(&packet->payload[4], "\xFF\xFF\xFF\xFF\xFF\xFF", 6)))
             return;
@@ -214,7 +214,7 @@ static void sniffer_task(void *)
         sdpcap_handle_packet(&packet_info);
 
         /* Copies what it needs and never blocks, so it cannot stall this
-         * loop -- must stay above the free() below. */
+         * loop. It must stay above the free() below. */
         bt_stream_publish_packet(packet_info.payload, (uint16_t)packet_info.length,
                                  packet_info.seconds, packet_info.microseconds);
 
@@ -384,7 +384,7 @@ void sniffer_pause(void)
     if (s_paused || !is_running || interf != SNIFFER_INTF_WLAN)
         goto out;
 
-    /* Only the receive path -- the task keeps running, see sniffer_task(). */
+    /* Only the receive path goes off. The task keeps running, see sniffer_task(). */
     esp_wifi_set_promiscuous(false);
     phy_11p_set(0, 0);
     s_paused = true;
@@ -416,8 +416,8 @@ void sniffer_resume(void)
     chan_err = esp_wifi_set_channel(140, WIFI_SECOND_CHAN_NONE);
     phy_change_channel(channel, 1, 0, 0);
 
-    /* Only this direction is checked: a failed resume leaves the device deaf,
-     * a failed pause only costs BLE quality. Logged once -- runs every cycle. */
+    /* Only resume is checked: a failed resume leaves the device deaf, a failed
+     * pause only costs BLE quality. Logged once, because resume runs every cycle. */
     if (promisc_err != ESP_OK || chan_err != ESP_OK) {
         static bool resume_err_logged;
         if (!resume_err_logged) {

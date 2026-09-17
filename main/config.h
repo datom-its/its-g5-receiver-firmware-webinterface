@@ -44,12 +44,12 @@ typedef enum {
     CONFIG_INDEX_EVENT_RETAIN_DAYS, /* u32 warning-event log retention, days (1..30) */
     CONFIG_INDEX_MAP_STALE_SEC,     /* u32 drop a map marker after this long without an update, seconds (10..3600) */
     CONFIG_INDEX_PEERS,             /* str other receivers to merge into the map, comma-separated */
-    CONFIG_INDEX_PCAP_FILTER,       /* u8  0 = alles, 1 = Ampelmeldungen ausgeduennt, 2 = nur Fahrzeuge/Warnungen */
+    CONFIG_INDEX_PCAP_FILTER,       /* u8  0 = keep all, 1 = SPATEM/MAPEM at most 1/s each, 2 = drop them */
     CONFIG_INDEX_TRACKS_ENABLE,     /* u8  record vehicle tracks for the map overlay (0 = off) */
     CONFIG_INDEX_TRACKS_DAYS,       /* u32 how long to keep them, days (1..7) */
     CONFIG_INDEX_ETH_LEDS,          /* u8  bool: Ethernet port's link/activity LEDs (1 = on, default) */
     /* Append only: config.c posts esp_event_post(CONFIG_EVENT_BASE, index, ...),
-     * so these values ARE the event IDs -- reordering rewires every handler. */
+     * so these values ARE the event IDs. Reordering rewires every handler. */
     CONFIG_INDEX_BT_ENABLE,         /* u8  bool: BLE frame streaming, read once at boot (0 = off, default) */
 } config_index_t;
 

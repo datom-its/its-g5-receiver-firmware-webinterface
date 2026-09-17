@@ -5,8 +5,8 @@
 
 #include "its_decode.h"
 
-/* Inventory of stationary senders (RSUs, traffic lights) seen since boot.
- * Vehicles are only counted, never listed -- they rotate their pseudonyms. */
+/* Inventory of stationary senders (RSUs, traffic lights), reloaded from the card
+ * at boot. Vehicles are only counted, never listed: they rotate their pseudonyms. */
 
 #define INV_MAX_STATIONS 128
 #define INV_NAME_LEN     40
@@ -33,7 +33,7 @@ void inventory_init(void);
  * every few minutes so the inventory survives a restart. */
 void inventory_tick(void);
 
-/* Persists the sender table now -- call before a planned restart. */
+/* Persists the sender table now. Call it before a planned restart. */
 void inventory_flush_now(void);
 
 /* Hot path: fold one decoded frame in. Cheap, RAM only, never blocks. */
@@ -44,7 +44,7 @@ void inventory_note(uint32_t seconds, int rssi, const its_decoded_t *d);
 int inventory_snapshot(inv_station_t *out);
 
 /* Name of the stationary sender with this MAC, "" when the address has none or
- * is not in the table at all -- vehicles never get a row here. */
+ * is not in the table at all. Vehicles never get a row here. */
 /* 1 = MAC is listed, 0 = not listed, -1 = list was busy. The name may be
  * empty for a listed sender, so only the return value means "found". */
 int inventory_lookup_mac(const uint8_t mac[6], char *out, size_t cap,

@@ -45,10 +45,10 @@ typedef struct {
 
 #define ITS_MAP_NAME_LEN 40  /* DescriptiveName is SIZE(1..63); 40 covers real names */
 
-/* MAPEM decode result (stage 1: intersection identity + human-readable name).
- * The name is what turns a bare "Kreuzung <region>/<id>" into something readable.
- * The lane geometry / signal-group-to-lane mapping that follows it in the
- * message is deliberately NOT decoded (far larger job, see project memory). */
+/* MAPEM decode result: intersection identity, name, speed limits and what each
+ * signal group controls. The name is what turns a bare "Kreuzung <region>/<id>"
+ * into something readable. The full lane geometry goes into its_map_geom_t,
+ * which only its_decode_map_geometry() fills. */
 /* AllowedManeuvers bits, MSB-first in the 12-bit BIT STRING. */
 #define ITS_MAN_STRAIGHT (1u << 11)
 #define ITS_MAN_LEFT     (1u << 10)

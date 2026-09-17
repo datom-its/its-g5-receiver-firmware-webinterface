@@ -60,23 +60,25 @@ void sniffer_autostart(void);
  * sniffer is not running on a WLAN channel. */
 uint32_t sniffer_get_channel(void);
 
-/* True while the sniffer task is capturing. */
+/* True while the sniffer is started. Stays true during a BLE pause, when the
+ * receive path is off. */
 bool sniffer_is_running(void);
 
 /* Monotonic counter bumped once per sniffer-task loop, independent of traffic.
  * A stalled value while running means the packet pipeline is wedged. */
 uint32_t sniffer_get_heartbeat(void);
 
-/* Frames dropped because the work queue was full, since boot. */
+/* Frames dropped since boot, either because the work queue was full or because
+ * the copy found no memory. */
 uint32_t sniffer_dropped(void);
 
-/* Time-slice the radio with the BLE stream. The sniffer task keeps running (its
- * heartbeat feeds the watchdog); no-ops unless WLAN capture, safe to repeat. */
+/* Time-slice the radio with the BLE stream. The sniffer task keeps running, so
+ * its heartbeat feeds the watchdog. Both do nothing unless WLAN capture is on. */
 void sniffer_pause(void);
 void sniffer_resume(void);
 
 /* Total ms paused for BLE since boot, pause in flight included. A duration, not
- * a frame count -- frames missed during a pause are uncountable by design. */
+ * a frame count. Frames missed during a pause are uncountable by design. */
 uint64_t sniffer_paused_ms(void);
 
 

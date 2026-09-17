@@ -86,10 +86,10 @@ static int gn_ext_header_len(uint8_t header_type)
     switch (header_type)
     {
     case 1: return 24;  /* Beacon: Source LongPV only, nothing follows */
-    case 2: return 44;  /* GeoUnicast */
+    case 2: return 48;  /* GeoUnicast: SN+Res(4) + Source LongPV(24) + Dest ShortPV(20) */
     case 3: return 44;  /* GeoAnycast: SN+Reserved(4) + Source LongPV(24) + Geo-Area(16) */
     case 4: return 44;  /* GeoBroadcast: SN+Reserved(4) + Source LongPV(24) + Geo-Area(16) */
-    case 5: return 28;  /* TSB, single- or multi-hop */
+    case 5: return 28;  /* TSB: 24 + 4, the order depends on the sub-type */
     default: return -1; /* Location Service (6) and anything else */
     }
 }
@@ -97,8 +97,7 @@ static int gn_ext_header_len(uint8_t header_type)
 typedef struct { uint8_t code; const char *name; } station_type_name_t;
 
 /* GeoNetworking GN_ADDR "ITS-S type" (5 bits, first byte of the Source
- * Position Vector). Matches Wireshark's geonw.src_pos.addr.type; unlisted
- * values fall back to no label. */
+ * Position Vector). Matches Wireshark's geonw.src_pos.addr.type. */
 static const station_type_name_t STATION_TYPES[] = {
     { 1,  "Ped" },       { 2,  "Cyclist" },  { 3,  "Moped" },
     { 4,  "Motorcycle" },{ 5,  "Car" },      { 6,  "Bus" },
@@ -126,6 +125,7 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
     if (len < off + 8) { snprintf(out, out_size, "?"); return; }
     uint8_t common_nh   = (frame[off]     >> 4) & 0x0F;
     uint8_t header_type = (frame[off + 1] >> 4) & 0x0F;
+    uint8_t header_sub  = frame[off + 1] & 0x0F;
     off += 8;
 
     if (header_type == 1)
@@ -144,10 +144,11 @@ static void parse_common_onward(const uint8_t *frame, size_t len, size_t off,
     if (ext_len < 0) { snprintf(out, out_size, "GeoNet-LS"); return; }
     if (len < off + (size_t)ext_len) { snprintf(out, out_size, "?"); return; }
 
-    /* GeoUnicast/TSB start with the Source Position Vector directly;
-     * GeoAnycast/GeoBroadcast lead with a 4-byte sequence-number+reserved
-     * field first (see gn_ext_header_len). */
-    size_t pv_off = (header_type == 3 || header_type == 4) ? off + 4 : off;
+    /* GeoUnicast, GeoAnycast, GeoBroadcast and multi-hop TSB lead with a 4-byte
+     * sequence number and reserved field. SHB (sub-type 0) and Beacon do not. */
+    bool sn_first = header_type == 2 || header_type == 3 || header_type == 4 ||
+                    (header_type == 5 && header_sub != 0);
+    size_t pv_off = sn_first ? off + 4 : off;
     *station_out = lookup_station_name((frame[pv_off] >> 2) & 0x1F);
     *pv_off_out = pv_off;
     off += (size_t)ext_len;
@@ -208,8 +209,8 @@ static uint32_t sb(spat_bitr_t *r, unsigned n)
     return v;
 }
 
-/* TimeChangeDetails: 5 option bits + mandatory minEndTime (TimeMark 16b,
- * confidence 4b); consumed fully to keep the cursor aligned. Returns minEndTime. */
+/* TimeChangeDetails: 5 option bits, then the mandatory minEndTime (TimeMark,
+ * 16 bits). Consumed fully to keep the cursor aligned. Returns minEndTime. */
 static uint32_t spat_read_time_change(spat_bitr_t *r)
 {
     uint32_t o = sb(r, 5);
@@ -328,9 +329,9 @@ static void parse_spatem(const uint8_t *frame, size_t len, size_t start,
                 {
                     int32_t d = (int32_t)min_end - (int32_t)now_tenths;
                     if (d < 0) d += 36000;
-                    /* Anything beyond ~10 min isn't a plausible signal phase;
-                     * treat as unknown rather than show a bogus countdown. */
-                    if (d <= 6000) secs = (int16_t)(d / 10);
+                    /* No tighter bound than the TimeMark range itself: a phase can
+                     * legitimately last for hours at a traffic-dependent intersection. */
+                    if (d <= 36000) secs = (int16_t)(d / 10);
                 }
             }
             if (has_speeds) spat_skip_speeds(&r);
@@ -358,9 +359,9 @@ static void parse_spatem(const uint8_t *frame, size_t len, size_t start,
     out->valid = true;
 }
 
-/* --- MAPEM (SAE J2735 MapData) stage-1 decode ----------------------------
- * Walks only as far as the first IntersectionGeometry's name + id, which sit
- * before the (much larger) lane geometry. */
+/* --- MAPEM (SAE J2735 MapData) decode ------------------------------------
+ * Reads the first IntersectionGeometry's name and id, then the lane geometry
+ * that follows them. An unhandled construct ends the walk early. */
 static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
                         its_map_t *out, its_map_geom_t *geom)
 {
@@ -418,11 +419,11 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     out->id = (uint16_t)iid;
     out->valid = true;
 
-    /* Lane geometry -- optional enrichment: any unseen construct bails out with
-     * n_sg 0, keeping name/id. */
+    /* Lane geometry is optional enrichment. An unseen construct ends the walk
+     * and leaves the geometry invalid, while name and id stay. */
     out->revision = (uint8_t)sb(&r, 7);
     /* refPoint Position3D: 3 preamble bits (ext + elevation + regional),
-     * then lat/long as UPER-biased integers (we don't need their values). */
+     * then lat/long as UPER-biased integers. */
     sb(&r, 1);
     bool has_elev = sb(&r, 1);
     bool ref_regional = sb(&r, 1);
@@ -431,8 +432,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     if (has_elev) sb(&r, 16);
     if (ref_regional) return;
 
-    /* Metres per 1e-7 degree, to turn the cm node offsets into absolute
-     * positions; longitude shrinks with latitude. */
+    /* 1e-7 degree units per metre, to turn the cm node offsets into absolute
+     * positions. A longitude degree shrinks as latitude grows. */
     double lat_scale = 1e7 / 111320.0;
     double lon_scale = 1e7 / (111320.0 * cos((double)ref_lat / 1e7 * M_PI / 180.0));
     if (geom)
@@ -556,7 +557,7 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
             sb(&r, 8);                    /* connecting lane id */
             uint32_t man = has_man ? sb(&r, 12) : 0;
             /* IntersectionReferenceID = presence bit + optional 16-bit region +
-             * 16-bit id, so 17 or 33 bits -- never a flat 32. */
+             * 16-bit id, so 17 or 33 bits, never a flat 32. */
             if ((copt >> 3) & 1) { if (sb(&r, 1)) sb(&r, 16); sb(&r, 16); }
             uint32_t sg = ((copt >> 2) & 1) ? sb(&r, 8) : 0xFFFF;
             if ((copt >> 1) & 1) sb(&r, 8);   /* userClass -- easy to miss */
@@ -593,8 +594,8 @@ static void parse_mapem(const uint8_t *frame, size_t len, size_t start,
     }
 }
 
-/* DENM cause/sub-cause (TS 103 831/CDD). DenmPayload has NO extension marker --
- * don't add one; the CHOICE index doubles as the classic cause code. */
+/* DENM cause/sub-cause (TS 103 831/CDD). DenmPayload has NO extension marker,
+ * so do not read one. The CHOICE index doubles as the classic cause code. */
 static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
                              its_decoded_t *d)
 {
@@ -614,8 +615,8 @@ static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
     sb(&r, 42); sb(&r, 42);             /* detectionTime, referenceTime */
     if ((mopt >> 4) & 1) sb(&r, 1);     /* termination */
 
-    /* eventPosition: where the hazard IS, not where the sender is. UPER-biased
-     * like CAM's referencePosition; the unavailable sentinels must be rejected. */
+    /* eventPosition is where the hazard IS, not where the sender is. It is UPER-biased
+     * like CAM's referencePosition, so the unavailable sentinels must be rejected. */
     uint32_t elat = sb(&r, 31), elon = sb(&r, 32);
     if (!r.err && elat != 1800000001u && elon != 3600000001u)
     {
@@ -646,8 +647,8 @@ static void parse_denm_cause(const uint8_t *frame, size_t len, size_t start,
     d->denm_subcause = (uint8_t)sub;
 }
 
-/* Walks the CAM structurally to specialVehicleContainer. Deviation from the
- * published CDD: on the wire PathHistory is SIZE(0..40) with a 6-bit length, not fixed SIZE(40). */
+/* Walks the CAM structurally to specialVehicleContainer. On the wire PathHistory
+ * is SIZE(0..40) with a 6-bit length, not the fixed SIZE(40) of the published CDD. */
 static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
                              its_decoded_t *d)
 {
@@ -658,8 +659,8 @@ static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
     if (start < 12)
         return false;
 
-    /* CamParameters preamble sits 12 bits before the anchor, NOT 4 -- stationType
-     * lies between; reading at -4 made the flags a function of the sender's type. */
+    /* The CamParameters preamble is 12 bits before the anchor, NOT 4. The nine
+     * bits in between are the basicContainer extension marker and stationType. */
     uint32_t pre;
     if (!read_bits_msb(frame, len, start - 12, 3, &pre))
         return false;
@@ -668,7 +669,7 @@ static bool parse_cam_detail(const uint8_t *frame, size_t len, size_t start,
 
     spat_bitr_t r = { frame, len * 8, start, false };
 
-    /* ReferencePosition -- kept, since PathHistory's deltas are relative to
+    /* ReferencePosition is kept because PathHistory's deltas are relative to
      * it and have to be summed back into absolute positions. */
     int32_t ref_lat = (int32_t)((int64_t)sb(&r, 31) - 900000000);
     int32_t ref_lon = (int32_t)((int64_t)sb(&r, 32) - 1800000000);
@@ -838,7 +839,7 @@ static bool unwrap_secured(const uint8_t *frame, size_t len, size_t off,
 
 /* Like its_decode_frame, but walks only far enough to reach a MAPEM body and
  * decode its lane geometry. Separate so the kilobyte-sized result stays off the
- * packet path's stack; call it rarely (once per intersection revision). */
+ * packet path's stack. Call it rarely, once per intersection revision. */
 bool its_decode_map_geometry(const uint8_t *frame, size_t len, its_map_geom_t *out)
 {
     if (!out) return false;
@@ -937,7 +938,7 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     const char *station = NULL;
     size_t pdu_off = SIZE_MAX;
     size_t pv_off = SIZE_MAX;
-    size_t pdu_len = len; /* bounds to use with pdu_off below; differs for the unwrapped-secured case */
+    size_t pdu_len = len; /* bound for the pdu_off reads. The secured path recomputes it. */
 
     if (basic_nh == 2)
     {
@@ -969,8 +970,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     }
     snprintf(out + lo, out_size - lo, "%s", label);
 
-    /* ItsPduHeader.stationId exists for EVERY facility message, not just CAM;
-     * both position paths below use it as the map marker's tracking key. */
+    /* ItsPduHeader.stationId exists for EVERY facility message, not just CAM.
+     * Both position paths below use it as the map marker's tracking key. */
     bool have_sid = pdu_off != SIZE_MAX && pdu_len >= pdu_off + 6;
     uint32_t sid = have_sid ? rd_u32be(frame + pdu_off + 2) : 0;
 
@@ -1002,8 +1003,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
         frame[pdu_off + 1] == 2)
         r->pt_container = parse_cam_detail(frame, pdu_len, (pdu_off + 9) * 8 + 4, r);
 
-    /* GN Source Position Vector: a position for EVERY message (puts RSUs on the
-     * map); plain big-endian ints. Fallback only -- CAM's own position overrides it. */
+    /* GN Source Position Vector: every message has a position here, which puts RSUs
+     * on the map. The ints are plain big-endian. A CAM's own position overrides it. */
     if (have_sid && pv_off != SIZE_MAX && pdu_len >= pv_off + 20)
     {
         int32_t gn_lat = (int32_t)rd_u32be(frame + pv_off + 12);
@@ -1016,8 +1017,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
             r->has_position = true;
         }
 
-        /* PAI(1)+Speed(15) right after the position, cm/s, TWO'S COMPLEMENT
-         * (a reversing vehicle is negative); skipped for RSUs. */
+        /* PAI(1)+Speed(15) right after the position, cm/s in TWO'S COMPLEMENT, so
+         * a reversing vehicle reads negative. The speed is not decoded for RSUs. */
         if (pdu_len >= pv_off + 22 && !(station && strcmp(station, "RSU") == 0))
         {
             uint16_t raw = rd_u16be(frame + pv_off + 20) & 0x7FFF;
@@ -1026,15 +1027,15 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
         }
     }
 
-    /* CAM position overrides the GN-layer fallback above when available --
-     * see its_decode.h for the field semantics. */
+    /* CAM position overrides the GN-layer fallback above when available.
+     * See its_decode.h for the field semantics. */
     if (!have_sid)
         return;
     if (frame[pdu_off + 1] != 2 /* CAM */)
         return;
 
-    /* referencePosition = byte pdu_off+9 PLUS 4 UPER bits (ext + 2 option bits +
-     * basicContainer ext). Empirically pinned -- re-validate against tshark before touching. */
+    /* referencePosition = byte pdu_off+8 PLUS 12 bits (ext + 2 option bits +
+     * basicContainer ext + stationType 8). Re-validate against tshark before touching. */
     size_t bitoff = (pdu_off + 9) * 8 + 4;
     uint32_t raw_lat, raw_lon;
     if (!read_bits_msb(frame, pdu_len, bitoff, 31, &raw_lat))
@@ -1045,8 +1046,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     /* Vehicle dimensions at fixed bit offsets from the validated anchor (174 bits
      * to driveDirection, then length 10 + conf 3 + width 6); sizes are lower-bound-1 encoded. */
     {
-        /* Only valid for basicVehicleContainerHighFrequency -- check the CHOICE at
-         * +123 first; RSU CAMs carry unrelated bits at +174. */
+        /* Only valid for basicVehicleContainerHighFrequency, so check the CHOICE
+         * at +123 first. RSU CAMs have unrelated bits at +174. */
         uint32_t hf_ext, hf_alt;
         if (!read_bits_msb(frame, pdu_len, bitoff + 123, 1, &hf_ext) || hf_ext)
             goto skip_dimensions;
@@ -1068,8 +1069,8 @@ void its_decode_frame(const uint8_t *frame, size_t len, its_decoded_t *r)
     }
 skip_dimensions:
 
-    /* ETSI "unavailable" sentinels compared in the ENCODED domain (raw values
-     * still carry the UPER bias) -- comparing decoded values missed real no-fix CAMs. */
+    /* The ETSI "unavailable" sentinels are compared in the ENCODED domain, where
+     * the raw values are still UPER-biased. Decoded values would never match them. */
     if (raw_lat == 1800000001u || raw_lon == 3600000001u)
         return;
 

@@ -42,7 +42,7 @@ void events_init(void)
 }
 
 /* Events still being repeated, held back so their count can keep rising.
- * SEVERAL slots: senders interleave, and one slot flushes on every swap. */
+ * SEVERAL slots: senders interleave, so a single slot would flush on every swap. */
 #define EV_OPEN 8
 static event_rec_t s_open[EV_OPEN];
 static bool s_open_valid[EV_OPEN];
@@ -106,23 +106,23 @@ void events_note(uint32_t seconds, uint8_t station_type, uint32_t sender_id, int
 {
     if (message_id != 1 || !s_lock)   /* 1 = DENM (warning) */
         return;
-    /* Reject pre-clock timestamps: a fictional `newest` makes the retention
-     * cutoff below underflow and empties the whole file. */
+    /* Reject pre-clock timestamps: before the clock is set the row would carry
+     * a 1970 date that no time window of the last hours can match. */
     if (seconds < 1600000000u)
         return;
     if (xSemaphoreTake(s_lock, 0) != pdTRUE)
         return;
 
-    /* An ActionID left at 0/0 would collapse every warning -- and different
-     * senders with it -- into one row; synthesise an identity instead. */
+    /* An ActionID of 0/0 would fold every warning from every sender into one
+     * row. Synthesise an identity from the sender and the cause instead. */
     if (action_station == 0 && action_seq == 0)
     {
         action_station = sender_id;
         action_seq = (uint16_t)((cause << 8) | subcause);
     }
 
-    /* Already tracking this event? Then this is just another broadcast of it
-     * -- count it, keep the newest position. */
+    /* Already tracking this event? Then this is another broadcast of it. Count
+     * it and keep the newest position. */
     int free_slot = -1, oldest = 0;
     for (int i = 0; i < EV_OPEN; i++)
     {
@@ -138,8 +138,8 @@ void events_note(uint32_t seconds, uint8_t station_type, uint32_t sender_id, int
             if (s_open[i].count < 0xFFFF) s_open[i].count++;
             if (src_mac) ev_mac_fold(&s_open[i], src_mac, seconds);
             if (has_pos) { s_open[i].lat_e7 = lat_e7; s_open[i].lon_e7 = lon_e7; }
-            /* Level only from the stored sender; id 0 means "unknown", so it must
-             * not match 0 -- and it may be that same sender, hence no marker. */
+            /* Keep the level only while it belongs to the stored sender. An id of
+             * 0 means unknown: it neither matches nor proves a second sender. */
             if (sender_id && (!s_open[i].sender_id || s_open[i].sender_id == sender_id))
             {
                 s_open[i].sender_id = sender_id;   /* adopt the first id we learn */
@@ -174,7 +174,8 @@ void events_note(uint32_t seconds, uint8_t station_type, uint32_t sender_id, int
         .sender_id = sender_id, .rssi_min = r0, .rssi_max = r0,
         .multi_sender = false,
     };
-    /* A designated initialiser cannot copy an array; the literal zeroed it. */
+    /* The literal above already zeroed mac_a. An array cannot be filled from a
+     * pointer inside an initialiser, so copy it here. */
     if (src_mac) { memcpy(s_open[slot].mac_a, src_mac, 6); s_open[slot].n_macs = 1; }
     s_open_valid[slot] = true;
 
@@ -223,8 +224,8 @@ void events_tick(void)
     if (!s_lock)
         return;
 
-    /* An event that has gone quiet is finished -- hand it to the queue so it
-     * shows up even when no other warning follows it. */
+    /* An event that has gone quiet is finished. Hand it to the queue so it
+     * appears without waiting for the next warning. */
     if (xSemaphoreTake(s_lock, 0) == pdTRUE)
     {
         uint32_t now = (uint32_t)time(NULL);
@@ -248,8 +249,8 @@ void events_tick(void)
 
     /* Copy WITHOUT consuming; clear the queue only once the rows are on the
      * card, or a failed fopen throws the warnings away for good. */
-    /* PSRAM: 1792 bytes of scarce internal RAM for a buffer only the sysmon
-     * tick touches, never the packet path. */
+    /* In PSRAM: 1792 bytes are too much scarce internal RAM for a buffer that
+     * only the sysmon tick touches, never the packet path. */
     static EXT_RAM_BSS_ATTR event_rec_t batch[EV_QUEUE];
     int count;
     if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE)
@@ -392,8 +393,8 @@ int events_read(uint32_t hours, event_rec_t *out, int max, bool *history_ok,
                            * as its own row and pass the tolerant got >= 3 check */
         while (fgets(line, sizeof(line), f))
         {
-            /* Defaults MUST be set per line (this block stays inside the loop):
-             * they are the compatibility with the 8-field rows written before. */
+            /* Set the defaults for every line, so this block stays inside the
+             * loop. They keep the shorter rows of older firmware readable. */
             unsigned long sec = 0, last = 0, sender = 0;
             unsigned st, cause, cnt = 1, multi = 0; long lat = 0, lon = 0;
             unsigned sub = 0; int rmin = 0, rmax = 0;

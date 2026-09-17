@@ -137,8 +137,8 @@ void app_main(void)
 
     config_init();
 
-    /* NVS is ready now; record this boot (and, if it was a crash, count it)
-     * before anything else can reboot us. */
+    /* Record this boot now that NVS is ready, before anything else can reboot
+     * us. A crash reset reason also raises the crash count. */
     sysstat_record_boot();
 
     ESP_LOGI(TAG, "Starting ITS-G5 receiver");
@@ -151,7 +151,7 @@ void app_main(void)
 
 #if CONFIG_ENABLE_SD
     /* Needs the SPI bus initialised just above. A missing or unformatted card
-     * only warns; it can be (re)mounted later from the console. */
+     * only warns. It can be (re)mounted later from the console. */
     if (sdcard_mount() != ESP_OK)
         ESP_LOGW(TAG, "SD card not mounted at boot");
 #endif
@@ -159,7 +159,7 @@ void app_main(void)
     // Make sure MQTT has registered its event handlers before Ethernet goes up
     mqtt_init();
     /* Same reason: a static-IP config posts GOT_IP synchronously from inside
-     * initialize_ethernet() below -- too early for sysmon_init(). */
+     * initialize_ethernet() below, before sysmon_init() could register. */
     sysmon_register_events();
 
     /*--- Initialize Network ---*/
@@ -208,11 +208,11 @@ void app_main(void)
     sniffer_autostart();
 
     /* Must stay after sniffer_autostart(): the coex task opens with sniffer_pause(),
-     * a no-op if the sniffer is not up, so the first BLE window stays on 802.11p. */
+     * which does nothing while the sniffer is down, leaving the radio on 802.11p. */
     bt_stream_init();
 
     /* Supervisory monitor task (watchdog recovery, SD remount, low-heap guard).
-     * Only the task starts here; its event handlers are registered above. */
+     * Only the task starts here. Its event handlers are registered above. */
     sysmon_init();
 
     // start console REPL

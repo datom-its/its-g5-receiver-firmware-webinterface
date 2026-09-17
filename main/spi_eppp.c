@@ -43,9 +43,8 @@ static void configure_dns(void)
             continue;
 
         ip_addr_t dns_addr = IPADDR4_INIT(0);
-        /* A malformed entry leaves dns_addr at 0.0.0.0, which installs a
-         * dead resolver AND counts as "configured", suppressing the 8.8.8.8
-         * fallback below -- i.e. one typo silently breaks all name lookups. */
+        /* Reject a malformed entry: 0.0.0.0 would install a dead resolver and
+         * still count as configured, suppressing the 8.8.8.8 fallback below. */
         if (!ipaddr_aton(dns_str, &dns_addr))
         {
             ESP_LOGW(TAG, "DNS%d: '%s' is not a valid address, ignoring", i, dns_str);

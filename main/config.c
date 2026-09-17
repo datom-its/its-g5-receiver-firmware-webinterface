@@ -91,8 +91,8 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_BROADCAST_ONLY]     = { "broadcastonly", NVS_TYPE_U8,  0,                           config_get_broadcast_only,     NULL },
     [CONFIG_INDEX_LED_BRIGHTNESS]     = { "ledbrightness", NVS_TYPE_U8,  0,                           config_get_led_brightness,     NULL },
     [CONFIG_INDEX_LED_OVERRIDE_COLOR] = { "ledoverride",   NVS_TYPE_U32, 0,                           config_get_led_override_color, NULL },
-    /* buffer_size doubles as the max accepted RAW password length; the stored
-     * value is always a fixed 64-char hash (see config_set_web_password). */
+    /* A raw password may be at most 64 characters, one less than buffer_size.
+     * What gets stored is always a 64-char hash (see config_set_web_password). */
     [CONFIG_INDEX_WEB_PASSWORD]       = { "webpasswd",     NVS_TYPE_STR, CONFIG_WEB_PASSWORD_BUFFER_SIZE, NULL,      config_set_web_password },
     [CONFIG_INDEX_LOG_SYS]            = { "logsys",        NVS_TYPE_U8,  0,                           config_get_log_sys,            NULL },
     [CONFIG_INDEX_LOG_MAX_MB]         = { "logmaxmb",      NVS_TYPE_U32, 0,                           config_get_log_max_mb,         NULL },
@@ -344,8 +344,8 @@ static esp_err_t config_get_refresh_sec(uint32_t *out_val)
     return ESP_OK;
 }
 
-/* Thins the PCAP recording. Default 0 (record everything) -- an unfaithful
- * capture should never be the surprise default. */
+/* Thins the PCAP recording. Default 0 records everything, because an
+ * unfaithful capture should never be the surprise default. */
 static esp_err_t config_get_pcap_filter(uint8_t *out_val)
 {
     uint8_t out;
@@ -360,8 +360,8 @@ static esp_err_t config_get_pcap_filter(uint8_t *out_val)
     return ESP_OK;
 }
 
-/* Off by default: this writes to the SD card continuously, and the user asked
- * for it as something to switch on deliberately. */
+/* Off by default: this writes to the SD card continuously, so switching it on
+ * has to be a deliberate choice. */
 static esp_err_t config_get_tracks_enable(uint8_t *out_val)
 {
     uint8_t out;
@@ -376,8 +376,8 @@ static esp_err_t config_get_tracks_enable(uint8_t *out_val)
     return ESP_OK;
 }
 
-/* On by default -- the LEDs are the normal behaviour of the port and the only
- * link indication on the board; switching them off is the deliberate choice. */
+/* On by default. The LEDs are the port's normal behaviour and the only link
+ * indication on the board, so switching them off is the deliberate choice. */
 static esp_err_t config_get_eth_leds(uint8_t *out_val)
 {
     uint8_t out;
@@ -430,7 +430,7 @@ static esp_err_t config_get_map_stale_sec(uint32_t *out_val)
     {
         if (res != ESP_OK && res != ESP_ERR_NVS_NOT_FOUND)
             ESP_LOGE(TAG, "nvs_get_u32 failed: %s", esp_err_to_name(res));
-        out = 60;  /* default: the previously hardcoded 60 s */
+        out = 60;  /* default: 60 s */
     }
     *out_val = out;
     return ESP_OK;
@@ -444,7 +444,7 @@ static esp_err_t config_get_pcap_enable(uint8_t *out_val)
     {
         if (res != ESP_ERR_NVS_NOT_FOUND)
             ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
-        out = 0;  /* default: off (flash-wear/capacity cost on an unattended device) */
+        out = 0;  /* default: off (SD wear and capacity cost on an unattended device) */
     }
     *out_val = !!out;
     return ESP_OK;
@@ -601,7 +601,7 @@ esp_err_t config_get_u8(config_index_t index, uint8_t *out)
 }
 
 /* Currently a no-op in the IDF, but the API contract makes a write durable only
- * once committed -- do not drop it, a write cache may land at any time. */
+ * once committed. Keep the call for the day a write cache appears. */
 static void config_commit(void)
 {
     esp_err_t err = nvs_commit(handle);
@@ -1420,7 +1420,7 @@ static int cmd_config_clear(int argc, char **argv)
             ret = 1;
             continue;
         }
-        /* Announce it like every setter does -- modules cache their settings
+        /* Announce it like every setter does. Modules cache their settings
          * and refresh only on this event. */
         const config_key_t *key = config_key_find(name);
         if (key)

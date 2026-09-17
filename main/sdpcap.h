@@ -7,38 +7,41 @@
 extern "C" {
 #endif
 
-/* Continuous rolling PCAP capture to SD (hourly-rotated, age+size-pruned) --
- * tshark-readable, independent of the console-oriented cmd_pcap.c debug tool. */
+/* Continuous rolling PCAP capture to SD (hourly-rotated, age+size-pruned). The
+ * files are tshark-readable. Separate from the console debug tool in cmd_pcap.c. */
 void sdpcap_init(void);
 
-/* Called from the sniffer's hot path for every received packet; no-ops
- * internally if capture is disabled or not yet initialized. */
+/* Called from the sniffer's hot path for every received packet. Does nothing if
+ * capture is disabled or not yet initialized. */
 void sdpcap_handle_packet(sniffer_packet_info_t *packet);
 
-/* Flushes the ring to the card now. Returns the bytes that LEFT THE RING; `ok`
- * is the separate question of whether they arrived -- test `ok`, not the count. */
+/* Flushes the ring now, or only the bytes still owed to the previous hour. Returns the bytes
+ * that LEFT THE RING. `ok` says whether they reached the card, so test `ok`, not the count. */
 size_t sdpcap_flush_now(bool *ok);
 
 /* Bytes captured but not yet on the card. Zero after a flush is the honest test
- * for "everything is on the card"; the flush's return value cannot tell. */
+ * for "everything is on the card". The flush's return value cannot tell. */
 size_t sdpcap_buffered(void);
 
-/* Configured flush interval in seconds. A window that ended longer ago than
- * this is on the card by construction -- callers use it instead of guessing. */
+/* Configured flush interval in seconds. The writer empties the ring on this
+ * interval, so callers use it to judge whether a past window is on the card. */
 uint32_t sdpcap_flush_sec(void);
 
-/* Frames the recorder lost (ring full or oversized) and frames it dropped on
- * purpose via the thinning filter, since boot. */
+/* Frames the recorder lost since boot: oversized, ring full, or dropped at an
+ * hour boundary (estimated from bytes). Thinned frames are not counted here. */
 uint32_t sdpcap_dropped(void);
+/* Mid-hour flushes by the writer task that failed or wrote only part. */
+uint32_t sdpcap_flush_fails(void);
+/* Frames the thinning filter dropped on purpose, since boot. */
 uint32_t sdpcap_filtered(void);
 
-/* Hands over the whole decode result (a hand-picked subset silently lagged
- * behind the live map). Return false to abort the walk (client hung up). */
+/* Hands over the whole decode result. Return false to abort the walk (client
+ * hung up). */
 typedef bool (*sdpcap_position_cb_t)(uint32_t seconds, uint32_t microseconds,
                                       const its_decoded_t *decoded, void *ctx);
 
-/* Reads stored PCAPs covering [from_sec, to_sec] chronologically. Read-only.
- * Returns false when the range could NOT be fully read -- do not claim coverage. */
+/* Reads stored PCAPs covering [from_sec, to_sec] in order, read-only, skipping missing hours.
+ * False means the card was busy or gone and the rest went unread, so do not claim coverage. */
 bool sdpcap_read_positions(uint32_t from_sec, uint32_t to_sec, sdpcap_position_cb_t cb, void *ctx);
 
 /* Raw-frame variant: cb also gets the frame bytes and sees EVERY decoded frame,

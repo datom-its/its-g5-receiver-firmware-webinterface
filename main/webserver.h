@@ -10,8 +10,8 @@ extern "C" {
 void webserver_init(void);
 
 /* Feed a received sniffer packet into the web message log ring buffer.
- * Safe to call from the sniffer task; only stores a short preview, not
- * the full payload, to keep memory usage bounded. */
+ * Safe to call from the sniffer task. Only the decoded fields are kept, not
+ * the raw payload, so the ring stays bounded. */
 void webserver_handle_packet(sniffer_packet_info_t *packet);
 
 #ifdef __cplusplus

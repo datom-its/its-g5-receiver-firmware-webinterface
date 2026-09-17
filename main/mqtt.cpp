@@ -28,10 +28,10 @@
 
 constexpr char TAG[] = "MQTT";
 
-/* `client` is created once and NEVER destroyed -- mqtt_stop() only stops
- * it, mqtt_start() reuses it. Destroying it would race mqtt_handle_packet()
- * on the sniffer task (use-after-free); publishing on a stopped-but-live
- * client is safe, esp-mqtt rejects it internally under its own lock. */
+/* `client` is created once and NEVER destroyed. mqtt_stop() only stops it,
+ * mqtt_start() reuses it. Destroying it would race mqtt_handle_packet() on
+ * the sniffer task, a use-after-free. Publishing on a stopped-but-live client
+ * is safe: esp-mqtt takes its own lock and returns an error. */
 static esp_mqtt_client_handle_t client;
 static bool client_running;
 static bool connected;
@@ -60,8 +60,8 @@ static esp_timer_handle_t stats_timer_handle;
  *  - tx worker: publishing straight from the sniffer hot path blocks
  *    that task for as long as the broker's TCP send takes. A stalled
  *    broker then starves SD capture and the event log too, which is
- *    backwards: MQTT feeds a live map and is the one sink where
- *    dropping is correct (see the QoS0/no-store-and-forward decision).
+ *    backwards: MQTT feeds a live map and is the one sink where dropping is
+ *    correct.
  * ------------------------------------------------------------------ */
 #define MQTT_CMD_QUEUE_LEN   4
 #define MQTT_CMD_MAX_LEN   160
@@ -70,7 +70,7 @@ static esp_timer_handle_t stats_timer_handle;
 typedef struct {
     uint8_t *payload;      /* heap copy, freed by the tx worker */
     int      length;
-    bool     replay;       /* from mqtt_replay_frame -- tracked for honest accounting */
+    bool     replay;       /* set by mqtt_replay_frame so its drops get counted */
 } mqtt_tx_item_t;
 
 static QueueHandle_t cmd_queue;
@@ -211,7 +211,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-/* Runs console commands arriving over MQTT, off the mqtt task -- see the
+/* Runs console commands arriving over MQTT, off the mqtt task. See the
  * deadlock note above. Publishing the result from here is safe: by then the
  * event callback has long returned and released the API lock. */
 static void mqtt_cmd_task(void *)
@@ -239,8 +239,8 @@ static void mqtt_cmd_task(void *)
     }
 }
 
-/* Drains captured frames to the broker. Blocking here costs nothing but MQTT
- * latency; the sniffer task stays free to feed the SD capture and the logs. */
+/* Drains captured frames to the broker. Blocking here costs only MQTT
+ * latency. The sniffer task stays free to feed the SD capture and the logs. */
 static void mqtt_tx_task(void *)
 {
     mqtt_tx_item_t item;
@@ -328,9 +328,9 @@ void mqtt_start(void)
         esp_mqtt_client_config_t mqtt_cfg{};
         mqtt_cfg.broker.address.uri = mqtt_uri;
         mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
-        /* Note: the last-will topic is copied by esp-mqtt at init and NOT
-         * re-applied on a reuse-start below -- fine, since a nodeid change
-         * requires a reboot anyway (like the other network settings). */
+        /* The last-will topic is copied by esp-mqtt at init and NOT re-applied
+         * on a reuse-start below. That is fine: a nodeid change needs a reboot
+         * anyway, like the other network settings. */
         mqtt_cfg.session.last_will = {
             .topic = status_topic,
             .msg = "offline",
@@ -369,8 +369,8 @@ void mqtt_stop(void)
 
     esp_timer_stop_blocking(stats_timer_handle, 1000);
 
-    /* Stop only -- never esp_mqtt_client_destroy() (see the comment at the
-     * `client` definition for the use-after-free this used to cause). */
+    /* Stop only, never esp_mqtt_client_destroy(). The comment at the `client`
+     * definition explains the use-after-free it would cause. */
     esp_mqtt_client_stop(client);
     mqtt_set_connected(false);
 

@@ -24,13 +24,13 @@ static const char TAG[] = "STATS";
 #define STATS_DIR   CONFIG_SNIFFER_MOUNT_POINT "/logs"
 #define STATS_CSV   STATS_DIR "/traffic.csv"
 
-/* current = hour being accumulated; pending = a completed hour waiting for
- * the sysmon tick to write it to SD (SD I/O must stay off the hot path). */
+/* current = the hour being accumulated. pending = an hour waiting for the sysmon
+ * tick to write it to SD, usually a completed one. SD I/O stays off the hot path. */
 static stat_hour_t s_current;
 static stat_hour_t s_pending;
 static bool s_have_pending;
 static SemaphoreHandle_t s_lock;
-static uint32_t s_flushes;   /* completed-hour writes, for prune cadence */
+static uint32_t s_flushes;   /* hours written to SD, for prune cadence */
 
 /* Sender ids seen this hour: open addressing, linear probe, emptied on the hour
  * roll. Past 3/4 full it stops inserting and the hour is marked a lower bound. */
@@ -97,8 +97,8 @@ void tstat_note(uint8_t station_type, uint32_t station_id, uint8_t message_id,
         s_current.hour = hour;
     else if (hour != s_current.hour)
     {
-        /* Hour rolled: hand it to the tick for the SD write. An unflushed
-         * previous pending is overwritten -- one lost hour is acceptable. */
+        /* Hour rolled: hand it to the tick for the SD write. An unflushed previous
+         * pending is overwritten, so one hour can be lost. That is acceptable. */
         s_pending = s_current;
         s_have_pending = true;
         memset(&s_current, 0, sizeof(s_current));
@@ -114,14 +114,14 @@ void tstat_note(uint8_t station_type, uint32_t station_id, uint8_t message_id,
         s_current.senders[c]++;
     else if (s_seen_used >= SEEN_SLOTS - SEEN_SLOTS / 4)
         s_current.senders_capped = true;
-    /* An all-ones GN speed field means "not available" and decodes to -1 cm/s;
-     * without this every vehicle that omits its speed counts as standing still. */
+    /* An all-ones GN speed field means "not available" and decodes to -1 cm/s.
+     * Without this check a vehicle that omits its speed would count as standing. */
     if (has_speed && speed_cmps != -1)
     {
         int32_t kmh = speed_cmps * 36 / 1000;   /* cm/s -> km/h */
         if (kmh < 0) kmh = -kmh;                /* reversing is still movement */
-        /* A standing vehicle is real traffic: dropping it took it out of the
-         * DENOMINATOR too and pushed the average up. */
+        /* A standing vehicle is real traffic. Dropping it would take it out of
+         * the DENOMINATOR too and push the average up. */
         if (kmh < 400)
         {
             s_current.sp_sum[c] += (uint32_t)kmh;
@@ -138,8 +138,8 @@ void tstat_note(uint8_t station_type, uint32_t station_id, uint8_t message_id,
  * senders, capped flag. Speed as sum+cnt so any window averages correctly. */
 #define STATS_NF_OLD (2 + 4 * STAT_NCAT)
 #define STATS_NF_NEW (STATS_NF_OLD + STAT_NCAT + 1)
-/* Explicit trailing marker for how the speed columns were filled -- the column
- * count cannot tell, a build wrote the new columns under the old rule. */
+/* Explicit trailing marker for how the speed columns were filled. The column
+ * count alone cannot tell. Rows can carry the new columns under the old rule. */
 #define STATS_NF_RULE (STATS_NF_NEW + 1)
 #define STATS_SPEED_RULE 1u   /* 1 = standing vehicles in, "unavailable" out */
 
@@ -154,8 +154,7 @@ static void write_row(FILE *f, const stat_hour_t *h)
     fprintf(f, ",%u,%u\n", h->senders_capped ? 1u : 0u, STATS_SPEED_RULE);
 }
 
-/* Prunes by streaming to a temp file and swapping it in -- a fixed read buffer
- * capped the file and silently dropped the NEWEST rows. */
+/* Prunes by streaming to a temp file and swapping it in. */
 #define STATS_TMP   STATS_DIR "/traffic.tmp"
 
 static void prune(uint32_t keep_from_hour)
@@ -170,8 +169,8 @@ static void prune(uint32_t keep_from_hour)
         return;
     }
 
-    /* Must hold the longest possible row whole -- a short buffer splits a line
-     * and both halves mis-parse. Recount when columns are added. */
+    /* Must hold the longest possible row whole. A short buffer splits a line and
+     * both halves mis-parse. Recount when columns are added. */
     char line[448];
     bool ok = true;
     while (fgets(line, sizeof(line), f))
@@ -200,7 +199,7 @@ void tstat_tick(void)
         return;
 
     /* Guards append and prune rewrite against unmount/format and the other SD
-     * writers. Bounded: this runs on the sysmon (watchdog) task. */
+     * writers. Bounded: no caller may hang here when SD is wedged. */
     /* Non-recursive, so it also holds a second tstat_tick off until the flag clears. */
     if (!sdcard_io_begin_timeout(2000))
         return;
@@ -223,8 +222,8 @@ void tstat_tick(void)
     xSemaphoreGive(s_lock);   /* cleared only once the row is on the card */
 
     mkdir(STATS_DIR, 0777);
-    /* A reset between prune()'s remove() and rename() leaves the whole history
-     * in the temp file; put it back BEFORE appending, or an empty csv wins. */
+    /* A reset between prune()'s remove() and rename() leaves the whole history in
+     * the temp file. Put it back BEFORE appending, or an empty csv wins. */
     struct stat st;
     if (stat(STATS_CSV, &st) != 0 && stat(STATS_TMP, &st) == 0)
         rename(STATS_TMP, STATS_CSV);
@@ -245,7 +244,7 @@ void tstat_tick(void)
         ok = false;
     if (!ok)
     {
-        /* An hour of counts is worth a retry -- dropping the flag here loses it
+        /* An hour of counts is worth a retry. Dropping the flag here would lose it
          * silently on a full card. */
         ESP_LOGW(TAG, "stats row not written, keeping it pending");
         sdcard_io_end();
@@ -255,8 +254,8 @@ void tstat_tick(void)
      * leaves the flag set and the same hour gets appended twice (and SUMMED). */
     if (xSemaphoreTake(s_lock, portMAX_DELAY) == pdTRUE)
     {
-        /* Not if the hour rolled meanwhile: that pending row is a new one.
-         * Blind to a roll inside tstat_flush_now() -- drops one partial hour. */
+        /* Not if the hour rolled meanwhile: that pending row is a new one. A roll
+         * inside tstat_flush_now() goes unnoticed and drops one partial hour. */
         if (s_pending.hour == row.hour)
             s_have_pending = false;
         xSemaphoreGive(s_lock);
@@ -279,7 +278,7 @@ void tstat_tick(void)
     sdcard_io_end();
 }
 
-/* Writes the hour still being accumulated -- without it a planned restart throws
+/* Writes the hour still being accumulated. Without it a planned restart throws
  * away up to 59 minutes of counts. */
 void tstat_flush_now(void)
 {
@@ -319,12 +318,12 @@ static void stat_hour_merge(stat_hour_t *dst, const stat_hour_t *src)
         dst->sp_sum[c] += src->sp_sum[c];
         dst->sp_cnt[c] += src->sp_cnt[c];
         if (src->sp_max[c] > dst->sp_max[c]) dst->sp_max[c] = src->sp_max[c];
-        /* Distinct senders cannot be summed -- the same vehicle may appear in
-         * both halves. The larger half is the honest lower bound. */
+        /* Distinct senders cannot be summed, because the same vehicle may appear
+         * in both halves. The larger half is the honest lower bound. */
         if (src->senders[c] > dst->senders[c]) dst->senders[c] = src->senders[c];
     }
-    /* Merging only happens for two parts of the SAME hour, and s_seen[] is gone
-     * across the cut -- the merged count is a lower bound by definition. */
+    /* Merging only happens for two parts of the SAME hour. A restart between the
+     * parts loses s_seen[], so the merged sender count is only a lower bound. */
     dst->senders_capped = true;
     dst->speed_legacy   = dst->speed_legacy   || src->speed_legacy;
 }
@@ -345,16 +344,16 @@ int tstat_read(uint32_t hours, stat_hour_t *out, int max, bool *history_ok)
     uint32_t from_hour = (span >= now_hour) ? 0 : now_hour - span;
 
     int count = 0;
-    /* Counted reader guard, NOT the writer lock -- that would block the recorders
-     * for 720 rows. Unlink races it, so rows can be short: bounds-checked below. */
+    /* Counted reader guard, NOT the writer lock. The writer lock would block the
+     * recorders for 720 rows. Unlink races it, so rows can be short and are checked below. */
     bool locked = sdcard_read_begin();
-    /* Without a card there IS no stored history -- only a real miss on a
-     * mounted card (an unmount/format pending) is worth warning about. */
+    /* Without a card there IS no stored history. Only a real miss on a mounted
+     * card (an unmount or format pending) is worth warning about. */
     if (!locked && history_ok && sdcard_is_mounted())
         *history_ok = false;
     FILE *f = locked ? fopen(STATS_CSV, "r") : NULL;
-    /* A reset between prune()'s remove() and rename() leaves the complete
-     * history in the temp file -- read it rather than show nothing. */
+    /* A reset between prune()'s remove() and rename() leaves the complete history
+     * in the temp file. Read it rather than show nothing. */
     if (locked && !f)
         f = fopen(STATS_TMP, "r");
     /* Both opens failed on a mounted card: the stored window is silently missing,
@@ -377,7 +376,7 @@ int tstat_read(uint32_t hours, stat_hour_t *out, int max, bool *history_ok)
                 p = end;
                 if (*p == ',') p++;
             }
-            /* Rows written before the sender columns existed stay valid; their
+            /* Rows written before the sender columns existed stay valid. Their
              * missing fields read as zero. */
             if (got >= STATS_NF_OLD && (uint32_t)v[0] >= from_hour)
             {

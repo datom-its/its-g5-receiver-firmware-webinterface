@@ -9,11 +9,11 @@
 #include "esp_timer.h"
 #include "esp_attr.h"
 
-/* Fixed cache under a mutex: packet path writes, httpd task reads; the lock is
- * only ever held for a single slot memcpy. */
+/* Fixed cache under a mutex: the packet path writes, the httpd task reads.
+ * The packet path takes the lock with a zero timeout and never waits. */
 static spatem_intersection_t s_int[SPATEM_MAX_INT];
-/* Parallel to s_int[], same slot index; in PSRAM because it is bulky
- * display data that no hot path reads. */
+/* Parallel to s_int[], same slot index. In PSRAM because these phase tallies
+ * are bulky display data. */
 static EXT_RAM_BSS_ATTR spatem_phases_t s_ph[SPATEM_MAX_INT];
 static int s_count;
 static SemaphoreHandle_t s_lock;
@@ -92,7 +92,7 @@ void spatem_geometry_unlock(void)
         xSemaphoreGive(s_geom_lock);
 }
 
-/* green / red-amber / amber / red, or -1 for anything else (dark, flashing). */
+/* green / red-amber / amber / red, or -1 for anything else (unavailable, dark). */
 static int spat_phase_class(uint8_t phase)
 {
     switch (phase)
@@ -113,8 +113,8 @@ static int ph_row(spatem_phases_t *p, uint8_t sg)
             return r;
     if (p->n_rows >= ITS_SPAT_MAX_SG)
     {
-        /* ONCE: runs for every group of every SPATEM and the table never
-         * un-fills, so an unconditional warning floods console and SD log. */
+        /* ONCE: runs for every group of every SPATEM, so an unconditional
+         * warning would flood the console and the SD log. */
         static bool told;
         if (!told)
         {
@@ -242,8 +242,8 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
                 if (armed && !gap && prev >= 0 && mono > ph->since[r])
                 {
                     uint32_t dur = mono - ph->since[r];
-                    /* Observed without a gap, so however long it was, it
-                     * really lasted that long -- no upper bound needed. */
+                    /* Observed without a gap, so the measured length is the
+                     * real one. No upper bound needed. */
                     if (ph->cnt[r][prev] < 0xFFFFFFFEu &&
                         ph->secs[r][prev] <= 0xFFFFFFFFu - dur)
                     {
@@ -253,8 +253,8 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
                     if (dur > ph->max[r][prev])
                         ph->max[r][prev] = dur;
                 }
-                /* The new phase starts now, but that is only KNOWN without a gap:
-                 * arming after one records the next phase short by up to the gap. */
+                /* The new phase starts now, but that is only KNOWN without a
+                 * gap. Arming after a gap would measure the next phase too short. */
                 ph->since[r] = mono;
                 if (!gap)
                     ph->armed |= 1u << r;
@@ -380,7 +380,7 @@ void spatem_note_geometry(const uint8_t *frame, size_t len, const its_map_t *m)
     if (!m || !m->valid || !s_lock)
         return;
 
-    /* Locate (or make) the slot this intersection uses, under the lock. */
+    /* Locate the slot this intersection uses, under the lock. */
     int slot = -1;
     if (xSemaphoreTake(s_lock, 0) != pdTRUE)
         return;

@@ -1,6 +1,9 @@
 #include "sysstat.h"
 
+#include <stdbool.h>
 #include <sys/time.h>
+
+#include "freertos/FreeRTOS.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -22,8 +25,23 @@ static bool s_crash_pending;
 /* Last max-uptime value actually written to NVS, to throttle flash writes. */
 static uint32_t s_max_uptime_nvs;
 
-/* Only unexpected hard downs count -- a clean reboot, a flash or the sysmon
- * auto-recovery (esp_restart -> ESP_RST_SW) is deliberately not a crash. */
+/* SD losses across reboots. A tired card only shows over days, and the
+ * per-boot counters start again at zero after every restart. */
+static uint32_t s_sd_lost;       /* estimated frames that never reached the card */
+static uint32_t s_sd_flushfail;  /* flushes that failed or wrote only part */
+static uint32_t s_sd_unmounts;   /* cards taken out after failed writes, not
+                                  * manual unmounts */
+static bool     s_sd_dirty;
+static uint32_t s_sd_written_up; /* uptime at the last SD-counter write */
+/* sysmon adds the deltas and card take-outs. Web, console and OTA tasks add a
+ * failed final flush. Without the lock, two concurrent adds can lose one of them. */
+static portMUX_TYPE s_sd_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* NVS writes disable the flash cache, so these are paced. */
+#define SD_WRITE_EVERY_SEC 600
+
+/* Only unexpected hard resets count as crashes. A clean reboot, a flash and the
+ * sysmon auto-recovery (esp_restart -> ESP_RST_SW) deliberately do not. */
 static bool reason_is_crash(esp_reset_reason_t r)
 {
     switch (r)
@@ -53,6 +71,9 @@ void sysstat_record_boot(void)
     nvs_get_u32(h, "crashes", &s_crashes);
     nvs_get_u32(h, "maxup", &s_max_uptime);
     nvs_get_i64(h, "lastcrash", &s_last_crash);
+    nvs_get_u32(h, "sdlost", &s_sd_lost);
+    nvs_get_u32(h, "sdflush", &s_sd_flushfail);
+    nvs_get_u32(h, "sdtakeout", &s_sd_unmounts);
     s_max_uptime_nvs = s_max_uptime;
 
     s_boots++;
@@ -78,14 +99,14 @@ void sysstat_tick(uint32_t uptime_sec)
     bool write_crash = false;
     if (s_crash_pending && time_valid)
     {
-        /* The reboot happened ~uptime_sec ago; that's when the crash was. */
+        /* The crash happened at the reboot, about uptime_sec seconds ago. */
         s_last_crash = tv.tv_sec - (int64_t)uptime_sec;
         s_crash_pending = false;
         write_crash = true;
     }
 
     /* Track the live max always, persist at most hourly: an NVS write disables
-     * the flash cache and stalls flash/PSRAM code -- a hiccup on an open BLE link. */
+     * the flash cache and stalls flash/PSRAM code. That makes an open BLE link stutter. */
     bool write_max = false;
     if (uptime_sec > s_max_uptime)
     {
@@ -94,7 +115,11 @@ void sysstat_tick(uint32_t uptime_sec)
             write_max = true;
     }
 
-    if (!write_crash && !write_max)
+    bool write_sd = s_sd_dirty &&
+                    (uptime_sec < s_sd_written_up ||
+                     uptime_sec - s_sd_written_up >= SD_WRITE_EVERY_SEC);
+
+    if (!write_crash && !write_max && !write_sd)
         return;
 
     nvs_handle_t h;
@@ -107,6 +132,64 @@ void sysstat_tick(uint32_t uptime_sec)
         nvs_set_u32(h, "maxup", s_max_uptime);
         s_max_uptime_nvs = s_max_uptime;
     }
+    if (write_sd)
+    {
+        /* Snapshot under the lock, write outside it: flash operations must
+         * never happen with interrupts disabled. */
+        uint32_t l, f, u;
+        portENTER_CRITICAL(&s_sd_mux);
+        l = s_sd_lost; f = s_sd_flushfail; u = s_sd_unmounts;
+        s_sd_dirty = false;
+        portEXIT_CRITICAL(&s_sd_mux);
+        nvs_set_u32(h, "sdlost", l);
+        nvs_set_u32(h, "sdflush", f);
+        nvs_set_u32(h, "sdtakeout", u);
+        s_sd_written_up = uptime_sec;
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void sysstat_sd_add(uint32_t lost, uint32_t flushfail, uint32_t unmounts)
+{
+    if (!lost && !flushfail && !unmounts)
+        return;
+    portENTER_CRITICAL(&s_sd_mux);
+    s_sd_lost      += lost;
+    s_sd_flushfail += flushfail;
+    s_sd_unmounts  += unmounts;
+    s_sd_dirty = true;
+    portEXIT_CRITICAL(&s_sd_mux);
+}
+
+void sysstat_sd_get(uint32_t *lost, uint32_t *flushfail, uint32_t *unmounts)
+{
+    portENTER_CRITICAL(&s_sd_mux);
+    uint32_t l = s_sd_lost, f = s_sd_flushfail, u = s_sd_unmounts;
+    portEXIT_CRITICAL(&s_sd_mux);
+    if (lost)      *lost      = l;
+    if (flushfail) *flushfail = f;
+    if (unmounts)  *unmounts  = u;
+}
+
+void sysstat_flush(void)
+{
+    /* Called before a planned restart or power cut. The paced write would
+     * otherwise lose up to ten minutes of counting. */
+    uint32_t l, f, u;
+    portENTER_CRITICAL(&s_sd_mux);
+    bool dirty = s_sd_dirty;
+    l = s_sd_lost; f = s_sd_flushfail; u = s_sd_unmounts;
+    s_sd_dirty = false;
+    portEXIT_CRITICAL(&s_sd_mux);
+    if (!dirty)
+        return;
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK)
+        return;
+    nvs_set_u32(h, "sdlost", l);
+    nvs_set_u32(h, "sdflush", f);
+    nvs_set_u32(h, "sdtakeout", u);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -118,14 +201,19 @@ int64_t  sysstat_last_crash_time(void) { return s_last_crash; }
 
 void sysstat_reset(void)
 {
-    /* Counting restarts from now; max_uptime re-grows from the running
-     * session at the next sysstat_tick. */
+    /* Counting restarts from now. The max uptime grows back from the current
+     * uptime at the next sysstat_tick. */
     s_boots = 0;
     s_crashes = 0;
     s_max_uptime = 0;
     s_max_uptime_nvs = 0;
     s_last_crash = 0;
     s_crash_pending = false;
+    s_sd_lost = 0;
+    s_sd_flushfail = 0;
+    s_sd_unmounts = 0;
+    s_sd_dirty = false;
+    s_sd_written_up = 0;
 
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK)

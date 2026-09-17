@@ -31,7 +31,7 @@ typedef struct {
 void ethernet_get_status(ethernet_status_t *out);
 
 /* Pushes CONFIG_INDEX_ETH_LEDS to the port's link/activity LEDs. Runs at
- * startup and on link-up; call again after changing the setting. */
+ * startup and on link-up. Call again after changing the setting. */
 esp_err_t ethernet_apply_led_setting(void);
 
 #ifdef __cplusplus

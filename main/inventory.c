@@ -20,23 +20,23 @@
 #define INV_SAVE_TICKS 60   /* sysmon runs every 5 s -> save every 5 min */
 #endif
 
-/* Stations live in PSRAM: 128 rows are ~10 KB, far more than the internal
+/* Stations live in PSRAM: 128 rows are about 12 KB, far more than the internal
  * heap should carry for a display-only table. */
 static EXT_RAM_BSS_ATTR inv_station_t s_tab[INV_MAX_STATIONS];
 static int s_count;
 static bool s_overflow;
 
-/* Everything without a row of its own -- vehicles, mostly. Frames only: a
- * vehicle count would be fiction, ETSI rotates their station id and MAC. */
+/* Frames from senders that never get a row of their own, mostly vehicles.
+ * Counting them would be fiction, because they rotate station id and MAC. */
 static uint32_t s_veh_frames;
 
 static SemaphoreHandle_t s_lock;
-static int s_last_hit = -1;   /* an RSU repeats; skip the scan for its rows */
+static int s_last_hit = -1;   /* an RSU sends again and again: check its row first */
 static bool s_dirty;
 /* Bumped by clear(): a save whose snapshot predates it must not commit. */
 #if CONFIG_ENABLE_SD
-/* Both are read and written only inside the SD blocks; declaring them outside
- * makes a CONFIG_ENABLE_SD=n build fail on -Werror=unused-variable. */
+/* Both are read and written only inside the SD blocks. Declared outside, they
+ * would draw an unused-variable warning in a CONFIG_ENABLE_SD=n build. */
 static volatile uint32_t s_gen;
 static volatile bool s_wipe_pending;
 #endif
@@ -57,8 +57,8 @@ void inventory_note(uint32_t seconds, int rssi, const its_decoded_t *d)
 {
     if (!s_lock || !d->station_id)
         return;
-    /* Before the clock is set, "first seen" would be a device-relative
-     * number -- worse than not recording it at all. */
+    /* Before the clock is set, "first seen" would be seconds since boot.
+     * Recording that is worse than recording nothing. */
     if (seconds < 1600000000u)
         return;
 
@@ -100,11 +100,11 @@ void inventory_note(uint32_t seconds, int rssi, const its_decoded_t *d)
     s->last_seen = seconds;
     s->frames++;
     s->station_type = d->station_type;
-    /* Only ids that actually fit get a bit; masking with 15 made an id above
-     * 15 light up a DIFFERENT type's bit and mislabel the sender. */
+    /* Only ids 1..15 get a bit. Masking a larger id would set the bit of a
+     * different message type and mislabel the sender. */
     if (d->message_id && d->message_id < 16)
         s->msg_mask |= (uint16_t)(1u << d->message_id);
-    if (rssi < 0 && rssi > -128)      /* 0 = the driver had no reading */
+    if (rssi < 0 && rssi > -128)      /* 0 = no RF reading, as on Ethernet */
     {
         if (!s->rssi_cnt || rssi < s->rssi_min) s->rssi_min = (int16_t)rssi;
         if (!s->rssi_cnt || rssi > s->rssi_max) s->rssi_max = (int16_t)rssi;
@@ -154,7 +154,7 @@ int inventory_lookup_mac(const uint8_t mac[6], char *out, size_t cap,
     if (out && cap) out[0] = 0;
     if (id_out) *id_out = 0;
     /* Short timeout, never portMAX_DELAY: this is asked per table row on the
-     * httpd task while inv_save may hold the lock for a whole rewrite. */
+     * httpd task, so a busy table must not stall the page. */
     if (!s_lock || !mac || xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE)
         return -1;
     int found = 0;
@@ -176,7 +176,7 @@ bool inventory_overflow(void) { return s_overflow; }
 
 #if CONFIG_ENABLE_SD
 
-/* Insert or fold one restored row; caller holds s_lock, so the whole batch
+/* Insert or fold one restored row. The caller holds s_lock, so a whole batch
  * lands in one critical section. */
 static void inv_upsert_locked(const inv_station_t *r)
 {
@@ -213,11 +213,11 @@ static void inv_upsert_locked(const inv_station_t *r)
  * ADDS frames and rssi_sum, so a partial apply plus a retry doubles them. */
 static EXT_RAM_BSS_ATTR inv_station_t s_load_tmp[INV_MAX_STATIONS];
 
-/* False = nothing was APPLIED to s_tab; the retry rests on that, since the
- * upsert adds. Until it returns true the caller must not save. */
+/* False = nothing was APPLIED to s_tab. The retry depends on that, because
+ * the upsert adds. Until it returns true the caller must not save. */
 static bool inv_load(void)
 {
-    /* A clear landing mid-load bumps s_gen; restoring rows read before it
+    /* A clear landing mid-load bumps s_gen. Restoring rows read before it
      * would silently undo the wipe, so the batch is dropped and retried. */
     uint32_t gen_at_start = s_gen;
     bool over = false;
@@ -225,8 +225,8 @@ static bool inv_load(void)
     if (!sdcard_io_begin_timeout(2000))
         return false;
     FILE *f = fopen(INV_CSV, "r");
-    /* A power cut between remove() and rename() leaves only the temp file --
-     * it holds the complete newer content, so prefer it over nothing. */
+    /* A power cut between remove() and rename() leaves only the temp file.
+     * It holds the complete newer content, so prefer it over nothing. */
     if (!f)
         f = fopen(INV_TMP, "r");
     if (!f)
@@ -264,8 +264,8 @@ static bool inv_load(void)
         for (int i = 0; i < 6; i++) r.mac[i] = (uint8_t)m[i];
         r.has_mac = (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) != 0;
 
-        /* Signal fields came with 0.27.0; older rows go straight to the name
-         * here, so they are parsed separately and simply stay zero. */
+        /* Older rows put the name right after the MAC field. The four signal
+         * fields are read separately, so those rows simply keep zeros. */
         int used2 = 0;
         if (sscanf(line + used, "%d,%d,%lld,%lu,%n",
                    &rmin, &rmax, &rsum, &rcnt, &used2) == 4 && used2 > 0)
@@ -295,7 +295,7 @@ static bool inv_load(void)
     if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE)
     {
         /* Cleared mid-read: applying now would resurrect what the user just
-         * deleted. Drop the batch; the retry then reads an empty file. */
+         * deleted. Drop the batch. The retry then finds the file gone. */
         if (gen_at_start == s_gen)
         {
             for (int i = 0; i < nload; i++)
@@ -310,17 +310,17 @@ static bool inv_load(void)
     return ok;   /* nothing was applied on failure, so the retry is clean */
 }
 
-/* Full rewrite, not append: rows keep changing, unlike the event and track
- * logs. Snapshot first so the file write never holds the table lock. */
 /* File scope so inventory_flush_now() honours it too: inv_save() replaces the
  * whole file, so saving before inv_load() succeeded drops the stored senders. */
 static bool s_loaded;
 
+/* Full rewrite, not append: rows keep changing, unlike the event and track
+ * logs. Snapshot first so the file write never holds the table lock. */
 static bool inv_save(void)
 {
     static EXT_RAM_BSS_ATTR inv_station_t snap[INV_MAX_STATIONS];
-    /* SD lock BEFORE the snapshot: two tasks call this and snap[] is shared --
-     * re-sorting it mid-write emits a row twice, folded additively next boot. */
+    /* SD lock BEFORE the snapshot: two tasks call this and snap[] is shared.
+     * Re-sorting it mid-write emits a row twice, folded again on next boot. */
     if (!sdcard_io_begin_timeout(2000))
         return false;
     uint32_t gen = s_gen;
@@ -384,8 +384,8 @@ void inventory_tick(void)
         return;
     if (s_wipe_pending)
     {
-        /* The clear could not reach the card at the time -- finish it now,
-         * before any save can put the old rows back. */
+        /* The clear could not reach the card back then. Finish it now, before
+         * any save can put the old rows back. */
         if (sdcard_io_begin_timeout(2000))
         {
             remove(INV_CSV);
@@ -397,8 +397,8 @@ void inventory_tick(void)
     }
     if (!s_loaded)
     {
-        /* Retried until it actually succeeds -- saving before the stored rows
-         * are back would replace them with whatever little is in RAM. */
+        /* Retried until it succeeds. Saving before the stored rows are back
+         * would replace them with the few rows collected since boot. */
         s_loaded = inv_load();
         return;
     }
@@ -418,8 +418,8 @@ void inventory_tick(void) {}
 void inventory_flush_now(void)
 {
 #if CONFIG_ENABLE_SD
-    /* Same precedence as the tick: s_wipe_pending dies with the restart that
-     * follows, so finish the deferred delete instead of saving around it. */
+    /* Same precedence as the tick: this runs before a restart or power-off, so
+     * finish the deferred delete instead of saving around it. */
     if (s_wipe_pending)
     {
         if (sdcard_io_begin_timeout(2000))
