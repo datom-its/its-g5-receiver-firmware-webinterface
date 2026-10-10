@@ -1,4 +1,5 @@
 #include "spatem.h"
+#include "spatlog.h"
 
 #include <string.h>
 
@@ -15,6 +16,9 @@ static spatem_intersection_t s_int[SPATEM_MAX_INT];
 /* Parallel to s_int[], same slot index. In PSRAM because these phase tallies
  * are bulky display data. */
 static EXT_RAM_BSS_ATTR spatem_phases_t s_ph[SPATEM_MAX_INT];
+/* Monotonic second of the last SPATEM that carried phases, per slot. The
+ * wall-clock phase_seen cannot serve here: an NTP step would fake an age. */
+static uint32_t s_phase_mono[SPATEM_MAX_INT];
 static int s_count;
 static SemaphoreHandle_t s_lock;
 
@@ -28,6 +32,11 @@ static const char TAG[] = "SPATEM";
 /* Silence -- neither SPATEM nor MAPEM -- after which a slot may be evicted.
  * NTP sync steps the seconds base once, so older slots look dead for one message. */
 #define SPAT_DEAD_SEC 60
+
+/* Silence after which the cached phases stop being handed out as current. Measured on site
+ * they are never older than 1 s, so 10 s is an outage, not jitter. It is the same bound as
+ * SPAT_GAP_SEC, after which a running phase measurement is void. */
+#define SPAT_STALE_SEC SPAT_GAP_SEC
 
 /* Durations run on the monotonic clock, never the wall clock the packets carry:
  * an NTP step must not stretch a number presented as measured. Display stays wall clock. */
@@ -103,6 +112,13 @@ static int spat_phase_class(uint8_t phase)
     case 2: case 3:          return 3;
     default:                 return -1;
     }
+}
+
+/* The one list of green phases for code outside the traffic page (the message line on
+ * /messages). */
+bool spatem_phase_is_green(uint8_t phase)
+{
+    return spat_phase_class(phase) == 0;
 }
 
 /* Row for this signal group, allocated on first sight. -1 = table full. */
@@ -197,6 +213,7 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
         /* spatem_geometry() scans by region+id, not by slot: left set, it keeps
          * serving the evicted intersection's lanes. */
         s_geom_ready[slot] = false;   /* a plain flag; readers test it first */
+        s_phase_mono[slot] = 0;       /* no phases of the new occupant yet */
     }
 
     uint8_t n = s->n <= ITS_SPAT_MAX_SG ? s->n : ITS_SPAT_MAX_SG;
@@ -252,6 +269,10 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
                     }
                     if (dur > ph->max[r][prev])
                         ph->max[r][prev] = dur;
+                    /* Only here is the length really measured, so only here does a row
+                     * go to the card: the tallies above start at zero after every boot. */
+                    spatlog_note(seconds, s->region, s->id, s->sg[j], ph->phase[r],
+                                 dur > 0xFFFFu ? 0xFFFFu : (uint16_t)dur, s->phase[j]);
                 }
                 /* The new phase starts now, but that is only KNOWN without a
                  * gap. Arming after a gap would measure the next phase too short. */
@@ -298,9 +319,10 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
     /* No remap, no zeroing: tallies live in rows keyed by group id, so a group
      * this message left out simply keeps its row. */
     e->last_seen = seconds;
-    /* 0 doubles as "phases never decoded" here and in webserver.c; before NTP
-     * sync `seconds` is uptime, so second 0 collides for one second. */
+    /* 0 doubles as "phases never decoded" here and on the pages (web_map.c, web_traffic.c,
+     * web_glance.c). Before NTP sync `seconds` is uptime, so second 0 collides for one second. */
     e->phase_seen = seconds;   /* this message carried phases */
+    s_phase_mono[slot] = mono; /* the same on the monotonic clock, see SPAT_STALE_SEC */
     e->station_id = station_id;
     if (has_pos && (lat_e7 || lon_e7))
     {
@@ -312,12 +334,15 @@ void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
     xSemaphoreGive(s_lock);
 }
 
-void spatem_note_name(const its_map_t *m, uint32_t seconds)
+void spatem_note_name(const its_map_t *m, bool has_alt, int32_t alt_cm, uint32_t seconds)
 {
     if (!m || !m->valid || !s_lock)
         return;
-    if (m->name[0] == '\0' && m->n_sg == 0)
-        return;   /* nothing to attach */
+    /* Every field below counts: a MAPEM without name and signal groups may still bring lane
+     * width, speed limits or the altitude. */
+    if (m->name[0] == '\0' && m->n_sg == 0 && !m->lane_width_cm && !m->speed_max_kmh &&
+        !m->speed_min_kmh && !has_alt)
+        return;   /* nothing to attach at all */
     if (xSemaphoreTake(s_lock, 0) != pdTRUE)
         return;
 
@@ -328,8 +353,8 @@ void spatem_note_name(const its_map_t *m, uint32_t seconds)
             slot = i;
             break;
         }
-    /* MAPEM can arrive before the first SPATEM; seed an entry so the name
-     * isn't dropped (n stays 0, so no phase chips render for it yet). */
+    /* A MAPEM can arrive before the first SPATEM. Seed an entry so that what it brings is not
+     * dropped. n stays 0, so no phase chips render for it yet. */
     if (slot < 0 && s_count < SPATEM_MAX_INT)
     {
         slot = s_count++;
@@ -348,6 +373,9 @@ void spatem_note_name(const its_map_t *m, uint32_t seconds)
         s_int[slot].lane_width_cm = m->lane_width_cm;
         s_int[slot].speed_max_kmh = m->speed_max_kmh;
         s_int[slot].speed_min_kmh = m->speed_min_kmh;
+        /* Like the lane width, the newest MAPEM decides: one without altitude clears it. */
+        s_int[slot].has_alt = has_alt;
+        s_int[slot].alt_cm = has_alt ? alt_cm : 0;
         if (m->n_sg)
         {
             uint8_t n = m->n_sg <= ITS_SPAT_MAX_SG ? m->n_sg : ITS_SPAT_MAX_SG;
@@ -466,6 +494,17 @@ int spatem_snapshot(spatem_intersection_t *out, int max)
 
     int n = s_count < max ? s_count : max;
     memcpy(out, s_int, (size_t)n * sizeof(out[0]));
+    /* A junction that stopped sending must not stay green or red, so blank the phases of a
+     * stale copy. 0 is MovementPhaseState "unavailable", which every renderer already shows
+     * dark (all lamps off, grey lane). out[i] is still slot i here, because the sort runs
+     * later. */
+    uint32_t mono = mono_now();
+    for (int i = 0; i < n; i++)
+        if (s_phase_mono[i] && mono - s_phase_mono[i] > SPAT_STALE_SEC)
+        {
+            memset(out[i].phase, 0, sizeof(out[i].phase));
+            memset(out[i].change_at, 0, sizeof(out[i].change_at));
+        }
     xSemaphoreGive(s_lock);
 
     /* Sort most-recently-seen first (n is tiny; insertion sort). */

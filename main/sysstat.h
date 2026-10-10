@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Small NVS-backed stability counters shown on /system, so the device
@@ -22,6 +23,8 @@ uint32_t sysstat_crash_count(void);
 uint32_t sysstat_max_uptime_sec(void);
 /* Unix seconds of the last crash reboot, or 0 if none recorded yet. */
 int64_t  sysstat_last_crash_time(void);
+/* True when this boot followed a crash. Uses the same list of crash reasons as the counter. */
+bool     sysstat_boot_was_crash(void);
 
 /* SD losses that outlive a reboot. A wedged card can trigger a restart, which
  * zeroes the per-boot counters just when the history matters most.

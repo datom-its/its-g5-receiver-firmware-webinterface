@@ -31,6 +31,10 @@
 #include "tracklog.h"
 #include "inventory.h"
 #include "ptlog.h"
+#include "priolog.h"
+#include "spatlog.h"
+#include "infolog.h"
+#include "its_verify.h"
 #include "spatem.h"
 #include "spi.h"
 #include "spi_eppp.h"
@@ -186,7 +190,12 @@ void app_main(void)
     tracklog_init();
     inventory_init();
     ptlog_init();
+    priolog_init();
+    spatlog_init();
+    infolog_init();
     spatem_init();
+    /* Before sniffer_autostart(), so the queue exists when the first frames arrive. */
+    its_verify_start();
 
 #ifdef CONFIG_ENABLE_TEMPERATURE
     temperature_init();

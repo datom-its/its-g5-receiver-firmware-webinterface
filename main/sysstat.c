@@ -37,8 +37,13 @@ static uint32_t s_sd_written_up; /* uptime at the last SD-counter write */
  * failed final flush. Without the lock, two concurrent adds can lose one of them. */
 static portMUX_TYPE s_sd_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* NVS writes disable the flash cache, so these are paced. */
-#define SD_WRITE_EVERY_SEC 600
+/* Paced because an NVS write takes the flash cache away and suspends every task, which an open
+ * BLE link feels as a stutter. Flash wear is NOT the reason. The IDF docs (nvs_flash.rst) say
+ * wear levelling cuts erases by a factor of 126. With the 80 KB NVS of partitions_8M.csv and
+ * three u32 per write, one write every 60 s wears the flash out in about 160 years at worst,
+ * and unchanged values are not written at all. On the test receiver the counters turned dirty
+ * 13 times in the whole life of the device, so the pacing practically never applies. */
+#define SD_WRITE_EVERY_SEC 60
 
 /* Only unexpected hard resets count as crashes. A clean reboot, a flash and the
  * sysmon auto-recovery (esp_restart -> ESP_RST_SW) deliberately do not. */
@@ -105,13 +110,14 @@ void sysstat_tick(uint32_t uptime_sec)
         write_crash = true;
     }
 
-    /* Track the live max always, persist at most hourly: an NVS write disables
-     * the flash cache and stalls flash/PSRAM code. That makes an open BLE link stutter. */
+    /* Track the live max always, persist at most every ten minutes: an NVS write takes the
+      * flash cache away and stalls flash/PSRAM code, which an open BLE link feels. This one
+      * writes only while a new uptime record is running, so at most once per interval. */
     bool write_max = false;
     if (uptime_sec > s_max_uptime)
     {
         s_max_uptime = uptime_sec;
-        if (s_max_uptime - s_max_uptime_nvs >= 3600)
+        if (s_max_uptime - s_max_uptime_nvs >= 600)
             write_max = true;
     }
 
@@ -198,6 +204,8 @@ uint32_t sysstat_boot_count(void)      { return s_boots; }
 uint32_t sysstat_crash_count(void)     { return s_crashes; }
 uint32_t sysstat_max_uptime_sec(void)  { return s_max_uptime; }
 int64_t  sysstat_last_crash_time(void) { return s_last_crash; }
+/* esp_reset_reason() is cached at boot, so this is a plain read. */
+bool     sysstat_boot_was_crash(void)  { return reason_is_crash(esp_reset_reason()); }
 
 void sysstat_reset(void)
 {

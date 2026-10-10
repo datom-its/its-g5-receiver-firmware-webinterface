@@ -46,6 +46,9 @@ typedef struct {
 } wlan_filter_table_t;
 
 static bool is_running;
+/* Uptime second the running capture started, plus 1, so 0 means stopped. One aligned word:
+ * written under ctl_lock, read lockless by the web server. */
+static uint32_t s_started_sec1;
 /* Serialises sniffer_start()/sniffer_stop(): console REPL and httpd task can
  * both call them, and the bare is_running check isn't atomic across tasks. */
 static SemaphoreHandle_t ctl_lock;
@@ -57,6 +60,8 @@ static uint32_t interf_num;
 static uint32_t channel;
 static uint32_t filter;
 static bool only_capture_broadcast;
+/* The console option -F also queues frames with a reception error. Otherwise they are only counted. */
+static bool capture_broken;
 static TaskHandle_t task;
 static QueueHandle_t work_queue;
 static SemaphoreHandle_t sem_task_over;
@@ -69,6 +74,18 @@ static bool s_paused;
 static portMUX_TYPE s_pause_mux = portMUX_INITIALIZER_UNLOCKED;
 static int64_t s_pause_started_us; /* 0 = no pause in flight */
 static int64_t s_paused_total_us;
+
+/* Reception quality, summed per whole minute of uptime. The Wi-Fi task writes it and the
+ * web server reads it, so both sides take this spinlock. */
+typedef struct {
+    int64_t  minute;
+    int32_t  sum;
+    uint32_t n;
+    int8_t   min, max;
+} nf_window_t;
+static portMUX_TYPE s_rxq_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_rx_broken;
+static nf_window_t s_nf_cur, s_nf_last;
 
 static esp_err_t sniffer_stop();
 
@@ -97,6 +114,48 @@ static void queue_packet(void *recv_packet, sniffer_packet_info_t *packet_info)
     }
 }
 
+static void note_rx_quality(int8_t noise_floor, bool broken)
+{
+    int64_t minute = esp_timer_get_time() / 60000000;
+
+    taskENTER_CRITICAL(&s_rxq_mux);
+    if (broken)
+        s_rx_broken++;
+    if (minute != s_nf_cur.minute) {
+        /* After a minute without frames there is no previous minute to keep. */
+        s_nf_last = (minute == s_nf_cur.minute + 1) ? s_nf_cur : (nf_window_t){ 0 };
+        s_nf_cur = (nf_window_t){ .minute = minute };
+    }
+    if (s_nf_cur.n == 0 || noise_floor < s_nf_cur.min)
+        s_nf_cur.min = noise_floor;
+    if (s_nf_cur.n == 0 || noise_floor > s_nf_cur.max)
+        s_nf_cur.max = noise_floor;
+    s_nf_cur.sum += noise_floor;
+    s_nf_cur.n++;
+    taskEXIT_CRITICAL(&s_rxq_mux);
+}
+
+void sniffer_get_rx_quality(sniffer_rx_quality_t *out)
+{
+    int64_t minute = esp_timer_get_time() / 60000000;
+
+    taskENTER_CRITICAL(&s_rxq_mux);
+    /* The current window is complete once its minute is over. Before that, the one before it
+     * is the last whole minute, and s_nf_last only ever holds that minute or nothing. */
+    const nf_window_t *w = (minute == s_nf_cur.minute + 1) ? &s_nf_cur
+                         : (minute == s_nf_cur.minute)     ? &s_nf_last
+                                                           : NULL;
+    *out = (sniffer_rx_quality_t){ .broken = s_rx_broken };
+    if (w && w->n) {
+        int32_t half = (int32_t)(w->n / 2);
+        out->nf_frames = w->n;
+        out->nf_min = w->min;
+        out->nf_max = w->max;
+        out->nf_avg = (int8_t)((w->sum + (w->sum < 0 ? -half : half)) / (int32_t)w->n);
+    }
+    taskEXIT_CRITICAL(&s_rxq_mux);
+}
+
 static void wifi_sniffer_cb(void *recv_buf, wifi_promiscuous_pkt_type_t type)
 {
     sniffer_packet_info_t packet_info;
@@ -115,15 +174,20 @@ static void wifi_sniffer_cb(void *recv_buf, wifi_promiscuous_pkt_type_t type)
     packet_info.length = packet->rx_ctrl.sig_len - SNIFFER_PAYLOAD_FCS_LEN;
 #endif
 
-    /* Drop MISC frames, and any frame the hardware flagged in rx_state. */
-    if (type != WIFI_PKT_MISC && !packet->rx_ctrl.rx_state) {
-        // Ignore non-broadcast frames when the broadcast-only setting is on
-        if (only_capture_broadcast &&
-                (packet_info.length < (4 + 6) || memcmp(&packet->payload[4], "\xFF\xFF\xFF\xFF\xFF\xFF", 6)))
-            return;
+    bool broken = packet->rx_ctrl.rx_state != 0;
+    note_rx_quality(packet->rx_ctrl.noise_floor, broken);
 
-        queue_packet(packet->payload, &packet_info);
-    }
+    /* MISC frames carry no payload. A frame the hardware flagged in rx_state is only counted,
+     * unless the console asked for such frames. */
+    if (type == WIFI_PKT_MISC || (broken && !capture_broken))
+        return;
+
+    // Ignore non-broadcast frames when the broadcast-only setting is on
+    if (only_capture_broadcast &&
+            (packet_info.length < (4 + 6) || memcmp(&packet->payload[4], "\xFF\xFF\xFF\xFF\xFF\xFF", 6)))
+        return;
+
+    queue_packet(packet->payload, &packet_info);
 }
 
 static esp_err_t eth_sniffer_cb(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv)
@@ -261,6 +325,7 @@ static esp_err_t sniffer_stop()
 
     /* stop sniffer local task */
     is_running = false;
+    s_started_sec1 = 0;
     /* wait for task over */
     xSemaphoreTake(sem_task_over, portMAX_DELAY);
 
@@ -320,6 +385,7 @@ static esp_err_t sniffer_start()
     pause_clear();
 
     is_running = true;
+    s_started_sec1 = (uint32_t)(esp_timer_get_time() / 1000000) + 1;
     ESP_GOTO_ON_FALSE(xTaskCreate(sniffer_task, "snifferT", CONFIG_SNIFFER_TASK_STACK_SIZE,
                                   NULL, CONFIG_SNIFFER_TASK_PRIORITY, &task), ESP_FAIL,
                       err_task, TAG, "create task failed");
@@ -360,10 +426,12 @@ static esp_err_t sniffer_start()
 err_start:
     // task was already started, need to shut it down gracefully
     is_running = false;
+    s_started_sec1 = 0;
     xSemaphoreTake(sem_task_over, portMAX_DELAY);
     task = NULL;
 err_task:
     is_running = false;
+    s_started_sec1 = 0;
     if (write_pcap)
         sniff_packet_stop();
 err:
@@ -526,8 +594,7 @@ static int do_sniffer_cmd(int argc, char **argv)
     switch (interf) {
     case SNIFFER_INTF_WLAN:
             filter = WIFI_PROMIS_FILTER_MASK_ALL;
-            if (!sniffer_args.fcsfail->count)
-                filter &= ~WIFI_PROMIS_FILTER_MASK_FCSFAIL;
+            capture_broken = sniffer_args.fcsfail->count > 0;
         break;
     case SNIFFER_INTF_ETH:
         if (sniffer_args.fcsfail->count) {
@@ -617,7 +684,9 @@ void sniffer_autostart(void)
     {
         interf = SNIFFER_INTF_WLAN;
         channel = conf_channel;
-        filter = WIFI_PROMIS_FILTER_MASK_ALL & ~WIFI_PROMIS_FILTER_MASK_FCSFAIL;
+        /* Frames that failed the FCS are delivered so they can be counted. The callback drops them. */
+        filter = WIFI_PROMIS_FILTER_MASK_ALL;
+        capture_broken = false;
         only_capture_broadcast = broadcast_only;
         sniffer_start();
     }
@@ -634,4 +703,9 @@ uint32_t sniffer_get_channel(void)
 bool sniffer_is_running(void)
 {
     return is_running;
+}
+
+uint32_t sniffer_started_sec1(void)
+{
+    return s_started_sec1;
 }

@@ -280,6 +280,10 @@ static void flush_stream(stream_t *s)
             break;  /* write error: this chunk is lost, but the ring keeps the rest */
         }
     }
+    /* picolibc's fclose hides a failed last write-out. With a quiet log that write-out is the
+     * only one, and sdcard_note_write must see its result. */
+    if (ok && (fflush(f) != 0 || ferror(f)))
+        ok = false;
     if (fclose(f) != 0)
         ok = false;
     sdcard_note_write(ok);

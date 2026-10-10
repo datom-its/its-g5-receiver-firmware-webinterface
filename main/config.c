@@ -18,6 +18,7 @@
 #include "events.h"
 
 #include "config.h"
+#include "settings_apply.h"
 
 static const char TAG[] = "CONFIG";
 
@@ -76,6 +77,7 @@ static esp_err_t config_get_tracks_enable(uint8_t *out);
 static esp_err_t config_get_tracks_days(uint32_t *out);
 static esp_err_t config_get_eth_leds(uint8_t *out);
 static esp_err_t config_get_bt_enable(uint8_t *out);
+static esp_err_t config_get_timezone(uint8_t *out);
 static esp_err_t config_set_web_password(const char *value);
 
 static const config_key_t config_keys[] = {
@@ -112,6 +114,7 @@ static const config_key_t config_keys[] = {
     [CONFIG_INDEX_TRACKS_DAYS]        = { "trkdays",       NVS_TYPE_U32, 0,                           config_get_tracks_days,        NULL },
     [CONFIG_INDEX_ETH_LEDS]           = { "ethleds",       NVS_TYPE_U8,  0,                           config_get_eth_leds,           NULL },
     [CONFIG_INDEX_BT_ENABLE]          = { "bten",          NVS_TYPE_U8,  0,                           config_get_bt_enable,          NULL },
+    [CONFIG_INDEX_TIMEZONE]           = { "tz",            NVS_TYPE_U8,  0,                           config_get_timezone,           NULL },
 };
 #define CONFIG_KEYS_END (&config_keys[sizeof(config_keys)/sizeof(*config_keys)])
 
@@ -405,6 +408,22 @@ static esp_err_t config_get_bt_enable(uint8_t *out_val)
         out = 0;
     }
     *out_val = out ? 1 : 0;
+    return ESP_OK;
+}
+
+/* Central Europe (2) when unset or out of range: every device had that zone before the
+ * setting existed, so an update changes no time and no PCAP file name. */
+static esp_err_t config_get_timezone(uint8_t *out_val)
+{
+    uint8_t out;
+    esp_err_t res = nvs_get_u8(handle, "tz", &out);
+    if (res != ESP_OK || out > 4)
+    {
+        if (res != ESP_OK && res != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGE(TAG, "nvs_get_u8 failed: %s", esp_err_to_name(res));
+        out = 2;
+    }
+    *out_val = out;
     return ESP_OK;
 }
 
@@ -1155,6 +1174,14 @@ static int cmd_config_set(int argc, char **argv)
         if (strlen(value_str) >= key->buffer_size)
         {
             ESP_LOGE(TAG, "Value too long");
+            return 1;
+        }
+        /* The same check as on the settings page. One broken byte makes every JSON answer and
+         * the web app file that contain the value unreadable. Values reach this point from the
+         * console and over MQTT, not only from the form. */
+        if (!set_is_utf8(value_str))
+        {
+            ESP_LOGE(TAG, "Value is not valid UTF-8");
             return 1;
         }
 

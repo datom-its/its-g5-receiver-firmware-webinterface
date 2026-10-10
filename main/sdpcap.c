@@ -26,6 +26,7 @@
 #include "config.h"
 #include "events.h"
 #include "its_decode.h"
+#include "its_msgsig.h"
 #include "sdcard.h"
 
 static const char TAG[] = "SDPCAP";
@@ -48,6 +49,12 @@ static const char TAG[] = "SDPCAP";
 
 #define PCAP_FLUSH_SEC_MIN 8
 #define PCAP_FLUSH_SEC_MAX 3600
+
+/* Seconds into the hour. The old hour's flush waits for :00:20 (never past the flush setting)
+ * and the retention sweep for :00:40, so neither starts together with the hour row of
+ * traffic.csv. */
+#define PCAP_HOUR_FLUSH_S  20
+#define PCAP_HOUR_PRUNE_S  40
 
 #define PCAP_MAX_FRAME 2048  /* generous max realistic 802.11 frame size */
 
@@ -262,6 +269,8 @@ static bool pcap_keep_frame(const uint8_t *frame, size_t len, uint32_t sec)
  * sequential caller, sharing it is safe. */
 void sdpcap_handle_packet(sniffer_packet_info_t *packet)
 {
+    /* Read for every frame, so the mark never passes to the next one. */
+    bool sampled = its_msgsig_take_keep();
     if (!s_ready || !cfg_enabled || !packet)
         return;
     if (packet->length > PCAP_MAX_FRAME)
@@ -271,8 +280,9 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet)
     }
 
     /* Timestamp comes from the sniffer callback: this runs after the queue, so
-     * asking the clock here would stamp the dequeue, not the reception. */
-    if (!pcap_keep_frame(packet->payload, packet->length, packet->seconds))
+     * asking the clock here would stamp the dequeue, not the reception. A frame whose
+     * signature its_msgsig.c checks stays unthinned, so a mismatch can be looked at later. */
+    if (!sampled && !pcap_keep_frame(packet->payload, packet->length, packet->seconds))
     {
         s_filtered++;
         return;
@@ -300,8 +310,10 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet)
 /*  Writer task                                                       */
 /* ================================================================== */
 
-/* Local-time name so a human can find "the file from around 5pm". Do NOT switch
- * to UTC: it would orphan every file already on the card (DST clash accepted). */
+/* Named in local time, in the zone of the setting, so a human finds "the file from around 5pm".
+ * After a zone change, new names follow it from the next flush on, and older files keep theirs.
+ * Do NOT switch to UTC: it would orphan every file already on the card. The hour that repeats
+ * when daylight saving time ends shares one name, which is accepted. */
 static void sdpcap_current_path(char *out, size_t out_size, time_t now)
 {
     time_t bucket = now - (now % 3600);
@@ -686,6 +698,21 @@ static void sdpcap_prune(void)
     }
 }
 
+/* The old hour's bytes wait in the ring until second PCAP_HOUR_FLUSH_S of the new hour, unless
+ * the ring is nearly full or the setting "write at least every" falls due first. The wait loses
+ * nothing, because the old hour's file gets the same bytes, only later. */
+static bool pcap_hour_wait(time_t now, size_t used, size_t threshold, bool due)
+{
+    return now % 3600 < PCAP_HOUR_FLUSH_S && used < threshold && !due;
+}
+
+/* The retention sweep deletes the hour that the new cutoff gives up. It runs after the old
+ * hour's flush. */
+static bool pcap_prune_slot(time_t now)
+{
+    return now % 3600 >= PCAP_HOUR_PRUNE_S;
+}
+
 static void sdpcap_task(void *arg)
 {
     (void)arg;
@@ -742,7 +769,6 @@ static void sdpcap_task(void *arg)
              * and never overwrites. */
             s_stale_left = ring_used(&s_ring);
             stale_tries = 0;
-            since_flush_ms = 0;
         }
         /* Clamp BEFORE the test: flush_now drains the same ring, so the debt can
          * outlive its bytes. flush_to_file takes limit 0 as UNLIMITED. */
@@ -751,8 +777,13 @@ static void sdpcap_task(void *arg)
             if (s_stale_left > have)
                 s_stale_left = have;
         }
-        if (s_stale_left > 0)
+        size_t buf_threshold = s_ring.size - (s_ring.size / 8);  /* flush a bit before completely full, not exactly at the edge */
+        /* since_flush_ms counts from the last write, so the wait never outlasts the setting. */
+        bool stale_due = since_flush_ms + TASK_POLL_MS >= cfg_flush_sec * 1000UL;
+        if (s_stale_left > 0 && !pcap_hour_wait(now, ring_used(&s_ring), buf_threshold, stale_due))
         {
+            /* The next timed write counts from this one. */
+            since_flush_ms = 0;
             char old_path[96];
             sdpcap_current_path(old_path, sizeof(old_path), s_ring_bucket);
             size_t put = 0;
@@ -783,7 +814,6 @@ static void sdpcap_task(void *arg)
 
         since_flush_ms += TASK_POLL_MS;
 
-        size_t buf_threshold = s_ring.size - (s_ring.size / 8);  /* flush a bit before completely full, not exactly at the edge */
         bool due_to_size = ring_used(&s_ring) >= buf_threshold;
         bool due_to_time = since_flush_ms >= cfg_flush_sec * 1000UL;
 
@@ -810,7 +840,8 @@ static void sdpcap_task(void *arg)
         prune_elapsed_ms += TASK_POLL_MS;
         /* Same reader interlock as tracklog/stats: an unlink mid-stream truncates
          * a /sdcard download. Does NOT cover sdpcap_walk (writer lock instead). */
-        if (prune_elapsed_ms >= PRUNE_INTERVAL_MS && sdcard_read_active() == 0)
+        if (prune_elapsed_ms >= PRUNE_INTERVAL_MS && sdcard_read_active() == 0 &&
+            pcap_prune_slot(now))
         {
             prune_elapsed_ms = 0;
             /* A full-window sweep can run for minutes, and the stall watchdog

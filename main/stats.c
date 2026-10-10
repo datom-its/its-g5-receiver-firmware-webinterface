@@ -17,6 +17,8 @@
 #include "esp_attr.h"
 
 #include "config.h"
+#include "sd_csv.h"
+#include "sd_rcache.h"
 #include "sdcard.h"
 
 static const char TAG[] = "STATS";
@@ -31,6 +33,8 @@ static stat_hour_t s_pending;
 static bool s_have_pending;
 static SemaphoreHandle_t s_lock;
 static uint32_t s_flushes;   /* hours written to SD, for prune cadence */
+/* The last append failed and said so: one warning per streak of failures. */
+static bool s_write_warned;
 
 /* Sender ids seen this hour: open addressing, linear probe, emptied on the hour
  * roll. Past 3/4 full it stops inserting and the hour is marked a lower bound. */
@@ -143,19 +147,45 @@ void tstat_note(uint8_t station_type, uint32_t station_id, uint8_t message_id,
 #define STATS_NF_RULE (STATS_NF_NEW + 1)
 #define STATS_SPEED_RULE 1u   /* 1 = standing vehicles in, "unavailable" out */
 
-static void write_row(FILE *f, const stat_hour_t *h)
+/* One row in one buffer, so it goes out with one write-out check: 37 counts of at most 10 digits,
+ * two flags, 38 commas and '\n' are 411 B of 448. False when it does not fit. */
+static bool format_row(char *b, size_t cap, const stat_hour_t *h)
 {
-    fprintf(f, "%lu,%lu", (unsigned long)h->hour, (unsigned long)h->total);
-    for (int c = 0; c < STAT_NCAT; c++) fprintf(f, ",%lu", (unsigned long)h->cat[c]);
-    for (int c = 0; c < STAT_NCAT; c++) fprintf(f, ",%lu", (unsigned long)h->sp_sum[c]);
-    for (int c = 0; c < STAT_NCAT; c++) fprintf(f, ",%lu", (unsigned long)h->sp_cnt[c]);
-    for (int c = 0; c < STAT_NCAT; c++) fprintf(f, ",%lu", (unsigned long)h->sp_max[c]);
-    for (int c = 0; c < STAT_NCAT; c++) fprintf(f, ",%lu", (unsigned long)h->senders[c]);
-    fprintf(f, ",%u,%u\n", h->senders_capped ? 1u : 0u, STATS_SPEED_RULE);
+    const uint32_t *col[] = { h->cat, h->sp_sum, h->sp_cnt, h->sp_max, h->senders };
+    int n = snprintf(b, cap, "%lu,%lu", (unsigned long)h->hour, (unsigned long)h->total);
+    size_t at = n < 0 ? cap : (size_t)n;
+    for (size_t k = 0; k < sizeof(col) / sizeof(col[0]); k++)
+        for (int c = 0; c < STAT_NCAT && at < cap; c++)
+        {
+            n = snprintf(b + at, cap - at, ",%lu", (unsigned long)col[k][c]);
+            at = n < 0 ? cap : at + (size_t)n;
+        }
+    if (at < cap)
+    {
+        n = snprintf(b + at, cap - at, ",%u,%u\n", h->senders_capped ? 1u : 0u, STATS_SPEED_RULE);
+        at = n < 0 ? cap : at + (size_t)n;
+    }
+    return at < cap;
 }
 
 /* Prunes by streaming to a temp file and swapping it in. */
 #define STATS_TMP   STATS_DIR "/traffic.tmp"
+
+/* The append's row, the tail mend's look-back and the prune's line: 448 holds the widest row whole
+ * (411 B with '\n'), recount for a new column. SD lock only: both tstat_tick callers hold it. */
+static EXT_RAM_BSS_ATTR char s_row[448];
+
+/* The rows of traffic.csv from s_rc_from on and tstat_read's place in the file: a refresh of
+ * /traffic reads only what was added. httpd task only, like its arrays in web_traffic.c. */
+#define TSTAT_RC 64
+static EXT_RAM_BSS_ATTR stat_hour_t s_rc_rows[TSTAT_RC];
+static int s_rc_n;
+static uint32_t s_rc_from;
+static EXT_RAM_BSS_ATTR sdrc_t s_rc;
+/* Counts prunes and failed writes. The cache's anchor cannot see a prune that keeps the bytes
+ * before the reader's place. Bumped after the rewrite, so a read that overlapped it never keeps
+ * its place. */
+static volatile uint32_t s_rgen;
 
 static void prune(uint32_t keep_from_hour)
 {
@@ -169,28 +199,41 @@ static void prune(uint32_t keep_from_hour)
         return;
     }
 
-    /* Must hold the longest possible row whole. A short buffer splits a line and
-     * both halves mis-parse. Recount when columns are added. */
-    char line[448];
-    bool ok = true;
-    while (fgets(line, sizeof(line), f))
+    /* Whole rows only. picolibc's fgets hands back the part before a read error. */
+    bool ok = true, rest = false, whole;
+    while (sdcsv_gets(s_row, sizeof(s_row), f, &rest, &whole))
     {
-        unsigned long h = strtoul(line, NULL, 10);
+        if (ferror(f)) { ok = false; break; }
+        if (!whole)
+            continue;
+        unsigned long h = strtoul(s_row, NULL, 10);
         if (h < keep_from_hour)
             continue;
-        if (fputs(line, w) == EOF) { ok = false; break; }
+        if (fputs(s_row, w) == EOF) { ok = false; break; }
     }
+    /* A read error ends fgets like EOF would, and the swap would delete every row after it. */
+    if (ferror(f))
+        ok = false;
     fclose(f);
+    /* picolibc's fclose hides a failed flush: without this a cut traffic.tmp would replace
+     * traffic.csv. */
+    if (ok && (fflush(w) != 0 || ferror(w)))
+        ok = false;
     if (fclose(w) != 0)
         ok = false;
 
-    if (ok)
-    {
-        remove(STATS_CSV);
-        rename(STATS_TMP, STATS_CSV);
-    }
-    else
+    if (!ok)
         remove(STATS_TMP);
+    /* FatFs does not rename onto an existing file, so traffic.csv goes first. If that remove
+     * fails, traffic.csv still has every row. */
+    else if (remove(STATS_CSV) != 0)
+    {
+        ESP_LOGW(TAG, "cannot remove %s, the next prune tries again", STATS_CSV);
+        remove(STATS_TMP);
+    }
+    /* traffic.csv is gone: tstat_tick renames traffic.tmp back before the next append. */
+    else if (rename(STATS_TMP, STATS_CSV) != 0)
+        ESP_LOGW(TAG, "cannot rename %s, the next write tries again", STATS_TMP);
 }
 
 void tstat_tick(void)
@@ -224,29 +267,47 @@ void tstat_tick(void)
     mkdir(STATS_DIR, 0777);
     /* A reset between prune()'s remove() and rename() leaves the whole history in
      * the temp file. Put it back BEFORE appending, or an empty csv wins. */
+    sdcsv_rc_t rc = sdcsv_recover_tmp(STATS_CSV, STATS_TMP);
+    const char *fail = rc == SDCSV_FAIL ? "tmp rename" : "open";
     struct stat st;
-    if (stat(STATS_CSV, &st) != 0 && stat(STATS_TMP, &st) == 0)
-        rename(STATS_TMP, STATS_CSV);
-    /* csv is live, so any tmp is a dead prune's leftover: left there, the restore
-     * above would later promote it over a csv the user deleted. */
-    else if (stat(STATS_TMP, &st) == 0)
+    /* csv is live, so any tmp is a dead prune's leftover: left there, a later recovery would
+     * promote it over a csv the user deleted. Not under a download (FS_LOCK=0). */
+    if (rc == SDCSV_OK && stat(STATS_CSV, &st) == 0 && sdcard_read_active() == 0 &&
+        stat(STATS_TMP, &st) == 0)
         remove(STATS_TMP);
-    FILE *f = fopen(STATS_CSV, "a");
-    if (!f)
+    FILE *f = rc == SDCSV_OK ? fopen(STATS_CSV, "a+") : NULL;
+    /* A row cut by a failed write goes first, or the retry would glue onto it. */
+    if (rc == SDCSV_OK)
+        rc = f ? sdcsv_mend_tail(f, s_row, sizeof(s_row)) : SDCSV_FAIL;
+    if (f && rc != SDCSV_OK)
+        fail = "mend";
+    /* After the mend, which used s_row as its look-back. The widest row fits; one that does not
+     * (a new column, no recount) never will, so its hour is dropped with an error, not kept. */
+    bool fits = format_row(s_row, sizeof(s_row), &row);
+    if (rc == SDCSV_OK && fits && !sdcsv_put(f, s_row))
     {
-        ESP_LOGW(TAG, "cannot open %s", STATS_CSV);
-        sdcard_io_end();
-        return;
+        rc = SDCSV_FAIL;
+        fail = "write";
     }
-    write_row(f, &row);
-    bool ok = (fflush(f) == 0 && !ferror(f));
-    if (fclose(f) != 0)
-        ok = false;
-    if (!ok)
+    /* The commit point: FatFs may not have the row without it. */
+    if (f && fclose(f) != 0)
     {
-        /* An hour of counts is worth a retry. Dropping the flag here would lose it
-         * silently on a full card. */
-        ESP_LOGW(TAG, "stats row not written, keeping it pending");
+        if (rc != SDCSV_FAIL)
+            fail = "close";
+        rc = SDCSV_FAIL;
+    }
+    if (rc == SDCSV_OK && !fits)
+        ESP_LOGE(TAG, "traffic row wider than %u B, the hour is lost", (unsigned)sizeof(s_row));
+    /* An hour of counts is worth a retry: it stays pending. Waiting for a download is no
+     * failure and ends no streak. A failed write starts the reader at 0 (as in priolog.c). */
+    if (rc == SDCSV_FAIL)
+        s_rgen++;
+    if (rc == SDCSV_FAIL && !s_write_warned)
+        ESP_LOGW(TAG, "%s: %s failed, the hour stays pending", STATS_CSV, fail);
+    if (rc != SDCSV_WAIT)
+        s_write_warned = rc == SDCSV_FAIL;
+    if (rc != SDCSV_OK)
+    {
         sdcard_io_end();
         return;
     }
@@ -271,7 +332,10 @@ void tstat_tick(void)
         /* prune() unlinks and recreates traffic.csv, which a streaming download
          * may hold open. Skipped then; the cadence counter is not consumed. */
         if (sdcard_read_active() == 0)
+        {
             prune(row.hour - days * 24);
+            s_rgen++;
+        }
         else
             s_flushes--;
     }
@@ -319,13 +383,86 @@ static void stat_hour_merge(stat_hour_t *dst, const stat_hour_t *src)
         dst->sp_cnt[c] += src->sp_cnt[c];
         if (src->sp_max[c] > dst->sp_max[c]) dst->sp_max[c] = src->sp_max[c];
         /* Distinct senders cannot be summed, because the same vehicle may appear
-         * in both halves. The larger half is the honest lower bound. */
+         * in both halves. The larger half is the safe lower bound. */
         if (src->senders[c] > dst->senders[c]) dst->senders[c] = src->senders[c];
     }
     /* Merging only happens for two parts of the SAME hour. A restart between the
      * parts loses s_seen[], so the merged sender count is only a lower bound. */
     dst->senders_capped = true;
     dst->speed_legacy   = dst->speed_legacy   || src->speed_legacy;
+}
+
+/* What tstat_note can write. A row cut and glued to the next breaks it: a receiver's traffic.csv
+ * keeps 291 of 291 rows and 0 of its 22317 glued variants. The hour must fit a 32-bit clock. */
+static bool row_plausible(const uint32_t *v, int got)
+{
+    const uint32_t *cat = v + 2, *sum = cat + STAT_NCAT, *cnt = sum + STAT_NCAT,
+                   *max = cnt + STAT_NCAT;
+    uint64_t total = 0;
+    if (v[0] > UINT32_MAX / 3600u)
+        return false;
+    for (int c = 0; c < STAT_NCAT; c++)
+    {
+        /* Each frame counts in total and in its category. Speeds stay under 400 km/h. */
+        total += cat[c];
+        if (cnt[c] > cat[c] || max[c] > 399 || (uint64_t)sum[c] > 399ull * cnt[c])
+            return false;
+    }
+    return total == v[1] && (got < STATS_NF_NEW || v[STATS_NF_NEW - 1] <= 1);
+}
+
+/* One row of traffic.csv as stat_hour_t; false for anything tstat_tick cannot have written. */
+static bool tstat_parse(const char *line, stat_hour_t *h)
+{
+    uint32_t v[STATS_NF_RULE] = {0};
+    const char *p = line;
+    int got = 0;
+    bool wide = false;
+    for (; got < STATS_NF_RULE; got++)
+    {
+        char *end;
+        /* 64 bits on host and device alike: a glued field over 32 bits is no count. */
+        unsigned long long x = strtoull(p, &end, 10);
+        if (end == p) break;
+        if (x > UINT32_MAX || end - p > 10) wide = true;
+        v[got] = (uint32_t)x;
+        p = end;
+        if (*p == ',') p++;
+    }
+    /* Rows written before the sender columns existed stay valid. Their missing fields read as
+     * zero. */
+    if (wide || *p != '\n' || !row_plausible(v, got) || got < STATS_NF_OLD)
+        return false;
+    memset(h, 0, sizeof(*h));
+    h->hour = v[0]; h->total = v[1];
+    int idx = 2;
+    for (int c = 0; c < STAT_NCAT; c++) h->cat[c]    = v[idx++];
+    for (int c = 0; c < STAT_NCAT; c++) h->sp_sum[c] = v[idx++];
+    for (int c = 0; c < STAT_NCAT; c++) h->sp_cnt[c] = v[idx++];
+    for (int c = 0; c < STAT_NCAT; c++) h->sp_max[c] = v[idx++];
+    if (got >= STATS_NF_NEW - 1)
+        for (int c = 0; c < STAT_NCAT; c++) h->senders[c] = v[idx++];
+    if (got >= STATS_NF_NEW)
+        h->senders_capped = v[idx++] != 0;
+    /* No marker, or one from a rule we do not know: treat the speed columns as following some
+     * other definition. */
+    h->speed_legacy = (got < STATS_NF_RULE || v[idx] != STATS_SPEED_RULE);
+    return true;
+}
+
+/* One hour into out[], oldest first. A restart splits one hour into two rows: they fold, so the
+ * chart shows one hour, not two short ones. A full array lets its oldest row go. */
+static void tstat_put(stat_hour_t *out, int *count, int max, const stat_hour_t *h)
+{
+    if (*count > 0 && out[*count - 1].hour == h->hour)
+        stat_hour_merge(&out[*count - 1], h);
+    else if (*count < max)
+        out[(*count)++] = *h;
+    else
+    {
+        memmove(out, out + 1, (max - 1) * sizeof(*out));
+        out[max - 1] = *h;
+    }
 }
 
 int tstat_read(uint32_t hours, stat_hour_t *out, int max, bool *history_ok)
@@ -351,86 +488,77 @@ int tstat_read(uint32_t hours, stat_hour_t *out, int max, bool *history_ok)
      * card (an unmount or format pending) is worth warning about. */
     if (!locked && history_ok && sdcard_is_mounted())
         *history_ok = false;
-    FILE *f = locked ? fopen(STATS_CSV, "r") : NULL;
-    /* A reset between prune()'s remove() and rename() leaves the complete history
-     * in the temp file. Read it rather than show nothing. */
-    if (locked && !f)
-        f = fopen(STATS_TMP, "r");
-    /* Both opens failed on a mounted card: the stored window is silently missing,
-     * so warn. ENOENT is not a failure; errno here is the TMP open's. */
-    if (locked && !f && errno != ENOENT && history_ok)
-        *history_ok = false;
-    if (f)
+    /* Two passes at most: a tail that overflows the cache reads the file again from the start. */
+    for (int pass = 0; locked && pass < 2; pass++)
     {
-        char line[448];
-        while (fgets(line, sizeof(line), f))
+        /* The cache keeps the rows from s_rc_from on: a wider window reads from the start. */
+        FILE *f = sdrc_open(&s_rc, STATS_CSV, s_rgen, pass == 0 && from_hour >= s_rc_from);
+        bool cached = f != NULL, tail = cached && s_rc.tail;
+        /* A reset between prune()'s remove() and rename() leaves the complete history
+         * in the temp file. Only a missing csv is that case. */
+        if (!f && errno == ENOENT)
+            f = fopen(STATS_TMP, "r");
+        /* Any other failed open on a mounted card: the stored window is missing, so warn. */
+        if (!f && errno != ENOENT && history_ok)
+            *history_ok = false;
+        if (!f)
+            break;
+        /* Rows before the window never show again: the cache starts at from_hour now. */
+        int k = 0;
+        for (int i = 0; tail && i < s_rc_n; i++)
+            if (s_rc_rows[i].hour >= from_hour)
+                s_rc_rows[k++] = s_rc_rows[i];
+        if (cached)
         {
-            unsigned long v[STATS_NF_RULE] = {0};
-            const char *p = line;
-            int got = 0;
-            for (; got < STATS_NF_RULE; got++)
-            {
-                char *end;
-                v[got] = strtoul(p, &end, 10);
-                if (end == p) break;
-                p = end;
-                if (*p == ',') p++;
-            }
-            /* Rows written before the sender columns existed stay valid. Their
-             * missing fields read as zero. */
-            if (got >= STATS_NF_OLD && (uint32_t)v[0] >= from_hour)
-            {
-                stat_hour_t h = {0};
-                h.hour = v[0]; h.total = v[1];
-                int idx = 2;
-                for (int c = 0; c < STAT_NCAT; c++) h.cat[c]    = v[idx++];
-                for (int c = 0; c < STAT_NCAT; c++) h.sp_sum[c] = v[idx++];
-                for (int c = 0; c < STAT_NCAT; c++) h.sp_cnt[c] = v[idx++];
-                for (int c = 0; c < STAT_NCAT; c++) h.sp_max[c] = v[idx++];
-                if (got >= STATS_NF_NEW - 1)
-                    for (int c = 0; c < STAT_NCAT; c++) h.senders[c] = v[idx++];
-                if (got >= STATS_NF_NEW)
-                    h.senders_capped = v[idx++] != 0;
-                /* No marker, or one from a rule we do not know: treat the
-                 * speed columns as following some other definition. */
-                h.speed_legacy = (got < STATS_NF_RULE || v[idx] != STATS_SPEED_RULE);
-                /* A restart splits one hour into two rows. Merge them so the
-                 * chart shows one hour, not two short ones. */
-                if (count > 0 && out[count - 1].hour == h.hour)
-                    stat_hour_merge(&out[count - 1], &h);
-                else if (count < max)
-                    out[count++] = h;
-                else
-                {
-                    memmove(out, out + 1, (max - 1) * sizeof(*out));
-                    out[max - 1] = h;
-                }
-            }
+            s_rc_n = k;
+            s_rc_from = from_hour;
         }
+        bool fits = true;
+        /* Not s_row: this holds the reader guard, not the SD lock. */
+        char line[448];
+        bool rest = false, whole;
+        while (sdcsv_gets(line, sizeof(line), f, &rest, &whole))
+        {
+            /* picolibc's fgets hands back the part before a read error: not a row. */
+            if (ferror(f))
+                break;
+            if (cached)
+                sdrc_piece(&s_rc, f, line, sizeof(line));
+            stat_hour_t h;
+            if (!whole || !tstat_parse(line, &h) || h.hour < from_hour)
+                continue;
+            /* A read from the start fills out[] as it goes, a tail from the cache below. */
+            if (!tail)
+                tstat_put(out, &count, max, &h);
+            if (cached && s_rc_n < TSTAT_RC)
+                s_rc_rows[s_rc_n++] = h;
+            else if (cached)
+                fits = false;
+        }
+        bool err = ferror(f);
+        if (cached)
+            sdrc_done(&s_rc, f, !err && fits);
         fclose(f);
+        if (tail && !fits)
+            continue;
+        /* A read error ends fgets like EOF would: the hours after it are missing. */
+        if (err && history_ok)
+            *history_ok = false;
+        for (int i = 0; tail && i < s_rc_n; i++)
+            tstat_put(out, &count, max, &s_rc_rows[i]);
+        break;
     }
     if (locked)
         sdcard_read_end();
 
-    /* Append the in-RAM current hour as the newest row. */
+    /* Append the in-RAM current hour as the newest row, through the SAME merge as the stored
+     * rows: after a planned restart the CSV already holds a row for this very hour. */
     if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         stat_hour_t cur = s_current;
         xSemaphoreGive(s_lock);
         if (cur.hour >= from_hour && cur.total > 0)
-        {
-            /* Through the SAME merge as the stored rows: after a planned
-             * restart the CSV already holds a row for this very hour. */
-            if (count > 0 && out[count - 1].hour == cur.hour)
-                stat_hour_merge(&out[count - 1], &cur);
-            else if (count < max)
-                out[count++] = cur;
-            else
-            {
-                memmove(out, out + 1, (max - 1) * sizeof(*out));
-                out[max - 1] = cur;
-            }
-        }
+            tstat_put(out, &count, max, &cur);
     }
     return count;
 }

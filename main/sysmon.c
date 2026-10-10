@@ -22,6 +22,9 @@
 #include "tracklog.h"
 #include "inventory.h"
 #include "ptlog.h"
+#include "priolog.h"
+#include "spatlog.h"
+#include "infolog.h"
 #if CONFIG_ENABLE_SD
 #include "sdcard.h"
 #include "sdlog.h"
@@ -29,6 +32,15 @@
 #endif
 
 static const char TAG[] = "SYSMON";
+
+/* Written by the sysmon task. The web server reads it without a lock, which is safe for one
+ * aligned word. */
+static volatile int s_sd_probe_errno;
+
+int sysmon_sd_probe_errno(void)
+{
+    return s_sd_probe_errno;
+}
 
 size_t sysmon_flush_persistent(void)
 {
@@ -40,13 +52,18 @@ size_t sysmon_flush_persistent(void)
     bool pcap_ok1 = true, pcap_ok2 = true;
     size_t pcap_bytes = sdpcap_flush_now(&pcap_ok1);
     pcap_bytes += sdpcap_flush_now(&pcap_ok2);
-    tracklog_tick();      /* both drain their queue to the card and return */
-    events_tick();
+    tracklog_tick();      /* drains its queue to the card and returns */
+    /* The running warnings too: RAM would lose them with the restart. */
+    events_flush_now();
     /* These three keep state in RAM between their periodic writes. Without this flush,
      * a planned restart loses the running hour, open passages and unsaved sender data. */
     tstat_flush_now();
     ptlog_flush_now();
     inventory_flush_now();
+    /* Up to 5 s of request and phase rows wait in RAM, and a delete from /traffic may still
+     * wait for the card. */
+    priolog_tick();
+    spatlog_tick();
     /* Test both `ok` flags. While the ring still holds bytes of the previous hour,
      * a failed first call is NOT made good by a successful second one. */
     if (!pcap_ok1 || !pcap_ok2)
@@ -88,11 +105,7 @@ size_t sysmon_flush_persistent(void)
  * acquisitions in a row, is a wedge. The other SD users only fail silently. */
 #define SYSMON_SD_HELD_MS    60000
 #define SYSMON_SD_FAILS      40
-/* (8) A card is taken out after a minute with at least this many failed writes
- * and none that landed. A healthy card fails a write only now and then. A
- * wedged card fails every one. */
-#define SYSMON_SD_DEAD_MS    60000
-#define SYSMON_SD_DEAD_MIN   3
+/* (8) SYSMON_SD_DEAD_MS and SYSMON_SD_DEAD_MIN are in sysmon.h, shared with the fault bar. */
 
 #define MS_TO_TICKS_COUNT(ms) ((ms) / SYSMON_INTERVAL_MS)
 
@@ -146,6 +159,9 @@ static void sysmon_task(void *arg)
         /* Sender inventory: load once the card is up, then persist it. */
         inventory_tick();
         ptlog_tick();
+        priolog_tick();
+        spatlog_tick();
+        infolog_tick();
 
         /* (4) Sniffer pipeline liveness. */
         if (sniffer_is_running())
@@ -222,6 +238,7 @@ static void sysmon_task(void *arg)
             {
                 sd_dead_wait = 0;
                 sd_alive_warned = false;
+                s_sd_probe_errno = 0;
             }
             else if (sd_dead_wait++ % (int)MS_TO_TICKS_COUNT(SYSMON_SD_RETRY_MS) == 0)
             {
@@ -229,6 +246,13 @@ static void sysmon_task(void *arg)
                 int probe_err = 0;
                 esp_err_t e = sdcard_take_out_if_dead(SYSMON_SD_DEAD_MS, SYSMON_SD_DEAD_MIN,
                                                       &gave_up, &probe_err);
+                /* Lets the fault bar tell a full card (ENOSPC) from a refusing one. During the
+                 * probe back-off (up to 30 min) the answer is NOT_FINISHED without an errno, so
+                 * the last errno stays. */
+                if (e == ESP_ERR_NO_MEM)
+                    s_sd_probe_errno = probe_err;
+                else if (e == ESP_OK)
+                    s_sd_probe_errno = 0;
                 if (e == ESP_OK)
                 {
                     ESP_LOGE(TAG, "SD: no write landed for %lu s (%lu failed), card taken out",
@@ -279,6 +303,24 @@ static void sysmon_task(void *arg)
  * the management interface has an IP (mDNS needs the netif up). */
 static bool mdns_started;
 
+size_t sysmon_mdns_hostname(const char *nodeid, char *out, size_t cap)
+{
+    if (cap == 0)
+        return 0;
+    /* mDNS host labels allow only [a-z0-9-], so sanitise whatever the node id is. */
+    size_t h = 0;
+    for (const char *p = "its-"; *p && h < cap - 1; p++)
+        out[h++] = *p;
+    for (size_t i = 0; nodeid[i] && h < cap - 1; i++)
+    {
+        char c = nodeid[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[h++] = ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ? c : '-';
+    }
+    out[h] = '\0';
+    return h;
+}
+
 static void start_mdns(void)
 {
     if (mdns_started)
@@ -289,16 +331,8 @@ static void start_mdns(void)
     if (config_get_str(CONFIG_INDEX_NODEID, nodeid, &size) != ESP_OK)
         return;
 
-    /* mDNS host labels allow only [a-z0-9-], so sanitise whatever the node id is. */
-    char host[8 + CONFIG_NODEID_BUFFER_SIZE] = "its-";
-    size_t h = strlen(host);
-    for (size_t i = 0; nodeid[i] && h < sizeof(host) - 1; i++)
-    {
-        char c = nodeid[i];
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        host[h++] = ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ? c : '-';
-    }
-    host[h] = '\0';
+    char host[8 + CONFIG_NODEID_BUFFER_SIZE];
+    sysmon_mdns_hostname(nodeid, host, sizeof(host));
 
     if (mdns_init() != ESP_OK)
     {

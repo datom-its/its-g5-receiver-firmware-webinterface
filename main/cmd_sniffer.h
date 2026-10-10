@@ -64,6 +64,10 @@ uint32_t sniffer_get_channel(void);
  * receive path is off. */
 bool sniffer_is_running(void);
 
+/* Uptime second the running capture started, plus 1, or 0 while stopped. The start page
+ * counts silence from here, not from boot. */
+uint32_t sniffer_started_sec1(void);
+
 /* Monotonic counter bumped once per sniffer-task loop, independent of traffic.
  * A stalled value while running means the packet pipeline is wedged. */
 uint32_t sniffer_get_heartbeat(void);
@@ -71,6 +75,18 @@ uint32_t sniffer_get_heartbeat(void);
 /* Frames dropped since boot, either because the work queue was full or because
  * the copy found no memory. */
 uint32_t sniffer_dropped(void);
+
+/* Reception quality of the WLAN radio. The noise floor values cover every frame of the last
+ * whole minute of uptime, and all of them stay 0 when no frame arrived in that minute. */
+typedef struct {
+    uint32_t broken;      /* This counts frames with a reception error since boot. */
+    uint32_t nf_frames;
+    int8_t   nf_min;      /* The three noise floor values are in dBm. */
+    int8_t   nf_avg;
+    int8_t   nf_max;
+} sniffer_rx_quality_t;
+
+void sniffer_get_rx_quality(sniffer_rx_quality_t *out);
 
 /* Time-slice the radio with the BLE stream. The sniffer task keeps running, so
  * its heartbeat feeds the watchdog. Both do nothing unless WLAN capture is on. */

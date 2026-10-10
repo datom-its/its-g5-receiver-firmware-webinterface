@@ -4,6 +4,7 @@
 
 #if CONFIG_ENABLE_SD
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 
 #include "config.h"
 #include "events.h"   /* CONFIG_EVENT_BASE */
+#include "sd_csv.h"
 #include "sdcard.h"
 
 static const char TAG[] = "TRACKS";
@@ -45,7 +47,13 @@ static SemaphoreHandle_t s_lock;   /* guards s_last[] and the slot payloads */
 /* Loss counters for tracklog_losses(). /system shows only the first two. */
 static uint32_t s_evicted;      /* oldest dropped because the queue was full */
 static uint32_t s_note_dropped; /* could not queue at all (busy or locked) */
-static uint32_t s_write_fail;   /* a batch that did not reach the card */
+static uint32_t s_write_fail;   /* appends that failed; their points stay queued */
+/* The last append failed and said so: one warning per streak of failures. */
+static bool s_write_warned;
+/* Every row in and out of tracks.csv, at most 71 B with '\n' (10+10+11+11+3+5+5+3+4 characters,
+ * 8 commas). All users hold the SD lock, so one buffer serves them. Static keeps it off the
+ * sysmon stack. */
+static EXT_RAM_BSS_ATTR char s_row[96];
 
 /* Last point per station, so a vehicle standing at a red light does not fill
  * the log with the same coordinate. Only a handful are in range at once. */
@@ -111,7 +119,7 @@ static uint32_t tracks_days(void)
 }
 
 void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
-                   int32_t lat_e7, int32_t lon_e7)
+                   int32_t lat_e7, int32_t lon_e7, const track_extra_t *x)
 {
     /* Station type 15 is roadside infrastructure. It never moves, so it has no
      * track to log. */
@@ -190,6 +198,12 @@ void tracklog_note(uint32_t seconds, uint32_t station_id, uint8_t station_type,
         p->station_type = station_type;
         p->lat_e7 = lat_e7;
         p->lon_e7 = lon_e7;
+        /* Without the extras the row carries the sentinels, so a caller that has
+         * nothing to add writes a point that reads as "direction unknown". */
+        p->heading_ddeg = x ? x->heading_ddeg : TRACK_NO_HEADING;
+        p->len_dm = x ? x->len_dm : 0;
+        p->role = x ? x->role : TRACK_NO_ROLE;
+        p->lane = x ? x->lane : TRACK_NO_LANE;
         portENTER_CRITICAL(&s_cur);
         s_seq_in++;            /* publish only once the payload is in the slot */
         portEXIT_CRITICAL(&s_cur);
@@ -214,30 +228,42 @@ static void prune(uint32_t keep_from_sec)
         return;
     }
 
-    char line[64];
-    bool ok = true;
-    while (fgets(line, sizeof(line), f))
+    /* Whole rows only. picolibc's fgets hands back the part before a read error. */
+    bool ok = true, rest = false, whole;
+    while (sdcsv_gets(s_row, sizeof(s_row), f, &rest, &whole))
     {
-        unsigned long sec = strtoul(line, NULL, 10);
+        if (ferror(f)) { ok = false; break; }
+        if (!whole)
+            continue;
+        unsigned long sec = strtoul(s_row, NULL, 10);
         if (sec < keep_from_sec)
             continue;
-        if (fputs(line, w) == EOF) { ok = false; break; }
+        if (fputs(s_row, w) == EOF) { ok = false; break; }
     }
     if (ferror(f))
         ok = false;   /* a read error ends fgets like EOF would */
     fclose(f);
+    /* picolibc's fclose hides a failed flush: without this a cut tracks.tmp would replace
+     * tracks.csv. */
+    if (ok && (fflush(w) != 0 || ferror(w)))
+        ok = false;
     if (fclose(w) != 0)
         ok = false;
 
     /* Replace the live file only if it was read to the end and every row was
      * written. A failed read or write must not cost the existing data. */
-    if (ok)
-    {
-        remove(TR_CSV);
-        rename(TR_TMP, TR_CSV);
-    }
-    else
+    if (!ok)
         remove(TR_TMP);
+    /* FatFs does not rename onto an existing file, so tracks.csv goes first. If that remove
+     * fails, tracks.csv stays with every row. */
+    else if (remove(TR_CSV) != 0)
+    {
+        ESP_LOGW(TAG, "cannot remove %s, the next prune tries again", TR_CSV);
+        remove(TR_TMP);
+    }
+    /* tracks.csv is gone: the next append renames tracks.tmp back first. */
+    else if (rename(TR_TMP, TR_CSV) != 0)
+        ESP_LOGW(TAG, "cannot rename %s, the next write tries again", TR_TMP);
 }
 
 void tracklog_tick(void)
@@ -273,41 +299,63 @@ void tracklog_tick(void)
         batch[i] = s_queue[(first + (uint32_t)i) % TR_QUEUE];
     xSemaphoreGive(s_lock);
 
+    sdcsv_rc_t rc = SDCSV_OK;
     if (count > 0)
     {
         mkdir(TR_DIR, 0775);
-        bool ok = false;
-        FILE *f = fopen(TR_CSV, "a");
-        if (!f)
-            ESP_LOGW(TAG, "cannot open %s", TR_CSV);
-        else
+        const char *fail = "tmp rename";
+        rc = sdcsv_recover_tmp(TR_CSV, TR_TMP);
+        FILE *f = NULL;
+        if (rc == SDCSV_OK)
         {
-            ok = true;
-            for (int i = 0; i < count && ok; i++)
-                ok = fprintf(f, "%lu,%lu,%ld,%ld,%u\n",
-                             (unsigned long)batch[i].seconds,
-                             (unsigned long)batch[i].station_id,
-                             (long)batch[i].lat_e7, (long)batch[i].lon_e7,
-                             (unsigned)batch[i].station_type) > 0;
-            if (ok)
-                ok = (fflush(f) == 0 && !ferror(f));
-            if (fclose(f) != 0)     /* the commit point */
-                ok = false;
+            f = fopen(TR_CSV, "a+");
+            fail = f ? "mend" : "open";
+            /* A row cut by a failed write goes first, or the retry would glue onto it. */
+            rc = f ? sdcsv_mend_tail(f, s_row, sizeof(s_row)) : SDCSV_FAIL;
+        }
+        /* Points that reached the card, one row at a time: a failure costs this row only. */
+        int written = 0;
+        for (int i = 0; i < count && rc == SDCSV_OK; i++)
+        {
+            const track_pt_t *b = &batch[i];
+            snprintf(s_row, sizeof(s_row), "%lu,%lu,%ld,%ld,%u,%u,%u,%u,%d\n",
+                     (unsigned long)b->seconds, (unsigned long)b->station_id,
+                     (long)b->lat_e7, (long)b->lon_e7, (unsigned)b->station_type,
+                     (unsigned)b->heading_ddeg, (unsigned)b->len_dm, (unsigned)b->role,
+                     (int)b->lane);
+            if (!sdcsv_put(f, s_row))
+            {
+                rc = SDCSV_FAIL;
+                fail = "write";
+                break;
+            }
+            written++;
+        }
+        /* The commit point. If fclose fails, FatFs may not hold the rows, so all of them stay
+         * queued. */
+        if (f && fclose(f) != 0)
+        {
+            if (rc != SDCSV_FAIL)
+                fail = "close";
+            rc = SDCSV_FAIL;
+            written = 0;
         }
 
-        /* Only moves s_seq_out forward. The reservation already blocks evictions
-         * during the write, so this is a guard. Release the reservation on both paths. */
+        /* Only moves s_seq_out forward, by the points written. The reservation already blocks
+         * evictions during the write, so this is a guard. Release the reservation on both paths. */
         portENTER_CRITICAL(&s_cur);
-        if (ok && (int32_t)(first + (uint32_t)count - s_seq_out) > 0)
-            s_seq_out = first + (uint32_t)count;
+        if (written > 0 && (int32_t)(first + (uint32_t)written - s_seq_out) > 0)
+            s_seq_out = first + (uint32_t)written;
         s_busy_lo = s_busy_hi = 0;
         portEXIT_CRITICAL(&s_cur);
 
-        if (!ok)
-        {
+        if (rc == SDCSV_FAIL)
             s_write_fail++;
-            ESP_LOGW(TAG, "tracks write failed, keeping %d points queued", count);
-        }
+        /* Waiting for a download is no failure and ends no streak. */
+        if (rc == SDCSV_FAIL && !s_write_warned)
+            ESP_LOGW(TAG, "%s: %s failed, %d points stay queued", TR_CSV, fail, count - written);
+        if (rc != SDCSV_WAIT)
+            s_write_warned = rc == SDCSV_FAIL;
     }
     else
     {
@@ -325,8 +373,9 @@ void tracklog_tick(void)
     {
         time_t now = time(NULL);
         /* prune() unlinks tracks.csv. A /sdcard download holds it open under
-         * the reader guard alone, so pruning during it truncates the transfer. */
-        if (now > 1600000000 && sdcard_read_active() == 0)
+         * the reader guard alone, so pruning during it truncates the transfer. A card that
+         * just failed an append is not rewritten either. */
+        if (now > 1600000000 && sdcard_read_active() == 0 && rc != SDCSV_FAIL)
         {
             prune_ticks = 0;
             /* Rewriting the whole file is slow BY DESIGN and must not look
@@ -335,10 +384,35 @@ void tracklog_tick(void)
             prune((uint32_t)(now - (time_t)tracks_days() * 86400));
             sdcard_io_long_end();
         }
-        /* A skip (clock not set, or a download running) leaves the counter armed
-         * on purpose. The sweep retries next tick instead of an hour later. */
+        /* A skip (clock not set, a download running, a failed append) leaves the counter
+         * armed on purpose. The sweep retries next tick instead of an hour later. */
     }
     sdcard_io_end();
+}
+
+/* The largest value of each column's C type: time, id, lat, lon, type, heading, length, role,
+ * lane. Lat, lon and lane may carry a minus, which reaches one further. */
+static const uint32_t TR_MAX[9] = { UINT32_MAX, UINT32_MAX, INT32_MAX, INT32_MAX, UINT8_MAX,
+                                    UINT16_MAX, UINT16_MAX, UINT8_MAX, INT8_MAX };
+
+/* 5 or 9 for a row as tracklog_tick wrote it, else 0: digits and commas only, each field at most
+ * 10 digits and inside its C type. sscanf's overflow differs between host and device. */
+static int row_fields(const char *r)
+{
+    for (int k = 0; k < 9; k++)
+    {
+        bool neg = *r == '-' && (k == 2 || k == 3 || k == 8);
+        uint64_t v = 0;
+        int d = 0;
+        for (r += neg; *r >= '0' && *r <= '9' && d <= 10; r++, d++)
+            v = v * 10 + (uint64_t)(*r - '0');
+        if (d == 0 || d > 10 || v > (uint64_t)TR_MAX[k] + neg)
+            return 0;
+        if (*r != ',')
+            return *r == '\n' && (k == 4 || k == 8) ? k + 1 : 0;
+        r++;
+    }
+    return 0;
 }
 
 static void track_pt_reverse(track_pt_t *a, int i, int j)
@@ -359,6 +433,10 @@ int tracklog_read(uint32_t days, track_pt_t *out, int max, bool *wrapped)
     if (!out || max <= 0 || !sdcard_io_begin_timeout(2000))
         return 0;
     FILE *f = fopen(TR_CSV, "r");
+    /* Only a missing csv means a prune stopped between its remove and its rename, after a power
+     * cut or a failed rename. tracks.tmp then holds the rows. */
+    if (!f && errno == ENOENT)
+        f = fopen(TR_TMP, "r");
     if (!f)
     {
         sdcard_io_end();
@@ -372,19 +450,41 @@ int tracklog_read(uint32_t days, track_pt_t *out, int max, bool *wrapped)
     /* Keep the NEWEST points. Stopping at `max` would return the oldest. The ring
      * avoids a per-row shift, which would hold the SD lock on httpd for minutes. */
     int n = 0, head = 0;
-    char line[64];
-    while (fgets(line, sizeof(line), f))
+    bool rest = false, whole;
+    while (sdcsv_gets(s_row, sizeof(s_row), f, &rest, &whole))
     {
+        /* picolibc's fgets hands back the part before a read error: the points before it stay. */
+        if (ferror(f))
+            break;
+        if (!whole)
+            continue;
         unsigned long sec = 0, sid = 0;
         long la = 0, lo = 0;
-        unsigned ty = 0;
-        if (sscanf(line, "%lu,%lu,%ld,%ld,%u", &sec, &sid, &la, &lo, &ty) < 4)
+        unsigned ty = 0, hd = TRACK_NO_HEADING, ln = 0, ro = TRACK_NO_ROLE;
+        int lp = TRACK_NO_LANE;
+        /* A row cut and glued to the next has more fields, a longer field or a value past its
+         * type. A short time is no sign of that, because tracklog_note writes the uptime before
+         * the clock is set. */
+        int got = row_fields(s_row);
+        if (got == 0 || sscanf(s_row, "%lu,%lu,%ld,%ld,%u,%u,%u,%u,%d",
+                               &sec, &sid, &la, &lo, &ty, &hd, &ln, &ro, &lp) != got)
             continue;
+        /* Rows from older firmware end after the fifth field. Fewer than nine leaves
+         * the sentinels standing, so an old track draws without a direction. */
+        if (got < 9)
+        {
+            hd = TRACK_NO_HEADING;
+            ln = 0;
+            ro = TRACK_NO_ROLE;
+            lp = TRACK_NO_LANE;
+        }
         if (sec < from)
             continue;
         track_pt_t p = { .seconds = (uint32_t)sec, .station_id = (uint32_t)sid,
                          .lat_e7 = (int32_t)la, .lon_e7 = (int32_t)lo,
-                         .station_type = (uint8_t)ty };
+                         .station_type = (uint8_t)ty,
+                         .heading_ddeg = (uint16_t)hd, .len_dm = (uint16_t)ln,
+                         .role = (uint8_t)ro, .lane = (int8_t)lp };
         if (n < max)
             out[n++] = p;
         else
@@ -412,8 +512,9 @@ int tracklog_read(uint32_t days, track_pt_t *out, int max, bool *wrapped)
 void tracklog_init(void) {}
 void tracklog_losses(uint32_t *e, uint32_t *d, uint32_t *w)
 { if (e) *e = 0; if (d) *d = 0; if (w) *w = 0; }
-void tracklog_note(uint32_t s, uint32_t i, uint8_t t, int32_t a, int32_t o)
-{ (void)s; (void)i; (void)t; (void)a; (void)o; }
+void tracklog_note(uint32_t s, uint32_t i, uint8_t t, int32_t a, int32_t o,
+                   const track_extra_t *x)
+{ (void)s; (void)i; (void)t; (void)a; (void)o; (void)x; }
 void tracklog_tick(void) {}
 int  tracklog_read(uint32_t d, track_pt_t *o, int m, bool *w)
 { (void)d; (void)o; (void)m; if (w) *w = false; return 0; }

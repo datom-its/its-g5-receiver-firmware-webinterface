@@ -2,9 +2,11 @@
  * text colour, everything quieter derived from it by alpha instead of by grey. */
 /* --warn is deliberately NOT the brand amber #f2b134: that already marks
  * buttons, nav and bars, so a warning in it would not stand out. */
+/* color-scheme: the browser then draws its own parts (date picker, number arrows,
+ * select lists, scrollbars) dark. */
 :root{--bg:#06070b;--fg:#f2f4f8;--mute:rgba(242,244,248,.55);--line:rgba(242,244,248,.09);
  --panel:#0e1117;--edge:#1c202a;--dim:rgba(242,244,248,.52);
- --ok:#5fd88a;--warn:#e07a4f;--alarm:#ff6b6b;--off:#7a848c}
+ --ok:#5fd88a;--warn:#e07a4f;--alarm:#ff6b6b;--off:#7a848c;color-scheme:dark}
 *{box-sizing:border-box;accent-color:#f2b134}
 /* min-height:100vh so short pages don't show bare layers below; deliberately
  * no html{background} -- it would break canvas propagation and hide the radar sweep. */
@@ -31,15 +33,21 @@ h1{font-size:15px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;
 .ctx{font-size:10.5px;font-weight:700;letter-spacing:1.9px;text-transform:uppercase;color:var(--dim);text-align:center;margin:4px 0 18px}
 h2{font-size:16px;font-weight:600;margin:22px 0 10px}
 h3{font-size:14px;font-weight:600;margin:18px 0 8px;color:#c7d2e0}
-/* nav itself doesn't wrap -- .navlinks wraps internally instead, while
- * .lang stays a fixed sibling anchored top-right (else it drops onto
- * its own orphaned row once the links need more than one line). */
-nav{display:flex;align-items:center;justify-content:center;gap:8px;margin:0 0 26px;font-size:13px}
+/* nav wraps once on purpose: logo and the four groups on the first line, the tab row of this
+ * page's group (.subnav, flex-basis 100%) on the second. .lang is anchored top-right. */
+nav{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px 8px;margin:0 0 26px;font-size:13px}
 .navlinks{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:6px 19px;flex:0 1 auto;min-width:0}
 nav a{color:var(--mute);padding:4px 1px;transition:color .12s}
 nav a:hover{color:var(--fg);text-decoration:none}
 nav a.active{color:var(--fg);font-weight:600;box-shadow:inset 0 -1px 0 #f2b134}
-/* Hamburger toggle: hidden on desktop (the full link row fits), shown
+/* Second menu row: the pages of this page's group, as tabs in the style of the language pill. */
+nav .subnav{order:4;flex-basis:100%;display:flex;justify-content:center;min-width:0}
+nav .subnav>div{display:inline-flex;gap:2px;max-width:100%;overflow-x:auto;scrollbar-width:none;background:rgba(242,244,248,.06);border-radius:20px;padding:3px;box-shadow:inset 0 0 0 1px var(--line)}
+nav .subnav>div::-webkit-scrollbar{display:none}
+nav .subnav a{padding:5px 12px;border-radius:16px;white-space:nowrap}
+nav .subnav a:hover{background:rgba(242,244,248,.08)}
+nav .subnav a.active{color:var(--fg);font-weight:600;background:rgba(242,244,248,.12);box-shadow:none}
+/* Hamburger toggle: hidden on desktop (the four groups fit), shown
  * only on narrow screens via the media query below. Pure CSS -- a hidden
  * checkbox (.nvt) whose :checked state reveals .navlinks, toggled by the
  * <label> button, so no JS is needed and it degrades gracefully. */
@@ -48,12 +56,42 @@ nav .logo img{display:block;border-radius:5px}
 nav .brgr{display:none;color:var(--mute);padding:6px 12px;border-radius:7px;cursor:pointer;font-size:18px;line-height:1;user-select:none}
 nav .brgr:hover{background:rgba(242,244,248,.08)}
 nav .nvt{display:none}
-/* Pill holding both flags. Greyed AND dimmed at once made the inactive one
- * vanish on this ground, so the muted state stays bright enough to click. */
+/* Pill holding the two switches and both flags. Greyed AND dimmed at once made the inactive
+ * flag vanish on this ground, so the muted state stays bright enough to click. */
 nav .lang{flex-shrink:0;display:flex;gap:2px;background:rgba(242,244,248,.06);border-radius:20px;padding:3px;box-shadow:inset 0 0 0 1px var(--line)}
 nav .lang a{padding:5px 8px;border-radius:16px;font-size:15px;line-height:1;opacity:.75;filter:grayscale(1)}
 nav .lang a:hover{opacity:1;text-decoration:none}
 nav .lang a.active{opacity:1;filter:none;font-weight:400;background:rgba(242,244,248,.12);box-shadow:none}
+/* Explanation switch in the same pill. html.nohelp comes from the page head (the reader's
+ * choice, hidden by default) and hides every explanation, never a state or a number. */
+html.nohelp .hlp,html.nohelp details.dtl{display:none}
+nav .lang .hlpb{background:none;color:var(--fg);font:inherit;font-size:13px;font-weight:400;line-height:1;padding:5px 9px;margin:0;border-radius:16px;opacity:.75;box-shadow:none;white-space:nowrap}
+nav .lang .hlpb:hover{opacity:1;background:rgba(242,244,248,.08);box-shadow:none}
+html:not(.nohelp) nav .lang .hlpb{opacity:1;background:rgba(242,244,248,.12)}
+/* Until the first click in this browser (class from the switch script in the page header):
+ * points at the switch once, since hidden explanations are the default. */
+nav .lang .hlpb.hlpnew,nav .lang .hlpb.hlpnew:hover{opacity:1;box-shadow:0 0 0 1px #f2b134}
+html.nohelp .hlpb .h1,html:not(.nohelp) .hlpb .h0{display:none}
+/* Only the sign where the words do not fit: beside the centred date line on a narrow
+ * desktop, and in every phone bar, where the page name needs the room. The highlight
+ * still tells the state. */
+@media(min-width:641px) and (max-width:1000px){nav .lang .hlpb span{display:none}}
+@media(max-width:640px){nav .lang .hlpb span{display:none}}
+/* Live switch in the same pill, before the explanation switch. html.arpause comes from the
+ * page head and LINK_SCRIPT; paused, the play sign turns amber, so frozen numbers are never taken
+ * for live ones. b and i, not span, so the switch keeps its own look. */
+nav .lang .lvb{background:rgba(242,244,248,.12);color:var(--fg);font:inherit;font-size:13px;font-weight:400;line-height:1;padding:5px 9px;margin:0;border-radius:16px;box-shadow:none;white-space:nowrap}
+nav .lang .lvb:hover{background:rgba(242,244,248,.18);box-shadow:none}
+nav .lang .lvb b,nav .lang .lvb i{font:inherit}
+html.arpause nav .lang .lvb{background:none;color:#f2b134}
+html.arpause .lvb .l0,html:not(.arpause) .lvb .l1{display:none}
+/* The reload button: only in the home-screen app, which has no reload of its own; the page
+ * sets html.pwa only there. */
+nav .lang .rlb{display:none;background:none;color:var(--fg);font:inherit;font-size:15px;line-height:1;padding:5px 9px;margin:0;border-radius:16px;opacity:.75;box-shadow:none}
+nav .lang .rlb:hover{opacity:1;background:rgba(242,244,248,.08);box-shadow:none}
+html.pwa nav .lang .rlb{display:inline-block}
+/* Sign only up to 1200px: wider, the words would reach the centred date line. */
+@media(max-width:1200px){nav .lang .lvb i{display:none}}
 /* From 641px up the pill leaves the flow and sits in the corner; the symmetric
  * padding reserves that corner so the centred link row cannot run under it. */
 @media(min-width:641px){nav{padding:0 92px}nav .lang{position:absolute;top:16px;right:clamp(14px,4vw,32px);z-index:5}}
@@ -72,9 +110,14 @@ nav .lang a.active{opacity:1;filter:none;font-weight:400;background:rgba(242,244
 .grp th:last-child,.grp td:last-child{padding-right:0}
 .grp thead th{border-bottom:1px solid var(--line)}
 .grp tr:hover>td{background:none}
-/* The peer's own figure is the one number worth reading at a glance. Scoped:
- * unscoped it also hit column two of every table moved into a .grp elsewhere. */
-#peertbl td:nth-child(2){font-size:17px;font-weight:300;letter-spacing:-.01em}
+/* A table right under a tile row touched the tiles: the .grp rules above zero both margins. */
+.grid+.scroll,.grid+table{margin-top:26px}
+/* The peer's own figure is the one number worth reading at a glance. Scoped to this table (unscoped
+ * it hit column two of every .grp table) and to a rate: a colspan cell holds only a mark or a dash. */
+#peertbl td:nth-child(2):not([colspan]){font-size:17px;font-weight:300;letter-spacing:-.01em}
+/* A state word in the rate column ('angehalten', class st) is no figure: the face of th,td
+ * (inherit would give the 16px of the page, no ancestor sets a size). */
+#peertbl td.st:nth-child(2){font-size:13.5px;font-weight:400;letter-spacing:normal}
 .cell{min-width:0}
 /* .lbl is the same small caption outside a cell (activity section). */
 .cell .l,.lbl{font-size:10.5px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:7px;margin:0 0 9px}
@@ -85,6 +128,9 @@ nav .lang a.active{opacity:1;filter:none;font-weight:400;background:rgba(242,244
 .cell .l.v-warn,.lbl.v-warn{color:var(--warn)}
 .cell .l.v-bad,.lbl.v-bad{color:var(--alarm)}
 .cell .l.v-off,.lbl.v-off{color:var(--off)}
+/* A tile label leads to the page with the remedy. It keeps the label's look; the global
+ * a:hover underline marks it, the padding widens the tap target without moving anything. */
+.cell .l a{color:inherit;padding:6px 0;margin:-6px 0}
 /* No colour of its own, so a .v-* class on the value wins without
  * !important; overflow-wrap because a long node id must never scroll. */
 .cell .v{font-size:36px;font-weight:250;letter-spacing:-.032em;line-height:1.05;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
@@ -100,13 +146,22 @@ nav .lang a.active{opacity:1;filter:none;font-weight:400;background:rgba(242,244
 .spark svg{width:100%;height:74px;display:block}
 .types{font-size:13.5px;line-height:1.9;margin:0;overflow-wrap:anywhere;color:var(--mute)}
 .note{font-size:12px;color:var(--mute);line-height:1.65;margin:14px 0 0;max-width:80ch}
-/* Quiet buttons for the status page only: the amber gradient below stays the
- * default everywhere else. data-action is kept current by the sniffer script. */
+/* A help paragraph right before a jump row or an intersection box: .note has no bottom margin
+ * and those two no top margin, so they touched (picture check H7). */
+.note:has(+.jump,+.isec){margin-bottom:14px}
+/* The first sentence of the start page: air to what follows. Hidden with the explanations. */
+#st-lead{margin:0 0 18px}
+/* A link line to another page inside a group: the size of the notes, not the 16px default that
+ * outweighed the group heading (picture check PC7). */
+.lnk{font-size:13.5px}
+/* Quiet buttons for the status page only: the amber gradient below stays the default everywhere
+ * else. Stopping reception asks first instead of standing out. */
 .btnrow{margin:38px 0 0}
 .btnrow button{background:rgba(242,244,248,.07);color:var(--fg);border:1px solid rgba(242,244,248,.14);box-shadow:none;font-weight:500;padding:9px 17px;margin:3px 8px 3px 0}
 .btnrow button:hover{background:rgba(242,244,248,.12);box-shadow:none}
-.btnrow button[data-action='stop']{color:#f2b134;border-color:rgba(242,177,52,.35)}
 .btnrow #po-res{font-size:12.5px;color:var(--mute)}
+/* The control group at the end of the start page: its heading already gives the air. */
+#sec-ctl .btnrow{margin-top:0}
 /* ---- shared chrome for the other eleven pages ---- */
 /* border-collapse:separate (not collapse!) -- browsers ignore
  * border-radius on a <table> when its borders are collapsed, which made
@@ -117,46 +172,142 @@ th,td{text-align:left;padding:10px 14px;font-size:13.5px;border-bottom:1px solid
 tr:last-child>*{border-bottom:none}
 tr:hover>td{background:rgba(242,244,248,.03)}
 th{color:var(--mute);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.09em}
+/* The legend under the first head of the peer table reads like the small line in each row. */
+#peertbl th .sub{text-transform:none;letter-spacing:0;font-weight:400}
 td{font-variant-numeric:tabular-nums}
 .kv th{width:1px;white-space:nowrap;padding-right:32px}.kv td{overflow-wrap:anywhere}
+/* The two tables of the loss group share one value column: each sized its labels to its longest,
+ * 340 px apart at 1440px (picture check pc-PC-12). A long label wraps instead. */
+#s-loss table.kv{width:100%;table-layout:fixed}
+#s-loss table.kv th{width:45%;white-space:normal}
 .scroll{overflow-x:auto;border:1px solid var(--edge);border-radius:10px;margin:10px 0;background:var(--panel)}
 .scroll table{border:none;border-radius:0;margin:0;width:auto;min-width:100%;background:none}
 .scroll td,.scroll th{white-space:nowrap}
-/* Detail/Type cells wrap at ANY width -- the detail text alone can
- * be ~100 chars, wide enough to force scroll even on desktop. */
-.scroll td.wrapcell{white-space:normal;word-break:break-word}
+/* Detail/type cells wrap, but only between words: break-word let the table squeeze
+ * them to a letter per line on a phone ("RS/U/MA/PE/M"). The floor keeps a type whole. */
+.scroll td.wrapcell{white-space:normal;overflow-wrap:break-word;min-width:9em}
+/* The sender from 1100px: at 9em a unit name took two lines and its 'Nr - MAC' line broke at the dot,
+ * rows 96 px at 1440 (pc-PC-03). Narrower, the details paid for it: 110 px rows at 1024 (measured). */
+@media(min-width:1100px){.mcard td:nth-child(6){min-width:16em}.mcard td:nth-child(6) .sub{white-space:nowrap}}
 /* Not restricted to td: the warning table puts an id inside a cell that
  * needs the same fixed-width face. */
 .scroll .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}
-/* Narrow screens: tighter padding, #mtbl drops its redundant "#" column. */
+/* A table that runs on sideways glows faintly amber at the edge where columns wait.
+ * Scroll-driven, so only a table that really overflows gets it; without support nothing changes.
+ * animation-timeline after the shorthand, which resets it. */
+@supports (animation-timeline:scroll()){.scroll{animation:edge linear both;animation-timeline:scroll(self inline)}
+@keyframes edge{from{box-shadow:inset -16px 0 14px -14px rgba(242,177,52,.55),inset 16px 0 14px -14px rgba(242,177,52,0)}to{box-shadow:inset -16px 0 14px -14px rgba(242,177,52,0),inset 16px 0 14px -14px rgba(242,177,52,.55)}}}
+/* Narrow screens: tighter padding, the message and warning tables become cards. */
 @media(max-width:640px){
   /* Sticky hamburger dropdown, opaque and above Leaflet's panes (up to 700)
    * so it wins on /map and covers the content it scrolls over. */
-  nav{flex-wrap:wrap;justify-content:flex-start;position:sticky;top:0;z-index:1000;background:#0a0c11;border:1px solid var(--edge);border-radius:10px;padding:5px;margin-bottom:18px}
-  nav .logo{padding:0 4px}
-  nav .brgr{display:block;order:1}
-  nav .lang{order:2;margin-left:auto}
-  nav .navlinks{display:none;order:3;flex-basis:100%;flex-direction:column;align-items:stretch;gap:2px;margin-top:6px;max-height:calc(100vh - 60px);overflow-y:auto}
+  nav{flex-wrap:wrap;justify-content:flex-start;row-gap:4px;position:sticky;top:0;z-index:1000;background:#0a0c11;border:1px solid var(--edge);border-radius:10px;padding:5px;margin-bottom:18px}
+  /* 44 px tap targets in the bar. The menu button takes the free room, so a long page
+   * name gets shortened instead of pushing the flags onto a second row. */
+  nav .logo{padding:9px 4px}
+  nav .brgr{display:flex;align-items:center;gap:7px;order:1;flex:1 1 0;min-width:44px;min-height:44px;padding:0 10px;overflow:hidden}
+  /* The group name beside the menu sign, so the bar still says where you are after scrolling;
+   * the server writes it into data-pg (web_nav.c). */
+  nav .brgr[data-pg]::after{content:attr(data-pg);font-size:13.5px;font-weight:600;color:var(--fg);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  nav .lang{order:2;margin-left:auto;gap:6px}
+  nav .lang a,nav .lang .hlpb,nav .lang .lvb{min-height:34px;display:flex;align-items:center}
+  /* Not in the list above: its display:flex would show the reload button in every browser tab. */
+  html.pwa nav .lang .rlb{min-height:34px;display:flex;align-items:center}
+  nav .navlinks{display:none;order:3;flex-basis:100%;flex-direction:column;align-items:stretch;gap:2px;margin-top:6px;max-height:calc(100vh - 72px);overflow-y:auto}
   nav .nvt:checked~.navlinks{display:flex}
   nav .navlinks a{padding:9px 12px;border-radius:7px}
   nav .navlinks a:hover{background:rgba(242,244,248,.08)}
+  /* The tab row stays in the bar with the menu closed. 38px targets; 4px sides, so the five
+   * German tabs of the device group fit 360px (measured). */
+  nav .subnav>div{display:flex;width:100%}
+  nav .subnav a{flex:1 0 auto;text-align:center;line-height:20px;padding:9px 4px}
   .scroll th,.scroll td{padding:8px 6px}
-  #mtbl th:first-child,#mtbl td:first-child{display:none}
+  /* The grey line under a value may wrap, at most 15em wide: on one line it made the line column
+   * on /transit as wide as the phone (picture check H1). .wrapcell cells wrap already. */
+  .scroll td:not(.wrapcell) .sub{white-space:normal;width:max-content;max-width:15em}
+  /* Messages as cards: time, level, length and type on top, the sender on a line of its own, details
+   * below. One grid per row, so fixed widths line the cards up; the head row is the legend. */
+  .mcard,.mcard thead,.mcard tbody{display:block}
+  .mcard{width:100%;min-width:0}
+  /* minmax on the clock: a clock before NTP ("86400,123s") widens only its own card. Level and length
+   * as wide as SIGNAL and LENGTH (49, 52 px), 8px gaps and padding: type 74 px at 320, card 174 at 390. */
+  .mcard tr{display:grid;grid-template-columns:minmax(4.9em,max-content) 3.2em 3.3em minmax(0,1fr);gap:3px 8px;padding:8px 6px;border-bottom:1px solid rgba(242,244,248,.06)}
+  .mcard tbody tr:last-child{border-bottom:0}
+  .mcard thead th,.mcard td{padding:0;border:0}
+  /* The legend card may wrap a head: the level and length heads are wider than their columns. */
+  .mcard thead th{white-space:normal}
+  .mcard td.wrapcell{min-width:0}
+  .mcard tr:hover>td{background:none}
+  .mcard th:first-child,.mcard td:first-child{display:none}
+  .mcard th:nth-child(4),.mcard td:nth-child(4){grid-area:1/3}
+  .mcard th:nth-child(5),.mcard td:nth-child(5){grid-area:1/4}
+  .mcard td:nth-child(5){overflow-wrap:anywhere}
+  /* The sender over the whole card: beside the length a unit name and its 'Nr - MAC' line took
+   * four lines and the card grew by a quarter (picture check handy-L1). */
+  .mcard th:nth-child(6),.mcard td:nth-child(6){grid-area:2/1/3/-1}
+  /* A long roadside-unit name wraps inside its row instead of widening column 1 of its own card. */
+  .mcard td:nth-child(6){contain:inline-size}
+  .mcard th:nth-child(7),.mcard td:nth-child(7){grid-column:1/-1}
+  /* Archive rows put the date before the time (103 px) and never carry a signal level. The empty
+   * level cell and its head step aside: with them the type had 24 px at 320px. */
+  #sr .mcard tr{grid-template-columns:7.7em 3.3em minmax(0,1fr)}
+  #sr .mcard th:nth-child(3),#sr .mcard td:nth-child(3){display:none}
+  #sr .mcard th:nth-child(4),#sr .mcard td:nth-child(4){grid-area:1/2}
+  #sr .mcard th:nth-child(5),#sr .mcard td:nth-child(5){grid-area:1/3}
+  /* Warnings as cards: the warning on top in bold, then time and state, then sender and
+   * signal. Two equal halves line the cards up; cells by position, as web_traffic.c sends them. */
+  .wcard,.wcard thead,.wcard tbody{display:block}
+  .wcard{width:100%;min-width:0}
+  .wcard tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px 12px;padding:10px 6px;border-bottom:1px solid rgba(242,244,248,.06)}
+  .wcard tbody tr:last-child{border-bottom:0}
+  .wcard thead th,.wcard td{padding:0;border:0;white-space:normal;overflow-wrap:break-word}
+  .wcard td.wrapcell{min-width:0}
+  .wcard tr:hover>td{background:none}
+  .wcard th:nth-child(2),.wcard td:nth-child(2){grid-area:1/1/2/3}
+  .wcard td:nth-child(2){font-weight:600}
+  .wcard td:nth-child(2) small{font-weight:400}
+  .wcard th:nth-child(1),.wcard td:nth-child(1){grid-area:2/1}
+  .wcard th:nth-child(3),.wcard td:nth-child(3){grid-area:2/2}
+  .wcard th:nth-child(4),.wcard td:nth-child(4){grid-area:3/1}
+  .wcard th:nth-child(5),.wcard td:nth-child(5){grid-area:3/2}
+  /* A grey line fills its half: the 15em of the table rule above ran into the neighbour at 320px. */
+  .scroll .wcard td .sub{width:auto;max-width:none}
   /* th column width is shared table-wide: one long label pushed the whole
    * table off-screen, so wrap labels beyond this width. */
   .kv th{white-space:normal;max-width:38vw}
-  /* Auto layout sized the value column to the longest <select> option and
-   * scrolled /settings sideways. Not the .scroll ones -- those scroll alone. */
+  /* Fixed layout, else the value column took the width of its longest entry. Now only /system's
+   * tables (not the .scroll ones, they scroll alone); /settings stacks (block at the end). */
   .grp>table.kv{table-layout:fixed}
   .grp>table.kv th{width:38vw}
-  .grid{gap:28px}
+  /* Two tiles per row. Text values and tiles with long detail lines span both columns via .wide
+   * from the page code, else they break mid-word; a lone half tile is widened by the rule below. */
+  .grid{grid-template-columns:1fr 1fr;gap:24px 16px}
+  .cell.wide{grid-column:1/-1}
+  /* Two tiles side by side share their rows (subgrid), so a label on two lines no longer pushes
+   * its value below the neighbour's (picture check H3). The row gap moves into the tile; span 6
+   * leaves room (a tile has at most four children), empty rows have no height. */
+  @supports (grid-template-rows:subgrid){
+    .grid{row-gap:0;margin-bottom:-24px}
+    .grid>.cell{display:grid;grid-row:span 6;grid-template-rows:subgrid;align-content:start;padding-bottom:24px}
+    .grid>.cell>.l{align-self:end}
+  }
+  /* A half tile with no partner in its row takes the full width (picture check H2): the last of an
+   * odd count in a grid without wide tiles, or one alone before, after or between wide tiles. */
+  .grid:not(:has(>.cell.wide))>.cell:last-child:nth-child(odd),
+  .grid>.cell:not(.wide):is(:first-child,.cell.wide+.cell):is(:last-child,:has(+.cell.wide)){grid-column:1/-1}
+  .cell .v{font-size:30px}
+  /* A label word wider than a half tile ("Signaturpruefungen" below 348px) ran out of the
+   * tile and widened the page by 13px at 320px; now it breaks at the tile edge instead. */
+  .cell .l{overflow-wrap:anywhere}
   .grp{margin-top:36px}
   h1{margin-bottom:22px}
 }
 button{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;font-weight:600;border:none;font-size:13.5px;padding:9px 15px;border-radius:8px;margin:3px 5px 3px 0;cursor:pointer;box-shadow:0 2px 12px -3px rgba(242,177,52,.5);transition:box-shadow .15s,transform .08s}
 button:hover{background:linear-gradient(160deg,#ffc861,#e2a52b);box-shadow:0 3px 16px -2px rgba(242,177,52,.65)}
 button:active{transform:translateY(1px)}
-input,select{background:#0b0d12;color:var(--fg);border:1px solid #333a41;border-radius:7px;padding:7px 9px;font-size:13.5px;max-width:100%}
+/* Field edge .38: about 3.3:1 against field, panel and page (3:1 is the minimum for a
+ * control); #333a41 had 1.7:1. */
+input,select{background:#0b0d12;color:var(--fg);border:1px solid rgba(242,244,248,.38);border-radius:7px;padding:7px 9px;font-size:13.5px;max-width:100%}
 input:focus,select:focus{outline:none;border-color:#4fb8e0;box-shadow:0 0 0 3px rgba(79,184,224,.18)}
 /* Breathing room for the upload button when it wraps under its file input
  * on narrow screens; harmless when they fit side by side. */
@@ -170,8 +321,9 @@ input[type=file]::file-selector-button:hover{background:rgba(242,244,248,.12)}
  * the browser's intrinsic width widens the whole table column. */
 .kv input[type=range]{width:100%;max-width:280px}
 /* The six groups on /settings each sized their label column to their own
- * longest label, so every group started its fields at a different x. */
-@media(min-width:641px){table.set{table-layout:fixed}table.set th{width:304px}}
+ * longest label, so every group started its fields at a different x. The two long values
+ * (broker URI, receiver list) get room on wide screens (picture check PC9). */
+@media(min-width:641px){table.set{table-layout:fixed}table.set th{width:304px}table.set #mqtturi,table.set #peers{max-width:640px}}
 /* Browser default margins would offset these two from the column. */
 .kv input[type=checkbox],.kv input[type=range]{margin-left:0}
 /* IPv4 fields only need "255.255.255.255" (15 chars); !important since
@@ -185,13 +337,50 @@ input[type=file]::file-selector-button:hover{background:rgba(242,244,248,.12)}
 .bad{display:inline-block;color:var(--alarm);background:rgba(255,107,107,.10);padding:2px 10px;border-radius:20px;font-size:12px}
 .ok::before,.bad::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;margin-right:5px;vertical-align:middle;box-shadow:0 0 8px currentColor}
 /* Colours the VALUE itself (no pill around it) where a threshold says so.
- * The dot repeats the state for anyone who cannot rely on the colour. */
+ * The dot repeats the state for anyone who cannot rely on the colour.
+ * Inline forms of the same levels: .v-off deliberate, .v-warn level 2, .v-bad and the .bad pill level 3 (pills only in table cells). */
 .v-ok{color:var(--ok)}.v-warn{color:var(--warn)}.v-bad{color:var(--alarm)}.v-off{color:var(--off)}
 .v-ok::before,.v-warn::before,.v-bad::before,.v-off::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor;margin-right:6px;vertical-align:middle}
-.warn{background:rgba(242,177,52,.09);border:1px solid rgba(242,177,52,.32);color:#f2b134;padding:12px 14px;border-radius:10px;margin:14px 0}
+/* An active road warning inline (map popup, /messages detail): the warning colour of the start tile
+ * on every page, the sign from here as for .warn. */
+.wact{color:var(--warn)}
+.wact::before{content:'\26A0\FE0E\A0'}
+/* Three levels, set once here. Info: p.note, grey, a whole sentence, no sign. Warning, something
+ * gets lost or needs doing soon: .warn. Alarm, broken now: .alarm. No display here: [hidden] must win. */
+.warn,.alarm{padding:12px 14px;border-radius:10px;margin:14px 0}
+.warn{background:rgba(224,122,79,.09);border:1px solid rgba(224,122,79,.45);color:var(--warn)}
+.alarm{background:rgba(255,107,107,.09);border:1px solid rgba(255,107,107,.5);color:var(--alarm)}
+/* The sign comes from here, never from the text, so a box opens with a <p>. FE0E asks for the
+ * text form of the warning sign, which takes the box colour instead of an emoji's yellow. */
+.warn>p:first-child::before,p.warn::before{content:'\26A0\FE0E\A0'}
+.alarm>p:first-child::before,p.alarm::before{content:'\26D4\A0'}
+/* G1: the page lost its device (the page script sets html.stale). The bar sits before .wrap and sticks
+ * at the top; the live values turn grey, as in the approved sketch skizzen/TOT. */
+.stale-bar{display:none}
+html.stale .stale-bar{display:block;position:sticky;top:0;z-index:1001;text-align:center;padding:10px 16px;background:#241714;border-bottom:1px solid rgba(224,122,79,.55);color:var(--warn);font-size:13.5px;line-height:1.4}
+.stale-bar::before{content:'\26A0\FE0E\A0'}
+.stale-bar b{color:var(--fg);font-weight:600}
+/* Every live value sits in one of these (the clock line above main keeps the time of the last answer).
+ * :not() keeps nested matches from being dimmed twice. */
+html.stale main :is(.cell .v,.cell .d,.spark,.types,td,.probs,#st-rx,#trf-body,#map,.lbl [id]):not(:is(.cell .v,.cell .d,.spark,.types,td,.probs,#st-rx,#trf-body,#map,.lbl [id]) *){opacity:.45;filter:grayscale(1)}
+html.stale main :is(.cell .l,.lbl):is(.v-ok,.v-warn,.v-bad){color:var(--mute)}
+/* P13: faults of the whole device under the page heading (web_faults.c). A line whose fault breaks
+ * something now is red with the stop sign; the others take the warning colour. */
+.probs{border:1px solid rgba(224,122,79,.45);background:rgba(224,122,79,.09);color:var(--warn);border-radius:10px;padding:0 14px;margin:0 0 22px;font-size:13.5px}
+.probs[hidden]{display:none}
+/* The sign hangs in the left padding: as a flex item it stayed alone on the first row when a
+ * long text wrapped on a phone, and the two signs' widths shifted the texts apart. */
+.probs p{margin:0;padding:11px 0 11px 2em;position:relative;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.probs p::before{content:'\26A0\FE0E';position:absolute;left:0}
+.probs p.al{color:var(--alarm)}
+.probs p.al::before{content:'\26D4'}
+.probs p+p{border-top:1px solid rgba(224,122,79,.2)}
+.probs a{margin-left:auto;white-space:nowrap}
 small{color:var(--mute)}
 /* Detail line under a value inside a merged table cell. */
 .sub{font-size:11.5px;color:var(--dim);font-weight:400;margin-top:2px}
+/* The Node-ID line under the device tiles: some air after the temperature chart. */
+.devid{margin-top:14px}
 /* The pin in the warning list is a 14x16 glyph; negative margins keep the
  * larger touch target from moving anything around it. */
 .pin{display:inline-block;padding:4px 6px;margin:-4px -2px}
@@ -220,7 +409,14 @@ th.srt:focus{outline:2px solid #4fb8e0;outline-offset:-2px}
  * set .disabled from JS and already carry their own opacity. */
 #lgb0:disabled,#lgb1:disabled{background:#232830;color:#7a848c;box-shadow:none;cursor:default}
 #lgq:disabled{opacity:.45}
-/* ---- shared shapes for the other eleven pages (round 2) ---- */
+/* The chosen log filter, and the chosen view of /traffic and /logs. Not while disabled:
+ * until lgf() exists no filter is chosen. */
+#lgb0[aria-pressed=true]:not(:disabled),#lgb1[aria-pressed=true]:not(:disabled),a.sgb[aria-current]{background:rgba(242,177,52,.14);border-color:rgba(242,177,52,.6);color:var(--fg)}
+/* Warning and error lines of the system log, wrapped in spans by lgf(). */
+.logpre .lw{color:var(--warn)}.logpre .le{color:var(--alarm)}
+/* One of two words on the temperature line; lgf() sets .on while the lines are shown. */
+#lgtmp:not(.on) .lg1,#lgtmp.on .lg0{display:none}
+/* ---- shared shapes for the other eleven pages ---- */
 /* Appended at the end so .tools wins over .btnrow -- same specificity, so
  * position decides. */
 /* Paths keep their case even inside an uppercased heading. */
@@ -233,38 +429,88 @@ th.srt:focus{outline:2px solid #4fb8e0;outline-offset:-2px}
 .grp.nohd{margin-top:24px;padding-top:16px}
 /* A heading that already carries an emoji does not also get the 15px rule. */
 .grp>h2.ico::before{display:none}
-/* Jump targets moved from .sect to .grp; under 640px the nav is sticky. */
+/* Jump targets sit on .grp. 70px clears the desktop nav; the phone block at the end adds
+ * the sticky nav and the chip row. */
 .grp[id]{scroll-margin-top:70px}
-/* Sub-heading inside a group: same face as .lbl, without the dot. */
-.grp h3{font-size:10.5px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--mute);margin:30px 0 12px}
+/* A help text links to one settings field: the field lands clear of the top and its row is tinted. */
+.set [id]:target{scroll-margin-top:24px}
+.set tr:has([id]:target)>*{background:rgba(242,177,52,.10)}
+/* Window line under the warnings heading: close to it like a subtitle, room before the table. */
+#denm>h2+.note{margin:-12px 0 14px}
+/* Sub-heading inside a group: normal case and lighter than a label. In the grey caps of a label it
+ * read as a field without its field (handy-L4, pc-PC-02); with a rule above, as a group of its own. */
+.grp h3{font-size:12.5px;font-weight:600;letter-spacing:.01em;text-transform:none;color:rgba(242,244,248,.8);margin:28px 0 10px}
+/* A sub-head right under its group heading (/settings, SD card group): the h2 already gives the room. */
+.grp>h2+h3{margin-top:0}
 /* Free-standing small caption; .lbl's glow dot would read as a bullet here. */
 .cap{font-size:10.5px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--mute)}
-/* Row of jump links or window choices. Deliberately NOT flex: the '&middot;'
+/* Row of section links (Springe zu, from three targets on). Deliberately NOT flex: the '&middot;'
  * separators are their own text nodes and would each become a flex item. */
 .jump{font-size:10.5px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--mute);margin:0 0 10px;line-height:2}
-/* Everything in .jump is already 700 and uppercase, so colour is all that is
- * left to tell links and the open log file's name apart. */
-.jump b{color:var(--fg)}
+/* One link to a section further down, phone only (the search on /messages): not a .jump row,
+ * which needs three targets and sticks under the nav. */
+.phjump{display:none}
 /* Control row above a table or a log. */
 .tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:18px 0 10px}
 .tools input,.tools select,.tools button{margin:0}
 .tools input[type=file]{margin:0}
-/* Collapsed help block (/map): the summary reads as a caption, not a link. */
-.dtl{margin:16px 0}
-.dtl>summary{cursor:pointer;font-size:10.5px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--mute);list-style:none;padding:2px 0}
-.dtl>summary::-webkit-details-marker{display:none}
-.dtl>summary::before{content:'+';margin-right:9px;color:var(--mute)}
-.dtl[open]>summary::before{content:'\2212'}
+/* A choice between views of the page (period on /traffic, log file on /logs): links that look
+ * like the quiet buttons; the chosen one is filled like the /logs filter. */
+a.sgb{display:inline-block;background:rgba(242,244,248,.07);color:var(--fg);border:1px solid rgba(242,244,248,.14);border-radius:8px;padding:9px 17px;font-size:13.5px;font-weight:500;line-height:normal}
+a.sgb:hover{background:rgba(242,244,248,.12);text-decoration:none}
+/* A form label above its field, as /settings shows it on a phone; one flex item, so a wrapping
+ * row can no longer part them (P47, picture check H11). */
+.fld{display:inline-flex;flex-direction:column;gap:6px;max-width:100%}
+.fld>span{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.fld input[type=file]{margin:0}
+.tools:has(.fld){align-items:flex-end}
+/* A row with labels above: one outer height for every control, so tops, bottoms and labels line up.
+ * The file box was 38, a button 33, a text field 31 px (picture check pc-PC-09). */
+.tools:has(.fld) :is(button,select,input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file])){box-sizing:border-box;height:36px}
+.tools:has(.fld) button{padding-top:0;padding-bottom:0}
+.tools:has(.fld) input[type=file]::file-selector-button{box-sizing:border-box;height:36px;padding-top:0;padding-bottom:0}
+/* A label stays on one line: on two it stood higher than the other labels of its row. */
+.fld>label{white-space:nowrap}
+/* The link under a search result to the same period on the map. */
+.more{font-size:12.5px;margin:10px 0 0}
+/* Collapsed help block: the summary reads as a caption, not a link. .fold looks the same
+ * but holds content (the flash partitions on /sdcard), so the help switch leaves it alone. */
+.dtl,.fold{margin:16px 0}
+.dtl>summary,.fold>summary{cursor:pointer;font-size:10.5px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--mute);list-style:none;padding:2px 0}
+.dtl>summary::-webkit-details-marker,.fold>summary::-webkit-details-marker{display:none}
+.dtl>summary::before,.fold>summary::before{content:'+';margin-right:9px;color:var(--mute)}
+.dtl[open]>summary::before,.fold[open]>summary::before{content:'\2212'}
 /* Path steps on /sdcard and /fs. */
 .crumbs{font-size:12.5px;color:var(--mute);margin:14px 0 8px;overflow-wrap:anywhere}
 /* Log and status output: the page-local inline style (black ground, #444
  * border) was the last hand-drawn box; the shared pre rule carries it now. */
 .logpre{white-space:pre-wrap;word-break:break-all;padding:14px 16px;max-height:70vh;margin:14px 0}
-/* Phase dot: geometry here, colour stays inline -- it comes per signal group
- * from spat_phase_color() and is not a fixed set of classes. */
-.dot{display:inline-block;width:11px;height:11px;border-radius:50%;vertical-align:middle;flex:0 0 11px}
+/* Set by the /logs script: the box ends at the bottom of the first screen, 12em at least; svh,
+ * so the phone URL bar does not make it jump (picture check H9). */
+.logpre.fit{max-height:min(70vh,max(12em,calc(100svh - var(--lgtop) - 16px)))}
+/* The result box of the re-send on /senders stays hidden until its first message. */
+#rr:empty{display:none}
+/* Phase as a small signal with three lamps, like a real one: the lit position tells the
+ * phase without telling red from green. Classes from spat_phase_lamp() and spatLamp().
+ * top, not middle: in a table row middle adds 1 px per row, top adds nothing (measured). */
+.amp{display:inline-flex;flex-direction:column;align-items:center;gap:1px;width:11px;flex:0 0 11px;padding:2px;border-radius:3px;background:#12151b;border:1px solid rgba(242,244,248,.28);vertical-align:top}
+.amp b{display:block;width:4px;height:4px;border-radius:50%;background:rgba(242,244,248,.13)}
+/* Same three colours as spatColor() on /map; red-amber lights two lamps. */
+.amp.r b:nth-child(1),.amp.ry b:nth-child(1){background:#e74c3c}
+.amp.ry b:nth-child(2),.amp.y b:nth-child(2){background:#f2b134}
+.amp.g b:nth-child(3){background:#2ecc40}
+/* Legend inside the explanation: room between the entries. */
+.note .amp{margin:0 4px 0 10px}
+/* A lamp and its word never part at a line end (picture check H7). */
+.note .lg{white-space:nowrap}
+/* The lights tile of the start page: the lamps of /traffic, a little larger, in the value slot. */
+.cell .v.amps{display:flex;flex-wrap:wrap;gap:5px 4px;align-items:center;min-height:1.05em}
+.cell .v.amps .amp{width:13px;flex-basis:13px;gap:2px;padding:3px 2px}
+.cell .v.amps .amp b{width:6px;height:6px}
 .chips{margin:0 0 12px}
-.chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;margin:3px 16px 3px 0;font-size:13.5px}
+/* top: the 20px signal would otherwise set the baseline and every chip row grows
+ * (131 -> 171px on a phone, measured). */
+.chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;margin:3px 16px 3px 0;font-size:13.5px;vertical-align:top}
 .chip small{color:var(--dim)}
 /* Share bar under a number in a table cell. */
 .bar{height:3px;background:#f2b134;border-radius:2px;min-width:2px;margin-top:5px;opacity:.85}
@@ -287,6 +533,11 @@ button.pwr:hover{background:rgba(224,122,79,.12);box-shadow:inset 0 0 0 1px var(
  * /update keeps the fill without this class -- it is that page's only action. */
 .btnrow button.act{background:linear-gradient(160deg,#f2b134,#d99a1f);color:#1a1204;border-color:transparent}
 .btnrow button.act:hover{background:linear-gradient(160deg,#ffc861,#e2a52b)}
+/* Downloads: the quiet grey of the .btnrow buttons plus an arrow, on a button or a link. Inset
+ * ring, not a border, and a button's line height on the link: as tall as a button beside it. */
+button.dlb,a.dlb{background:rgba(242,244,248,.07);color:var(--fg);border:0;box-shadow:inset 0 0 0 1px rgba(242,244,248,.14);font-weight:500;padding:9px 17px}
+button.dlb:hover,a.dlb:hover{background:rgba(242,244,248,.12);box-shadow:inset 0 0 0 1px rgba(242,244,248,.14);text-decoration:none}
+a.dlb{display:inline-block;font-size:13.5px;line-height:normal;border-radius:8px;margin:3px 5px 3px 0}
 /* Secondary chart: three 74px boxes on the status page would be half a phone
  * screen, so the minute line stays the tall one. */
 .spark.sm svg{height:56px}
@@ -294,3 +545,80 @@ button.pwr:hover{background:rgba(224,122,79,.12);box-shadow:inset 0 0 0 1px var(
 /* Dark map from the plain OSM tiles: a keyless dark basemap with this many
  * street names does not exist any more. Only .leaflet-tile-pane is inverted. */
 .mapdark .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg)}
+/* Notes on the map, styled here instead of by the page script: missing tiles and cut tracks warn
+ * (colour and sign of .warn), the cap on warning areas is a grey info (D13, picture check S10). */
+.leaflet-control.tilenote,.leaflet-control.tracknote,.leaflet-control.wanote{background:rgba(20,22,24,.85);padding:4px 8px;border-radius:4px;font-size:12px;max-width:calc(100vw - 60px)}
+.tilenote,.tracknote{color:var(--warn)}
+.tilenote::before,.tracknote::before{content:'\26A0\FE0E\A0'}
+.wanote{color:var(--mute)}
+/* Clear of the attribution, bottom right without a margin: a note wrapping on a phone ran under it
+ * (picture check handy-L7). 0,3,0 beats leaflet.css, which loads after this file. */
+.leaflet-bottom .leaflet-control.tilenote,.leaflet-bottom .leaflet-control.tracknote,.leaflet-bottom .leaflet-control.wanote{margin-bottom:24px}
+
+/* Phone rules that override the shared ones above (.grp[id], .jump, .phjump, .kv input, .ipfield),
+ * so this block has to stay at the end. */
+@media(max-width:640px){
+  /* Height of the sticky nav: bar 44 + gap 4 + tab row 44 + padding and border 12 = 104; the start
+   * page has no tab row (56). A browser without :has() keeps 104, the safe side for jumps. The chip
+   * row docks under it, so change them together. */
+  :root{--navh:104px}
+  :root:not(:has(nav .subnav)){--navh:56px}
+  /* The section jump row rides along under the nav as a row of chips, so after a jump the
+   * other sections stay one tap away. Every .jump is a section row now; :has() keeps a row
+   * without # links static. */
+  .jump:has(a[href^='#']){position:sticky;top:calc(var(--navh) - 1px);z-index:990;font-size:0;letter-spacing:0;line-height:1;white-space:nowrap;overflow-x:auto;scrollbar-width:none;background:#0a0c11;border:1px solid var(--edge);border-radius:10px;padding:5px;margin:0 0 18px}
+  .jump:has(a[href^='#'])::-webkit-scrollbar{display:none}
+  /* font-size:0 above hides the 'Jump to:' caption and the dots between the chips. */
+  .jump:has(a[href^='#']) a{display:inline-block;font-size:11px;letter-spacing:1.2px;padding:10px 12px;border-radius:7px;margin-right:4px;background:rgba(242,244,248,.06)}
+  .jump:has(a[href^='#']) a:last-child{margin-right:0}
+  .jump a.on{color:var(--fg);box-shadow:inset 0 -2px 0 #f2b134}
+  /* The one section link: 44px high, a tap target like the nav bar. */
+  .phjump{display:block;margin:0 0 10px;font-size:13px}.phjump a{display:inline-flex;align-items:center;min-height:44px}
+  /* A jump lands below nav and chip row (--navh + 43 - 1) with 12px of air. */
+  .grp[id]{scroll-margin-top:calc(var(--navh) + 54px)}
+  /* Below nav and chip row, as for sections, plus the label that stands above the field on a phone:
+   * the field's row then starts 19 px under the chip row (measured at 320 to 390 px). */
+  .set [id]:target{scroll-margin-top:calc(var(--navh) + 96px)}
+  /* A checkbox row is one flex line whose cell has no box (display:contents): the row carries the tint. */
+  table.set tr:has(>td>input[type=checkbox]:first-child):has([id]:target){background:rgba(242,177,52,.10)}
+  table.set tr:has(>td>input[type=checkbox]:first-child):has([id]:target)>th{background:none}
+  /* While the device is gone only the connection bar sticks: nav and chip row would slide under it,
+   * and their links lead nowhere until it answers. */
+  html.stale nav,html.stale .jump:has(a[href^='#']){position:relative;top:auto}
+
+  /* Settings: label above its field, field full width -- the 38vw label column wrapped
+   * labels onto four lines and cut long values (peer list, MQTT URI). */
+  table.set,table.set tbody,table.set tr,table.set th,table.set td{display:block}
+  table.set tr{border-bottom:1px solid rgba(242,244,248,.06)}
+  table.set tr:last-child{border-bottom:0}
+  .grp>table.set th{width:auto;max-width:none;white-space:normal;padding:12px 0 6px;border-bottom:0}
+  .grp>table.set td{padding:0 0 12px;border-bottom:0}
+  table.set th:empty{display:none}
+  table.set input:not([type=checkbox]):not([type=range]):not([type=color]),table.set select{width:100%;max-width:none}
+  table.set .ipfield{max-width:none!important}
+  table.set .ipfield+.ipfield{margin-top:6px}
+  /* A checkbox row keeps label and box on one line; its notes take the lines below. */
+  table.set tr:has(>td>input[type=checkbox]:first-child){display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:12px 0}
+  .grp>table.set tr:has(>td>input[type=checkbox]:first-child)>th{padding:0}
+  table.set tr:has(>td>input[type=checkbox]:first-child)>td{display:contents}
+  table.set tr:has(>td>input[type=checkbox]:first-child) small{flex-basis:100%}
+  table.set tr:has(>td>input[type=checkbox]:first-child) small>br:first-child{display:none}
+
+  /* File lists: 22px boxes; the label makes the whole first cell hit the box, so a missed
+   * tap no longer opens the folder link next to it and drops the selection. */
+  #dbody td:first-child:not([colspan]){position:relative;width:44px;min-width:44px;padding:0}
+  #dbody td:first-child>label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;cursor:pointer}
+  /* Negative margins, not an absolute label: its th would need :has() to become the anchor,
+   * and without :has() the label would sit on .wrap and cover the page with 'select all'. */
+  .scroll thead th>label{display:flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;margin:-8px -6px;cursor:pointer}
+  #dbody input[type=checkbox],.scroll thead th>label>input[type=checkbox]{width:22px;height:22px;margin:0}
+  /* The select-all column keeps 44px when the list is empty: without a row box its spare width went
+   * to the first column and the box floated in the middle (picture check H8). */
+  .scroll thead th:has(>label>input[type=checkbox]){width:44px;min-width:44px}
+  /* The view buttons of /traffic and /logs: period and three buttons in one row at 390px. */
+  a.sgb{padding:8px 12px}
+  /* Smaller lamps on the start page: twelve signal groups fit one row of a half tile at 390px. */
+  .cell .v.amps{gap:4px 3px}
+  .cell .v.amps .amp{width:11px;flex-basis:11px;padding:2px 1px}
+  .cell .v.amps .amp b{width:5px;height:5px}
+}

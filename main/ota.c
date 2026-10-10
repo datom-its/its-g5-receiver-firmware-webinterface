@@ -1,6 +1,7 @@
 #include "sdkconfig.h"
 
 #include <stdbool.h>
+#include <string.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_console.h"
@@ -13,6 +14,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "argtable3/argtable3.h"
 
 #include "ota.h"
@@ -42,6 +44,11 @@ static bool reboot_after_update;
 
 static esp_timer_handle_t invalidate_and_reboot_timer;
 
+/* The failed update in the other slot, read once at boot. Own NVS namespace, like sysstat. */
+#define OTA_NS "ota"
+static ota_failed_t s_failed;
+static char s_failed_key[17];   /* hex of the first 8 bytes of its ELF hash */
+
 /* static: both were globally visible and would collide at link time. */
 static esp_http_client_config_t http_client_config = {
     .url = https_url,
@@ -61,6 +68,7 @@ static void ota_task(void *)
     esp_err_t res = esp_https_ota(&ota_config);
     if (res == ESP_OK)
     {
+        ota_failed_forget();
         if (reboot_after_update)
         {
             sysmon_flush_persistent();   /* see cmd_reboot in main.c */
@@ -361,11 +369,110 @@ static void init_invalidate_and_reboot_timer(void)
     }
 }
 
+/* ABORTED: the bootloader found the update still unconfirmed at a restart (crash, power cut,
+ * restart button). INVALID: the 30-minute timer or 'ota -R' marked it. */
+static void scan_failed_slot(void)
+{
+    const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+    esp_ota_img_states_t st;
+    esp_app_desc_t d;
+    if (!other || esp_ota_get_state_partition(other, &st) != ESP_OK ||
+        (st != ESP_OTA_IMG_INVALID && st != ESP_OTA_IMG_ABORTED) ||
+        esp_ota_get_partition_description(other, &d) != ESP_OK)
+        return;
+    /* The field is not always NUL-terminated. */
+    size_t n = strnlen(d.version, sizeof(d.version));
+    if (n > sizeof(s_failed.version) - 1)
+        n = sizeof(s_failed.version) - 1;
+    memcpy(s_failed.version, d.version, n);
+    s_failed.version[n] = '\0';
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < 8; i++)
+    {
+        s_failed_key[2 * i] = hex[d.app_elf_sha256[i] >> 4];
+        s_failed_key[2 * i + 1] = hex[d.app_elf_sha256[i] & 0x0F];
+    }
+    s_failed_key[16] = '\0';
+    s_failed.aborted = st == ESP_OTA_IMG_ABORTED;
+    s_failed.present = true;
+
+    nvs_handle_t h;
+    if (nvs_open(OTA_NS, NVS_READONLY, &h) == ESP_OK)
+    {
+        char ack[sizeof(s_failed_key)];
+        size_t sz = sizeof(ack);
+        s_failed.acked = nvs_get_str(h, "ack", ack, &sz) == ESP_OK &&
+                         strcmp(ack, s_failed_key) == 0;
+        nvs_close(h);
+    }
+    ESP_LOGW(TAG, "The update to %s did not come up (%s)%s", s_failed.version,
+             s_failed.aborted ? "aborted" : "invalid", s_failed.acked ? ", notice hidden" : "");
+}
+
 void ota_init(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_register(ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, ota_event_handler, NULL));
 
     init_invalidate_and_reboot_timer();
+    scan_failed_slot();
+}
+
+int64_t ota_rollback_left_us(void)
+{
+    uint64_t exp = 0;
+    if (!ota_rollback_armed() ||
+        esp_timer_get_expiry_time(invalidate_and_reboot_timer, &exp) != ESP_OK)
+        return -1;
+    int64_t left = (int64_t)exp - esp_timer_get_time();
+    return left > 0 ? left : 0;
+}
+
+ota_run_t ota_running_state(void)
+{
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (!run || esp_ota_get_state_partition(run, &st) != ESP_OK)
+        return OTA_RUN_OTHER;
+    return st == ESP_OTA_IMG_VALID            ? OTA_RUN_CONFIRMED
+         : st == ESP_OTA_IMG_PENDING_VERIFY   ? OTA_RUN_PENDING
+                                              : OTA_RUN_OTHER;
+}
+
+bool ota_failed_get(ota_failed_t *out)
+{
+    if (out)
+        *out = s_failed;
+    return s_failed.present;
+}
+
+bool ota_failed_ack(void)
+{
+    if (!s_failed.present)
+        return true;   /* nothing left to hide */
+    nvs_handle_t h;
+    if (nvs_open(OTA_NS, NVS_READWRITE, &h) != ESP_OK)
+        return false;
+    bool ok = nvs_set_str(h, "ack", s_failed_key) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    if (ok)
+        s_failed.acked = true;
+    return ok;
+}
+
+/* So the same failing build alarms again, even if it dies before its own ota_init. The new
+ * image has replaced the failed one, so the RAM record goes too. */
+void ota_failed_forget(void)
+{
+    s_failed.present = false;
+    nvs_handle_t h;
+    if (nvs_open(OTA_NS, NVS_READWRITE, &h) != ESP_OK)
+        return;
+    esp_err_t e = nvs_erase_key(h, "ack");
+    if (e == ESP_OK)
+        nvs_commit(h);
+    else if (e != ESP_ERR_NVS_NOT_FOUND)
+        ESP_LOGW(TAG, "forgetting the hidden update notice failed: %s", esp_err_to_name(e));
+    nvs_close(h);
 }
 
 bool ota_confirm(void)

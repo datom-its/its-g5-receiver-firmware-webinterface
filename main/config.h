@@ -51,6 +51,7 @@ typedef enum {
     /* Append only: config.c posts esp_event_post(CONFIG_EVENT_BASE, index, ...),
      * so these values ARE the event IDs. Reordering rewires every handler. */
     CONFIG_INDEX_BT_ENABLE,         /* u8  bool: BLE frame streaming, read once at boot (0 = off, default) */
+    CONFIG_INDEX_TIMEZONE,          /* u8  zone of web_fmt.c, 0..4, default 2 = Central Europe */
 } config_index_t;
 
 /* Hashes a raw password exactly the way CONFIG_INDEX_WEB_PASSWORD is stored,

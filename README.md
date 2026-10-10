@@ -6,26 +6,27 @@ vehicles and roadside units broadcast around it and forwards the raw frames
 over MQTT.
 
 This fork adds a web interface, a live map, on-device PCAP recording with
-playback, and Bluetooth streaming to a phone.
+playback, and Bluetooth streaming to a phone. It decodes the C-ITS messages it
+receives and checks the certificates of their senders.
 
 Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 
 ![Status page](docs/screenshot-status.png)
 
-*The **Status** page. The node ID and MAC address are masked in this
-screenshot.*
+*The **Status** page. The node ID and the names of the traffic light and
+the bus line are changed in this screenshot.*
 
 ![File management](docs/screenshot-files.png)
 
-*The **Files** page: flash partitions and the SD card.*
+*The **Files** page: the SD card and the flash memory of the device.*
 
 ## Download
 
 Pre-compiled binaries are under [**Releases**](https://codeberg.org/datom/its-g5-receiver-firmware-webinterface/releases).
 A device that already runs this fork needs `its-g5-receiver-firmware.bin`
 and nothing else. Download it and flash it in the web interface under
-**Firmware Update**. A first flash needs all four `.bin` files over USB (see
-below). Neither way needs a build environment.
+**Firmware**. A first flash needs all four `.bin` files over USB (see below).
+Neither way needs a build environment.
 
 > ⚠️ **The first flash from the original opentrafficmap firmware has to go
 > over USB with all four `.bin` files** (see
@@ -37,6 +38,40 @@ below). Neither way needs a build environment.
 ## Version history
 
 Newest first.
+
+### 0.39.5-webui
+
+1. New decoders for priority requests and their answers (SREM, SSEM), sensor
+   objects (CPM), parking (POIM), charging stations (EVCSN) and GNSS
+   corrections (RTCMEM). CAM, DENM, SPATEM and MAPEM are read further. IVIM
+   and SAEM are recognised by type only.
+2. The three European Certificate Trust Lists (33 root certificates), 48
+   authority certificates and 24 revocation lists are built into the firmware.
+3. Each sender's certificate chain is checked with ECDSA up to its root,
+   including validity, revocation and whether every issuer may grant what the
+   certificate below it claims. A second check asks whether the certificate
+   allows the service and the content of the message.
+4. A sample of the messages also gets its signature checked, using at most 5 %
+   of the CPU. P-256 takes 19 ms in hardware, Brainpool 3.6 s in software.
+5. Warnings show their state and twelve more fields, which also go into
+   `logs/events.csv`. Relayed warnings are marked. The map draws their target
+   areas and the objects reported by CPM.
+6. **Traffic** shows a phase history and the priority requests of buses and
+   trams with the answer of the traffic light. Both are kept on the SD card.
+   **Transit** shows the signal request a bus or tram sends with its telegram.
+7. New look for the web interface: four menu groups, cards instead of long
+   tables on a phone, small three-lamp traffic lights, a fault bar under each
+   heading and one button for all explanations. The texts are improved and
+   corrected. New page **Certificates**, and **Senders** is now
+   **Roadside units**.
+8. Export and import of the settings as a JSON file. Without a DHCP server the
+   device takes an address in 169.254.0.0/16.
+9. A POST from another web site gets 403, with or without a web password.
+   Scripts and `curl` work as before. No other site can show the pages in a
+   frame or open the live WebSocket.
+10. Trails on the map no longer jump back to the vehicle at their end. Lane
+    position 14 shows as hard shoulder, and a failed SD write keeps the old
+    file.
 
 ### 0.32.1-webui
 
@@ -54,57 +89,13 @@ Newest first.
    their table row, which does not name a field either; each heading is now a
    real label.
 
-### 0.32.0-webui
-
-1. Four fixes, and three changes to the web interface.
-2. **Files** could show a wrong folder, or fail to load, when a card mounted
-   while the page was being built.
-3. The hourly cleanup of the track log treated a read error like the end of
-   the file. It then replaced the log with the shortened copy and lost the
-   newest points.
-4. A traffic-light countdown above 10 minutes counted as unknown and stayed
-   empty. The bound is now one hour, the maximum the message format can
-   express. At a traffic-actuated junction a green phase can run for hours,
-   and the old limit dropped those values.
-5. The GeoNetworking decoder read a GeoUnicast extended header as 44 bytes
-   instead of 48. It also took the sender position of a multi-hop broadcast
-   from the wrong offset, which dropped the station type.
-6. The map page also transfers about 128 KiB less: `leaflet.js`, `leaflet.css`
-   and `s.css` are compressed when the firmware is built, and the device
-   serves them with `Content-Encoding: gzip`. The compression frees the same
-   amount in flash. A client that does not accept gzip gets 406, since the
-   device cannot unpack them.
-7. The navigation bar loads its own 52-pixel logo in place of the 192-pixel
-   app icon: 3.5 KiB per page instead of 21 KiB.
-8. The page body sits in a `<main>` landmark, so a screen reader can skip the
-   navigation.
-
-### 0.31.1-webui
-
-1. The device unmounts a card that stops taking writes and fails a test write.
-2. **System** and `/status.json` count lost PCAP frames, failed writes and
-   these unmounts across restarts.
-3. The console on **Logs** no longer fills with temperature readings.
-4. Power-off says how much of the recording it could not write.
-5. Power-off now answers with a status code: 200 when the device is prepared,
-   503 while a download still streams from the card, 500 when it could not be
-   prepared.
-6. A failed update confirmation answers with 500.
-7. An unmount waits at most 10 seconds for the card instead of forever, and a
-   blocked card gets its own message.
-
-### 0.31.0-webui
-
-1. The web server is split into modules.
-2. `webserver.c` went from 10435 lines to 5536, and the texts, the tar writer,
-   **Traffic**, **Files**, **Settings** and **System** each have their own
-   file now.
-3. Nothing changes on the device.
-
 Earlier versions:
 
 | Version       | Changes |
 |---------------|---------|
+| **0.32.0-webui** | Four fixes, and three changes to the web interface. **Files** could show a wrong folder, or fail to load, when a card mounted while the page was being built. The hourly cleanup of the track log treated a read error like the end of the file. It then replaced the log with the shortened copy and lost the newest points. A traffic-light countdown above 10 minutes counted as unknown and stayed empty. The bound is now one hour, the maximum the message format can express. At a traffic-actuated junction a green phase can run for hours, and the old limit dropped those values. The GeoNetworking decoder read a GeoUnicast extended header as 44 bytes instead of 48. It also took the sender position of a multi-hop broadcast from the wrong offset, which dropped the station type. The map page also transfers about 128 KiB less: `leaflet.js`, `leaflet.css` and `s.css` are compressed when the firmware is built, and the device serves them with `Content-Encoding: gzip`. The compression frees the same amount in flash. A client that does not accept gzip gets 406, since the device cannot unpack them. The navigation bar loads its own 52-pixel logo in place of the 192-pixel app icon: 3.5 KiB per page instead of 21 KiB. And the page body sits in a `<main>` landmark, so a screen reader can skip the navigation. |
+| **0.31.1-webui** | The device unmounts a card that stops taking writes and fails a test write. **System** and `/status.json` count lost PCAP frames, failed writes and these unmounts across restarts. The console on **Logs** no longer fills with temperature readings. Power-off says how much of the recording it could not write. Power-off now answers with a status code: 200 when the device is prepared, 503 while a download still streams from the card, 500 when it could not be prepared. A failed update confirmation answers with 500. An unmount waits at most 10 seconds for the card instead of forever, and a blocked card gets its own message. |
+| **0.31.0-webui** | The web server is split into modules. `webserver.c` went from 10435 lines to 5536, and the texts, the tar writer, **Traffic**, **Files**, **Settings** and **System** each have their own file now. Nothing changes on the device. |
 | **0.30.5-webui** | Built on ESP-IDF v6.1. The log page now also includes the device's console: the last 64 messages, kept in RAM and readable with no card in the slot. The file page names the reason a card is not in use. Formatting a card no longer stops the log and the recording. |
 | **0.30.0-webui** | The status page draws the last hour of traffic and temperature. Destructive buttons are red outlines now, long explanations fold away, and the long pages carry a jump bar. The dark map draws the OpenStreetMap tiles inverted in the browser, instead of the CARTO ones it used before. General bug fixes. |
 | **0.29.0-webui** | New look for the whole web interface: no framed cards, values under small labels with a status dot, the stylesheet in a cached file. Red-amber has its own column on `/traffic`, warnings record their sender, and the SD card bulk delete works again. General bug fixes. |
@@ -120,71 +111,64 @@ Older entries, back to the first web-UI firmware, are in
 
 ## Web interface
 
-The device serves a web interface on port 80 as soon as it has an IP address.
-It is in German. The flags in the top right corner switch to English.
+The device serves a web interface in German and English on port 80 as soon
+as it has an IP address. Pages open in the language of the browser until you
+pick the other one with the flags in the top right corner, and the browser
+remembers that choice.
 
-- **Status** — frames received, the rate over the last minute, uptime, active
-  channel, sniffer state, MQTT, SD card usage, temperature, node ID, MAC and
-  firmware version. A sparkline draws the last minute of traffic. Two charts
-  below it draw the last hour, one for frames, one for temperature. A block
-  "Message types since power-on" keeps a counter per message type. Receivers
-  entered under **Settings** get a row each with node, rate, uptime and MQTT
-  state. The browser asks them directly, not through this device. Buttons
-  start and stop the sniffer, reboot the device and power it off. Firmware
-  that was just installed shows a banner with a **Confirm update** button
-  until it is confirmed.
-- **Messages** — the last 20 frames received, newest first: time, RSSI,
-  length, type, sender MAC and a decoded summary in one line. The frames
-  arrive over a WebSocket. Times are real local `HH:MM:SS` once NTP has
-  synced. A text field above the table filters the rows while you type. Two
-  more boxes read the PCAP recording and need it switched on. One searches it
-  over a time range, filtered by message type, sender address or station ID,
-  and the hits download as a `.pcap`. Search and export both cover at most 24
-  hours. The search lists 200 rows at most. The export stops at 4 MB, and when
-  it hits that limit it puts `GEKUERZT` in the file name. The other box sends
-  recorded traffic lights and roadside units to opentrafficmap over MQTT,
-  thinned to one frame per station and message type, one an hour, or one every
-  ten minutes.
-- **Map** — where the senders are. Vehicles come from CAM messages. Traffic
-  lights and roadside units come from the position in the GeoNetworking layer.
-  Each station type has its own symbol. A click opens the details: type, time,
-  RSSI, km/h for vehicles, and for buses and trams the line, the destination
-  and the delay they report. The popup also shows signal-phase chips and the
-  active hazard warnings. A marker disappears once nothing new has arrived
-  from it for the hold time set under **Settings**. The map loads the lane
-  geometry of the intersections and recolours it every three seconds to the
-  running signal phase. The layer control offers four base maps: dark, map,
-  light and satellite. Two overlays add the recorded vehicle tracks and the
-  tracks of the other receivers. Under the map, a from/to range and **Load**
-  replay positions out of the PCAP recording, with a slider, a step control
-  and a play button. **Live** returns to the current feed. The tiles come from
-  OpenStreetMap and from Esri/ArcGIS Online. The browser fetches them, the
-  device does not.
-- **Traffic** — what was received per hour, split by road user: car, bus,
-  truck, two-wheeler, pedestrian, traffic light/RSU, other. The vehicle
-  columns count distinct radio identifiers rather than messages, and at a
-  pass-through point that count is roughly the number of vehicles. The ETSI
-  standard lets a vehicle change its identifier mid-journey. The number stays
-  a lower bound. `≥` marks something else: the hour's counting table was at
-  least three quarters full (it holds 2048 identifiers), or a restart split
-  the hour. Beyond 48 hours the figures roll up per day, and each class then
-  contributes its busiest hour instead of the day's sum. The table also gives
-  average and top speed. Every intersection then lists its signal groups with
-  the number of green phases and the measured durations of green, red-amber,
-  amber and red, taken from the traffic lights themselves. A chip says how
-  long the current phase has been running. The DENM warnings come last with
-  the station that sent them, at most the newest 256. Over a window longer
-  than a day they also appear as a profile by hour of day and by weekday. The
-  window is 24 hours, 7 days or 30 days.
-- **Senders** — every traffic light and roadside unit the device has heard,
-  one row each: name, ID and MAC, the message types it sends, frame count,
-  signal level as lowest…highest with an average, position, first seen and
-  last seen. Vehicles are not listed. They swap their identifier as they
-  drive, so each row would be a pseudonym rather than a car. Their frames are
-  only counted, and that count restarts with the device. With a card the list
-  is written to `/sdcard/logs/senders.csv` every five minutes and survives a
-  restart. Without a card the list starts empty at every boot. It holds 128
-  senders and says so when it is full. A button resets it.
+The menu has four groups: **Status**, Nearby (**Map**, **Traffic**,
+**Transit**, **Roadside units**), Radio (**Messages**, **Certificates**) and
+Device (**System**, **Logs**, **Files**, **Settings**, **Firmware**). On a
+phone the long tables turn into cards. Explanations start hidden, and a button
+next to the flags shows and hides them. When something is wrong, a bar under
+the heading of every page says what it is and links to the page that helps:
+the SD card is full, refuses data or has no usable file system, nothing has
+arrived for two minutes, the clock is not set, the device has crashed, or
+MQTT is disconnected.
+
+- **Status** — frames received and the rate over the last minute, uptime,
+  channel, reception, MQTT, SD card, temperature, node ID, MAC and firmware
+  version. The rate turns red when nothing arrives. Charts show the last
+  minute of traffic and the last hour of frames and temperature, and each
+  message type has a counter of its own. A row below shows what is nearby:
+  the traffic lights, the last bus or tram, the active warnings and the other
+  receivers. Each receiver entered under **Settings** gets a row of its own,
+  which the browser fetches from that receiver directly. Buttons start and
+  stop reception, reboot the device and power it off.
+- **Map** — where the senders are, each station type with its own symbol.
+  Vehicles come from CAM messages, traffic lights and roadside units from
+  their position in the GeoNetworking layer. A click on a marker shows type,
+  time, RSSI and speed. Buses and trams add their line, destination and
+  reported delay, and traffic lights their signal phases. Active hazard
+  warnings show there too. A marker goes away when nothing new has come from
+  it for the hold time set under **Settings**. The intersections are drawn
+  lane by lane in the colour of the running signal phase. Besides four base
+  maps there are up to five overlays: the recorded vehicle tracks, the tracks
+  of the other receivers, the target areas of warnings, and the objects other
+  stations see with their sensors (CPM) together with the area those sensors
+  cover. Under the map, **Load** replays positions from the PCAP recording for
+  a from/to range, and **Live** returns to the current feed. The browser loads
+  the tiles from OpenStreetMap and Esri/ArcGIS Online.
+- **Traffic** — the traffic lights first: each intersection with its signal
+  groups, the number of green phases and the measured lengths of green,
+  red-amber, amber and red. Below them come the DENM warnings, at most the
+  newest 256, each with the station that raised it, its state (active,
+  cancelled, withdrawn, expired or unknown) and up to twelve more fields such
+  as range, direction and speed. Relayed warnings are marked. With a window
+  longer than a day the warnings also appear as a profile by hour of day and
+  by weekday. The priority requests of buses and trams with the answer of the
+  traffic light follow, then the phase history. Both are recorded on the SD
+  card, and each has its own delete button. Another section shows the newest
+  message of each sender about sensor objects (CPM), charging stations
+  (EVCSN), parking (POIM) and GNSS corrections (RTCMEM). The hourly table
+  comes last: what was received per hour, by road user (car, bus, truck,
+  two-wheeler, pedestrian, traffic light/RSU, other), with average and top
+  speed. The vehicle columns count distinct station IDs. At a through road
+  that comes close to the number of vehicles, though the ETSI standard lets a
+  vehicle change its ID. `≥` marks a lower bound: the hour's counting table,
+  which holds 2048 IDs, was at least three quarters full, or a restart split
+  the hour. Beyond 48 hours there is one row per day, and each class shows its
+  busiest hour. The window is 24 hours, 7 days or 30 days.
 - **Transit** — the VDV R09 telegrams from passing buses and trams. Per line:
   sightings, average deviation from the timetable, worst delay, worst early
   arrival, a "no value" count for messages without a deviation figure, and
@@ -194,54 +178,86 @@ It is in German. The flags in the top right corner switch to English.
   destination, deviation and how long the vehicle stayed in range. Headway,
   operating hours and the two most common destinations are worked out from the
   stored passages.
-- **Settings** — everything the device lets you change. Node ID and MQTT URI.
-  Network: DHCP or a static address with netmask, gateway and up to three DNS
-  servers, plus the NTP server. Radio: the channel to start on, and whether to
-  keep broadcast frames only. LED brightness and a fixed colour, both applied
-  straight away, plus the Ethernet port's own link LEDs. The web password. The
-  auto-refresh interval of the pages. SD logging with a size budget. Rolling
-  PCAP capture, off by default: retention hours, a size ceiling, the buffer
-  it fills in PSRAM before writing, the longest it waits between writes, and
-  a filter that thins traffic-light messages out or keeps vehicles and
-  warnings only. How long traffic statistics and warnings are kept. How long a
-  map marker stays without an update. The other receivers whose vehicles
-  belong on the map. Vehicle track recording and its retention in days. And
-  Bluetooth, off by default. Settings are kept in flash and survive a restart.
-  The page also offers **Save & reboot** and a reboot button of its own.
-- **Firmware Update** — upload a `.bin` from the browser into the inactive OTA
-  slot. The device reboots into it.
-- **System** — chip, cores, CPU clock, flash size, ESP-IDF version, IP address
-  and the last reset reason. A stability box counts reboots and crashes and
-  shows the last crash and the longest uptime. A button resets those counters
-  and the SD losses. A second table lists what the device had to drop since it
-  started: full receive buffers, a full MQTT queue, track points, lost
-  recording, frames thinned on purpose, the BLE queue and its notifications,
-  passage rows, displaced warnings and failed recording writes, plus the
-  longest SD failure run and hold time. The last row shows the three figures
-  that survive a restart: lost recording frames, failed recording writes and
-  cards taken out after failed writes. Internal RAM and PSRAM get a row each,
-  as free, minimum and total. A table of tasks lists state, priority, CPU load
-  and remaining stack. A banner with a download and a delete link appears when
-  a crash dump is stored.
-- **Files** — the internal flash and the SD card. Sort by name or size, move
+- **Roadside units** — every traffic light and roadside unit the device has
+  heard, one row each: name, ID and MAC, the message types it sends, frame
+  count, signal level, the transmit power and channel load it reports,
+  position, and when it was first and last seen. A signature column shows the
+  result of the certificate check, and a line under the frame count tells how
+  many numbered packets went missing. Vehicles get no row, only a count of
+  their frames, which restarts with the device. With a card the list is saved
+  to `/sdcard/logs/senders.csv` every five minutes and survives a restart. It
+  holds 128 senders, says when it is full and has a reset button. A box on the
+  same page sends recorded traffic lights and roadside units to opentrafficmap
+  over MQTT, thinned to one frame per station and message type, one an hour,
+  or one every ten minutes.
+- **Messages** — the last 20 frames, newest first, live over a WebSocket. Each
+  row shows the time (local once NTP has synced), RSSI, type, sender and a
+  decoded summary. A grey line underneath shows who signed the frame, the
+  result of the chain check, whether the certificate allows the service and
+  content, and for a sample of messages whether the signature itself is
+  valid. It also gives the security header and whether the frame came
+  directly or was relayed. A field above the table filters the rows as you
+  type. With PCAP recording on, a search box looks through the recording by
+  time range, message type, sender address or station ID, and the hits
+  download as a `.pcap`. Search and export cover at most 24 hours. The search
+  lists 200 rows at most, and the export stops at 4 MB and then puts
+  `cut` in the file name.
+- **Certificates** — the certificates the device holds, up to 512, each with
+  the result of its chain check and the reason, issuer, root, validity, key,
+  and how many message signatures from it were valid. Below them are the
+  newest 32 checks of a message signature with sender, message, curve, result
+  and the time taken. The European trust lists, 48 authority certificates and
+  24 revocation lists built into the firmware come last, with their dates.
+  The device does not fetch any of it from the network. Without a set clock
+  it cannot judge validity, and the page says so.
+- **System** — chip, cores, CPU clock, flash size, ESP-IDF version, IP
+  address, the last reset reason and the state of the clock. A stability box
+  counts reboots and crashes and shows the last crash and the longest uptime,
+  and a button resets those counters and the SD losses. A table lists what the
+  device had to drop since it started, such as full receive buffers, a full
+  MQTT queue or failed recording writes, with the three figures that survive a
+  restart in the last row. Frames thinned on purpose are counted on their own.
+  The radio figures give the noise floor and the number of broken frames. The
+  certificate figures count the chain checks with the start-up self test, the
+  permission checks, and the message signatures with average and longest time
+  per curve. RAM, PSRAM and a task list with CPU load and free stack follow. A
+  banner with a download and a delete link appears when a crash dump is
+  stored.
+- **Logs** — the log files from the card, `system.log` and the previous
+  `system.1.log`, shown in the browser with the newest lines in view. Warnings
+  are coloured, and temperature messages hide behind a link. A filter narrows
+  the file down to warnings and errors, a search box finds text, and a link
+  opens the previous file. After a read error a note says that newer lines are
+  missing. Logging is switched on under **Settings**. The device's own console
+  follows underneath: the last 64 messages, held in RAM. They are there even
+  with no card in the slot.
+- **Files** — the SD card and the internal flash. Sort by name or size, move
   back up through the path line, see how full it is, upload and delete files
   one at a time or several at once, download files and folders as a `.tar`,
-  and format the card. The flash partition table is above the card. A
-  partition label opens the internal filesystem, and each partition downloads
-  as an `.img`. The whole page needs the web password, where one is set.
-  Recorded PCAP files are under `/sdcard/pcap/` and open in Wireshark or
+  format the card and mount it again. The flash partition table sits below the
+  card. A partition label opens the internal filesystem, and each partition
+  downloads as an `.img`. The whole page needs the web password, where one is
+  set. Recorded PCAP files are under `/sdcard/pcap/` and open in Wireshark or
   tshark.
-- **Logs** — the log files from the card, `system.log` and the previous
-  `system.1.log`, shown in the browser. A filter narrows them down to warnings
-  and errors, a search box finds text, and a link opens the previous file.
-  Logging is switched on under **Settings**. The device's own console follows
-  underneath: the last 64 messages, held in RAM. They are there even with no
-  card in the slot.
+- **Settings** — everything the device lets you change, in groups for device,
+  reception, network, links, SD card, web and security. Among them are MQTT,
+  DHCP or a static address, the NTP server and the time zone, the web
+  password, the refresh interval of the pages, rolling PCAP capture, vehicle
+  track recording, how long statistics, warnings and tracks are kept, the
+  hold time of map markers, and the other receivers whose vehicles belong on
+  the map. Settings are kept in flash and survive a restart, and they export
+  and import as a JSON file. The page asks before unsaved changes are lost
+  and offers **Save & reboot** and a reboot button of its own.
+- **Firmware** — the running version, and an upload of a `.bin` from the
+  browser into the inactive OTA slot. The device reboots into it. If an update
+  did not start and the device went back to the old version, the page says so.
 
 **Messages** and **Map** update over a WebSocket. **Status**, **System** and
-**Traffic** reload themselves on a timer, with a pause button in the corner.
-No other page refreshes on its own. Setting the interval to `0` under
-**Settings** switches the timer off.
+**Traffic** reload on a timer, which a switch in the page head pauses and an
+interval of `0` under **Settings** switches off. **Traffic** keeps its open
+sections and the scroll position through a reload. No other page refreshes on
+its own. When the device stops answering, the live pages grey their values and
+show a bar with the time of the last answer.
 
 ### Bluetooth (off by default)
 
@@ -258,18 +274,20 @@ counts how long reception was paused.
 ### Update confirmation (rollback)
 
 Firmware installed over the web or by OTA has to be confirmed within **30
-minutes**. Otherwise the device rolls back to the version it came from.
-Confirm with the button on the **Status** page, or with `ota -C` on the
-console.
+minutes** of its first start, or the device rolls back to the version it came
+from. Until then a banner on every page asks for it. Press its button, or run
+`ota -C` on the console.
 
 ### Password protection
 
-Without a password, anyone on the network can use the whole device. That
-covers the settings, the firmware update, reboot and power-off, starting and
-stopping the sniffer, confirming an update, the clear buttons on **Senders**
-and **Transit**, mounting the card, and the re-send to opentrafficmap. The
-files are open too: the SD card, the internal flash, **Logs** and the PCAP
-export. To require a password (HTTP Basic Auth, user name `admin`), either:
+Without a password, anyone on the network can use the whole device. A password
+covers the settings with their export and import, the firmware update,
+confirming an update, reboot and power-off, starting and stopping reception,
+the clear buttons on **Roadside units** and **Transit**, the two delete
+buttons on **Traffic**, mounting the card, and the re-send to opentrafficmap.
+It also covers all file access: the SD card, the internal flash, **Logs** and
+the PCAP export. To require a password (HTTP Basic Auth, user name `admin`),
+either:
 
 - set it on the **Settings** page, in the Web password field, or
 - run this on the USB console:
@@ -279,9 +297,10 @@ export. To require a password (HTTP Basic Auth, user name `admin`), either:
 
 An empty field keeps the current password. To switch the protection off, tick
 "remove password protection", or run `config_clear webpasswd`. These pages
-stay open either way: **Status**, **Messages**, **Map**, **Traffic**,
-**Senders**, **Transit**, **System**, and the JSON data. If the password is
-lost, run `config_clear webpasswd` on the USB console and set a new one.
+stay open either way: **Status**, **Map**, **Traffic**, **Transit**,
+**Roadside units**, **Messages**, **Certificates**, **System**, and the JSON
+data. If the password is lost, run `config_clear webpasswd` on the USB console
+and set a new one.
 
 Two write actions stay open on purpose: resetting the counters on **System**
 and deleting the crash dump. The archive search on **Messages** also reads
@@ -290,6 +309,33 @@ without a password, while the export next to it needs one.
 > Note: the web interface is plain HTTP on port 80 and Basic Auth is only
 > base64-encoded, so the password travels in clear text on the LAN. The
 > password itself is stored as a salted hash, not plaintext.
+
+### Requests from other web sites
+
+The device accepts a change only from its own pages. A browser names the page
+a POST comes from in the `Origin` header, or in `Referer` when `Origin` is
+missing, and that name has to match the `Host` header of the request. A POST
+from a page of another site gets `403 Forbidden` and changes nothing, with or
+without a web password. That includes the two write actions on **System**
+that need no password. A request with neither header passes, the way `curl`
+and scripts send it. A reverse proxy in front of the device has to pass the
+`Host` header on unchanged. For nginx that is this line:
+
+```
+proxy_set_header Host $http_host;
+```
+
+No other site can show a page of the device inside its own page: every page
+sends `X-Frame-Options: DENY` and the policy `frame-ancestors 'none'`. The
+live WebSocket opens only for the device's own pages and for clients that send
+no `Origin`, such as scripts.
+
+DNS rebinding gets past the check: a site points a name of its own at the
+address of the device, and then `Origin` and `Host` name the same site. A web
+password still stops it, except for those two actions on **System** and the
+live WebSocket. The browser then asks for a login for the foreign name. Do not
+enter the password there. The rebind protection of many routers stops it as
+well.
 
 ## PCAP recording & playback
 
@@ -314,15 +360,25 @@ myself for a separate dashboard.
 
 - `/status.json` — the status dashboard: frames, rate, uptime, channel,
   sniffer and MQTT state, and temperature. The card is in there too: how full
-  it is, or why there is none, and what it has lost.
+  it is, or why there is none, and what it has lost. It also carries the noise
+  floor of the last minute, the number of frames with a broken checksum, the
+  number of warnings in force, and whether the device is on its fallback
+  address.
 - `/spatem.json` — one entry per traffic light heard, with its name, revision
   and the current phase of each signal group.
 - `/markers.json` — the last 20 frames out of the ring buffer, one entry per
   frame, with or without a position. The browser groups them per station.
 - `/lanes.json` — the lane geometry of the intersections, in 1e-7 degrees.
 - `/tracks.json` — recorded vehicle tracks. Reads from the SD card.
-- `/system.json` — uptime, CPU load and memory. Half of it is HTML meant for
-  the page.
+- `/warning_areas.json` — the area each warning in force is addressed to, with
+  its shape, centre, size and state. The map draws these.
+- `/cpm.json` — what the collective perception messages of the last three
+  seconds report: each sender with its objects and the areas its sensors
+  cover, placed on the map. The maps of the other receivers read it too.
+- `/system.json` — uptime, CPU load and memory, the radio figures, and the
+  figures of the certificate check: the certificates seen, the chain checks,
+  the start-up self test, the message signatures and the permission answers
+  for service and content. Half of it is HTML meant for the page.
 
 `/status.json` is built from values already in memory, except the card
 figures, which it asks the filesystem for. The **Status** page itself
@@ -330,6 +386,15 @@ fetches it every five seconds. `/tracks.json` reads from the SD card on every
 request. Leave a few minutes between them. `/tracks.json?days=5` asks for the
 last five days. Seven is the most it accepts. Without the parameter you get
 two.
+
+With a card the device also writes CSV files to `/sdcard/logs/`, and **Files**
+offers them for download. `events.csv` holds one row per warning, `phases.csv`
+the traffic-light phases, `priority.csv` the priority requests and their
+answers, and `traffic.csv` the hourly figures. `passages.csv` and
+`transit.csv` hold the buses and trams, `senders.csv` the roadside units and
+`tracks.csv` the vehicle tracks. `cpm.csv` and `rtcmem.csv` get one row per
+sender and minute. `evcsn.csv` and `poim.csv` get a row when the content
+changes, and once an hour.
 
 There is one more endpoint worth knowing if you automate the device. A POST to
 `/poweroff` writes out everything still buffered and unmounts the card. The
@@ -363,15 +428,17 @@ If I ever change one of these, I will note it here.
 - The SD card shares the SPI bus with the Ethernet controller. That bus is
   timing-sensitive under concurrent traffic. The SD clock runs at the 20 MHz
   default.
-- Flash: **8 MB**, partition table `partitions_8M.csv` (A/B OTA slots plus a
-  small coredump partition).
+- Flash: at least **8 MB**. The board carries an ESP32-C5-WROOM-1 module with
+  8 MB (N8R8) or 16 MB (N16R8). The partition table `partitions_8M.csv` uses
+  the first 8 MB and holds two OTA slots, a small FAT area and a coredump
+  partition. Modules with 4 MB are not supported.
 - The correct board config is in the project's `sdkconfig`
   (`HW_VARIANT=i5r-r1`, 8 MB, `partitions_8M.csv`). Do **not** let
   `idf.py set-target` overwrite it.
 
 ## Flashing a pre-compiled firmware
 
-The easiest way is the web interface, under **Firmware Update**.
+The easiest way is the web interface, under **Firmware**.
 To flash over USB instead, use the four `.bin` files from a release folder:
 ```
 esptool --chip esp32c5 -p /dev/ttyACM0 -b 921600 --before=default-reset --after=hard-reset \

@@ -19,7 +19,7 @@ void sdpcap_handle_packet(sniffer_packet_info_t *packet);
  * that LEFT THE RING. `ok` says whether they reached the card, so test `ok`, not the count. */
 size_t sdpcap_flush_now(bool *ok);
 
-/* Bytes captured but not yet on the card. Zero after a flush is the honest test
+/* Bytes captured but not yet on the card. Zero after a flush is the only reliable test
  * for "everything is on the card". The flush's return value cannot tell. */
 size_t sdpcap_buffered(void);
 

@@ -39,6 +39,10 @@ int ptlog_snapshot(pt_line_t *out);
 /* Vehicles currently being tracked as an ongoing passage. */
 int ptlog_open_count(void);
 
+/* The line seen last, for the start page. A vehicle still in range counts with its latest
+ * telegram. RAM only, never the card. 1 = found, 0 = none yet, -1 = table busy. */
+int ptlog_latest(uint16_t *line, uint32_t *sec);
+
 /* Completed passages the append queue could not take, since boot. */
 uint32_t ptlog_passages_dropped(void);
 
@@ -49,7 +53,16 @@ typedef struct {
     uint8_t  course;
     int8_t   deviation;
     uint16_t secs_in_range;
+    /* Appended, never inserted. A row stored without them reads PT_REQ_UNKNOWN in both. */
+    uint8_t  request;        /* last HA other than 0: 1 straight, 2 left, 3 right, 0 none */
+    uint8_t  priority;       /* highest PR of the passage, 0 to 3 */
+    /* Also appended. Both are 0 when the row is older than these columns AND when the
+     * telegram sent a zero. R09.16 cannot tell those apart either. */
+    uint16_t point;          /* MP Meldepunktnummer, last one other than 0 */
+    uint8_t  train_len;      /* ZL Zuglaenge, last one other than 0 */
 } pt_pass_t;
+
+#define PT_REQ_UNKNOWN 0xFF
 
 /* Passage rows kept on the card. At ~40 bytes per row that is ~80 KB. In the
  * header because a caller sizing its array smaller only throws rows away. */

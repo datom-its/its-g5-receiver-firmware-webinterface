@@ -24,7 +24,7 @@ typedef struct {
     /* Last time ANYTHING was heard, SPATEM or MAPEM: an RSU whose SPATEM we
      * cannot decode is still alive and must not be evicted first. */
     uint32_t last_seen;
-    /* Last time PHASES were decoded. The age beside the phase dots uses this,
+    /* Last time PHASES were decoded. The age beside the phase lamps uses this,
      * since a MAPEM alone also refreshes last_seen. 0 = never. */
     uint32_t phase_seen;
     uint32_t station_id;                 /* ItsPduHeader.stationId (map-marker key) */
@@ -38,7 +38,9 @@ typedef struct {
     uint16_t map_man[ITS_SPAT_MAX_SG];
     bool     map_ped[ITS_SPAT_MAX_SG];
     bool     has_pos;
+    bool     has_alt;                    /* the newest MAPEM gave its refPoint altitude */
     int32_t  lat_e7, lon_e7;             /* RSU position (0 if unknown) */
+    int32_t  alt_cm;                     /* cm, with has_alt */
 } spatem_intersection_t;
 
 /* Measured phase durations per signal group. The controller never states them.
@@ -69,12 +71,18 @@ typedef struct {
 } spatem_phases_t;
 
 /* Reception gap that voids a running phase measurement: beyond this we cannot
- * tell whether the light flipped while we were not listening. */
+ * tell whether the light flipped while we were not listening. spatem.c reuses this
+ * bound as SPAT_STALE_SEC to stop handing out the cached phases as current, so a
+ * change here also changes what the map and /traffic still colour in. */
 #define SPAT_GAP_SEC 10
 
 /* Copies the phase tallies for one cached intersection (by region+id) under
  * the module lock. False = no phases have been decoded for it. */
 bool spatem_phases(uint16_t region, uint16_t id, spatem_phases_t *out);
+
+/* True for the states where the movement is allowed, the class the phase tallies count as
+ * green. A pure lookup, no lock. */
+bool spatem_phase_is_green(uint8_t phase);
 
 void spatem_init(void);
 
@@ -83,9 +91,9 @@ void spatem_init(void);
 void spatem_note(const its_spat_t *s, uint32_t station_id, uint32_t seconds,
                  bool has_pos, int32_t lat_e7, int32_t lon_e7);
 
-/* Attach a MAPEM's name and group-to-movement map to the region+id entry;
- * creates one if the phases have not been seen yet. */
-void spatem_note_name(const its_map_t *m, uint32_t seconds);
+/* Name, lane width, speed limits, what each signal group controls and the refPoint altitude
+ * of the newest MAPEM for its intersection. */
+void spatem_note_name(const its_map_t *m, bool has_alt, int32_t alt_cm, uint32_t seconds);
 
 /* Looks up what signal group `sg` of the given intersection controls.
  * Returns false when the MAPEM for it hasn't been seen yet. */

@@ -1,5 +1,6 @@
 #include "sdkconfig.h"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "esp_tls_errors.h"
 #include "mqtt_client.h"
 
 #include "cmd_sniffer.h"
@@ -25,6 +27,7 @@
 #include "temperature.h"
 
 #include "mqtt.h"
+#include "mqtt_uri.h"
 
 constexpr char TAG[] = "MQTT";
 
@@ -81,12 +84,66 @@ static uint32_t tx_dropped;
 static uint32_t replay_pending;
 static uint32_t replay_dropped_total;
 
+/* The pages show since when and why MQTT is down. Only what esp-mqtt reports is named: a
+ * keepalive timeout brings no error, then only the time shows. */
+static portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
+static mqtt_state_t state;
+
 static void mqtt_set_connected(bool new_connected)
 {
     if (new_connected != connected)
     {
         connected = new_connected;
+        portENTER_CRITICAL(&state_mux);
+        state.connected = new_connected;
+        state.since_us = esp_timer_get_time();
+        if (new_connected)
+        {
+            state.ever = true;
+            state.why = MQTT_WHY_NONE;
+        }
+        portEXIT_CRITICAL(&state_mux);
         esp_event_post(MQTT_EVENT_BASE, new_connected ? MQTT_CONNECTED : MQTT_DISCONNECTED, NULL, 0, 0);
+    }
+}
+
+/* was_connected: the link stood before this error, so a transport error means it broke. */
+static mqtt_why_t classify(const esp_mqtt_error_codes_t *e, bool was_connected)
+{
+    if (!e)
+        return MQTT_WHY_NONE;
+    if (e->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED)
+        return e->connect_return_code == MQTT_CONNECTION_REFUSE_BAD_USERNAME ||
+               e->connect_return_code == MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED
+                   ? MQTT_WHY_AUTH : MQTT_WHY_REFUSED;
+    if (e->error_type != MQTT_ERROR_TYPE_TCP_TRANSPORT)
+        return MQTT_WHY_NONE;
+    switch (e->esp_tls_last_esp_err)
+    {
+    case ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME:
+        return MQTT_WHY_DNS;
+    case ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST:
+    case ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT:
+    case ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET:
+        return MQTT_WHY_UNREACH;
+    case ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED:
+        return MQTT_WHY_TLS;
+    default:
+        break;
+    }
+    if (e->esp_tls_cert_verify_flags != 0)
+        return MQTT_WHY_TLS;
+    if (was_connected)
+        return MQTT_WHY_LOST;
+    switch (e->esp_transport_sock_errno)
+    {
+    case ECONNREFUSED:
+    case EHOSTUNREACH:
+    case ENETUNREACH:
+    case ETIMEDOUT:
+        return MQTT_WHY_UNREACH;
+    default:
+        return MQTT_WHY_NONE;
     }
 }
 
@@ -192,6 +249,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             }
             break;
         case MQTT_EVENT_ERROR:
+        {
+            /* Before mqtt_set_connected(false): classify needs to know the link stood. */
+            mqtt_why_t w = classify(event->error_handle, connected);
+            if (w != MQTT_WHY_NONE)
+            {
+                portENTER_CRITICAL(&state_mux);
+                state.why = w;
+                portEXIT_CRITICAL(&state_mux);
+            }
             mqtt_set_connected(false);
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
             if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
@@ -205,6 +271,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 ESP_LOGW(TAG, "Unknown error type: 0x%x", event->error_handle->error_type);
             }
             break;
+        }
         default:
             ESP_LOGI(TAG, "Other event id:%d", event->event_id);
             break;
@@ -321,6 +388,20 @@ void mqtt_start(void)
         return;
     }
 
+    /* The host of the URI this start runs with; a saved new URI shows from the next start. A
+     * link that never stood counts as down from the first start. */
+    static char h[sizeof state.host];   /* static: the event task has only 2304 bytes of stack */
+    mqtt_uri_host(mqtt_uri, h, sizeof h);
+    portENTER_CRITICAL(&state_mux);
+    memcpy(state.host, h, sizeof state.host);
+    state.wanted = mqtt_uri[0] != '\0';
+    if (!state.connected && !state.since_us)
+        state.since_us = esp_timer_get_time();
+    /* The network is back, so 'no network' no longer holds; the next error names the reason. */
+    if (state.why == MQTT_WHY_NONET)
+        state.why = MQTT_WHY_NONE;
+    portEXIT_CRITICAL(&state_mux);
+
     if (!client)
     {
         /* First start: create the client. It stays alive for the rest of the
@@ -372,6 +453,9 @@ void mqtt_stop(void)
     /* Stop only, never esp_mqtt_client_destroy(). The comment at the `client`
      * definition explains the use-after-free it would cause. */
     esp_mqtt_client_stop(client);
+    portENTER_CRITICAL(&state_mux);
+    state.why = MQTT_WHY_NONET;
+    portEXIT_CRITICAL(&state_mux);
     mqtt_set_connected(false);
 
     ESP_LOGI(TAG, "MQTT stopped");
@@ -441,6 +525,13 @@ extern "C" bool mqtt_replay_frame(const uint8_t *data, size_t length)
         return false;
     }
     return true;
+}
+
+extern "C" void mqtt_get_state(mqtt_state_t *out)
+{
+    portENTER_CRITICAL(&state_mux);
+    *out = state;
+    portEXIT_CRITICAL(&state_mux);
 }
 
 extern "C" uint32_t mqtt_tx_dropped(void)

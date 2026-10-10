@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "esp_core_dump.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -20,30 +21,21 @@
 #include "mqtt.h"
 #include "sdcard.h"
 #include "sdpcap.h"
+#include "web_dlname.h"
+#include "web_faults.h"
+#include "web_fmt.h"
+#include "web_system.h"
 #include "web_tar.h"
 #include "webserver_priv.h"
 
-static const char TAG[] = "WEBSERVER";
-
 #if CONFIG_ENABLE_SD
+
+/* Inside the block: HTML_PRINTF and the log lines use it, and a build without SD has none. */
+static const char TAG[] = "WEBSERVER";
 
 /* ================================================================== */
 /*  /sdcard  -- browse, upload, format the SD card                    */
 /* ================================================================== */
-
-
-/* Format a 64-bit byte count (SD cards exceed the uint32_t range). */
-void format_bytes64(uint64_t bytes, char *out, size_t out_size)
-{
-    if (bytes >= (1ULL << 30))
-        snprintf(out, out_size, "%.2f GiB", (double)bytes / (double)(1ULL << 30));
-    else if (bytes >= (1ULL << 20))
-        snprintf(out, out_size, "%.1f MiB", (double)bytes / (double)(1ULL << 20));
-    else if (bytes >= 1024)
-        snprintf(out, out_size, "%.1f KiB", (double)bytes / 1024.0);
-    else
-        snprintf(out, out_size, "%llu B", (unsigned long long)bytes);
-}
 
 /* Percent-encode a path for safe use in an href/query. */
 static void url_encode(const char *in, char *out, size_t out_size)
@@ -113,20 +105,34 @@ static void sd_full_path(const char *rel, char *out, size_t out_size)
         snprintf(out, out_size, "%s", sdcard_mount_point());
 }
 
-/* Overview of the flash partition layout (what's stored where), at the top of
- * the file-management page. */
-static void send_fs_overview(httpd_req_t *req)
+/* The chip's flash comes last and folded: people open this page for the card. Open when
+ * no card is mounted. Class fold, not dtl, because the help switch hides details.dtl. */
+static void send_fs_overview(httpd_req_t *req, bool open)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
-    static EXT_RAM_BSS_ATTR char hdr[768];
+    const char *lq = web_lang() == LANG_EN ? "en" : "de";
+    uint64_t dtot = 0, dfree = 0;
+    bool data_ok = esp_vfs_fat_info(DATA_MOUNT, &dtot, &dfree) == ESP_OK;
+
+    web_send_parts(req, "<div class='grp'><h2>", T(S_FS_FLASH), "</h2>", NULL);
+    if (data_ok)
+    {
+        /* The way to /fs stays visible while the fold is closed. 96 against a measured 70. */
+        char fsl[96];
+        HTML_PRINTF(fsl, "<p class='lnk'><a href='/fs?lang=%s'>%s (/data)</a></p>", lq, T(S_FS_INTERNAL));
+        httpd_resp_send_chunk(req, fsl, HTTPD_RESP_USE_STRLEN);
+    }
+    /* In pieces, not one buffer: S_FS_NOTE alone is over 400 bytes, and a cut <details>
+     * would fold away the rest of the page. */
+    web_send_parts(req, open ? "<details class='fold' open><summary>" : "<details class='fold'><summary>",
+                   T(S_FS_PARTITIONS), "</summary><p class='note hlp'>", T(S_FS_NOTE), "</p>", NULL);
     /* thead/tbody, not the implicit one: only a real thead gets the group's
-     * underline from .grp thead th. */
-    snprintf(hdr, sizeof(hdr),
-        "<div class='grp top'><h2>%s</h2><p class='note'>%s</p>"
+     * underline from .grp thead th. 192 against a measured 140. */
+    char hdr[192];
+    HTML_PRINTF(hdr,
         "<div class='scroll'><table><thead><tr><th>%s</th><th>%s</th><th>%s</th>"
         "<th aria-label='%s'></th></tr></thead><tbody>",
-        T(S_FS_PARTITIONS), T(S_FS_NOTE), T(S_SD_NAME), T(S_COL_TYPE), T(S_SD_SIZE),
-        T(S_A11Y_ACTIONS));
+        T(S_SD_NAME), T(S_COL_TYPE), T(S_SD_SIZE), T(S_A11Y_ACTIONS));
     httpd_resp_send_chunk(req, hdr, HTTPD_RESP_USE_STRLEN);
 
     esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
@@ -134,25 +140,24 @@ static void send_fs_overview(httpd_req_t *req)
     {
         const esp_partition_t *p = esp_partition_get(it);
         char sz[24];
-        format_bytes(p->size, sz, sizeof(sz));
+        fmt_bytes(p->size, web_lang(), sz, sizeof(sz));
         char info[128] = "";
         char namecell[96];
         snprintf(namecell, sizeof(namecell), "%s", p->label);
         if (running && p->address == running->address)
         {
-            snprintf(info, sizeof(info), "<span class='ok'>aktiv</span>");
+            /* Reuses the "active" text of /traffic, which saves a table entry. */
+            snprintf(info, sizeof(info), "<span class='ok'>%s</span>", T(S_WARN_ACTIVE));
         }
         else if (p->type == ESP_PARTITION_TYPE_DATA && p->subtype == ESP_PARTITION_SUBTYPE_DATA_FAT)
         {
-            uint64_t tot = 0, freeb = 0;
-            if (esp_vfs_fat_info("/data", &tot, &freeb) == ESP_OK)
+            if (data_ok)
             {
-                /* The internal FAT filesystem can be browsed, like the SD card below.
+                /* The internal FAT filesystem can be browsed, like the SD card above.
                  * Link the label to the read-only /fs browser. */
-                const char *lq = web_lang() == LANG_EN ? "en" : "de";
                 char u[24], t[24];
-                format_bytes((uint32_t)(tot - freeb), u, sizeof(u));
-                format_bytes((uint32_t)tot, t, sizeof(t));
+                fmt_bytes(dtot - dfree, web_lang(), u, sizeof(u));
+                fmt_bytes(dtot, web_lang(), t, sizeof(t));
                 snprintf(namecell, sizeof(namecell), "<a href='/fs?lang=%s'>%s</a>", lq, p->label);
                 snprintf(info, sizeof(info), "%s /data (%s / %s)", T(S_FS_MOUNT_AT), u, t);
             }
@@ -164,26 +169,39 @@ static void send_fs_overview(httpd_req_t *req)
         char act[256];
         if (info[0]) snprintf(act, sizeof(act), "%s &middot; %s", info, dl);
         else         snprintf(act, sizeof(act), "%s", dl);
+        /* wrapcell: the mount line wraps on a phone instead of widening the table.
+         * 512 against a measured 439. */
         char row[512];
         snprintf(row, sizeof(row),
-            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td class='wrapcell'>%s</td></tr>",
             namecell, p->type == ESP_PARTITION_TYPE_APP ? "app" : "data", sz, act);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
         it = esp_partition_next(it);
     }
-    httpd_resp_send_chunk(req, "</tbody></table></div></div>", HTTPD_RESP_USE_STRLEN);
+    /* Closes the table, the fold and the flash group. */
+    httpd_resp_send_chunk(req, "</tbody></table></div></details></div>", HTTPD_RESP_USE_STRLEN);
 }
 
 /* Sends the path as clickable steps, one chunk per step. A buffer for the whole
- * line would grow with the square of the path depth. lq == NULL: links carry no lang=. */
+ * line would grow with the square of the path depth. With lq == NULL the links carry no
+ * lang=. A set up_text puts a step back to another page at the start of the line, so that
+ * step needs no row of its own. */
 static void send_path_crumbs(httpd_req_t *req, const char *base,
-                             const char *lq, const char *rel)
+                             const char *lq, const char *rel,
+                             const char *up_href, const char *up_text)
 {
     static EXT_RAM_BSS_ATTR char crumb[SD_PATH_MAX * 9 + 192];
     static EXT_RAM_BSS_ATTR char segesc[SD_PATH_MAX * 6], prefenc[SD_PATH_MAX * 3];
     char prefix[SD_PATH_MAX];
 
-    HTML_PRINTF(crumb, "<p class='crumbs'><a href='%s%s%s'>/</a>",
+    httpd_resp_send_chunk(req, "<p class='crumbs'>", HTTPD_RESP_USE_STRLEN);
+    if (up_text)
+    {
+        HTML_PRINTF(crumb, "<a href='%s%s%s'>&larr; %s</a> &middot; ",
+                    up_href, lq ? "?lang=" : "", lq ? lq : "", up_text);
+        httpd_resp_send_chunk(req, crumb, HTTPD_RESP_USE_STRLEN);
+    }
+    HTML_PRINTF(crumb, "<a href='%s%s%s'>/</a>",
                 base, lq ? "?lang=" : "", lq ? lq : "");
     httpd_resp_send_chunk(req, crumb, HTTPD_RESP_USE_STRLEN);
 
@@ -258,12 +276,15 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    /* As on /settings (web_settings.c): same-origin keeps the real Origin on the mount form's
+     * POST, which web_csrf.c checks, and sends no Referer to other sites. */
+    httpd_resp_set_hdr(req, "Referrer-Policy", "same-origin");
     send_page_header(req, T(S_TITLE_SD));
 
-    /* Flash partition layout first, then the SD-card section below it. */
-    send_fs_overview(req);
+    /* The card comes first. The chip's flash follows at the end (send_fs_overview).
+     * 96 against a measured 38. */
     char sdhdr[96];
-    snprintf(sdhdr, sizeof(sdhdr), "<div class='grp'><h2>%s</h2>", T(S_FS_SDCARD));
+    snprintf(sdhdr, sizeof(sdhdr), "<div class='grp top'><h2>%s</h2>", T(S_FS_SDCARD));
     httpd_resp_send_chunk(req, sdhdr, HTTPD_RESP_USE_STRLEN);
 
     /* One state read for both halves of this page, so the reason text and the
@@ -273,64 +294,102 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     if (sdst != SDST_OK && sdst != SDST_NO_USAGE)   /* i.e. not mounted */
     {
-        /* The format button must be reachable HERE: an unreadable card never
-         * mounts, and nothing formats it automatically. */
-        char buf[1024];
-        snprintf(buf, sizeof(buf),
-            /* The final </div> closes the SD group opened above, because this
-             * branch returns early. */
-            "<p>%s</p><p class='note'>%s</p>"
+        const char *lc = web_lang() == LANG_EN ? "en" : "de";
+        /* A card that answers but cannot be used is a fault. No card or a deliberate unmount
+         * can be normal, and a device without a card must not look alarmed. */
+        bool fault = (sdst == SDST_NO_FS || sdst == SDST_WRITE_FAILED);
+        /* Show the actual reason, not a guess. A deliberate unmount leaves no
+         * mount error, so it must not be reported as a dead card. */
+        /* No file system is a warning (a fresh card needs one format), failed writes an alarm
+         * (s.css). 512 against a measured 389 (alarm box, S_SD_ERR_WRITEFAIL) and 251 (note). */
+        char why[512];
+        if (fault)
+            HTML_PRINTF(why, "<p>%s</p><div class='%s'><p>%s</p></div>",
+                        T(S_SD_NOT_MOUNTED), sdst == SDST_WRITE_FAILED ? "alarm" : "warn",
+                        sdst == SDST_NO_FS                ? T(S_SD_ERR_NOFS)
+                        : sdcard_auto_remount_inhibited() ? T(S_SD_ERR_WRITEFAIL_OUT)
+                                                          : T(S_SD_ERR_WRITEFAIL));
+        else
+            HTML_PRINTF(why, "<p>%s</p><p class='note'>%s</p>",
+                        T(S_SD_NOT_MOUNTED),
+                        sdst == SDST_UNMOUNTED ? T(S_SD_ERR_UNMOUNTED) : T(S_SD_ERR_NOCARD));
+        httpd_resp_send_chunk(req, why, HTTPD_RESP_USE_STRLEN);
+
+        /* 256 against a measured 151. */
+        char mnt[256];
+        HTML_PRINTF(mnt,
             /* A div, not a p: a <form> inside a <p> makes the parser close the
              * paragraph early, and the row would fall apart. */
             "<div class='btnrow tools'>"
-            "<form method='post' action='/sdcard/mount' style='display:inline-block'>"
+            /* lang= so the handler's refusal comes back in the page's language: a bare
+             * POST carries nothing resolve_language() could go on. */
+            "<form method='post' action='/sdcard/mount?lang=%s' style='display:inline-block'>"
             /* .act keeps the amber fill that the quiet .btnrow would otherwise remove.
              * Mounting is the main action of this branch. */
-            "<button class='act'>%s</button></form>"
-            "<button class='dngr' onclick=\"if(confirm('%s')){"
-            "var x=new XMLHttpRequest();x.open('POST','/sdcard/format');"
-            "x.onload=function(){location.reload();};"
-            "this.innerText='%s';x.send();}\">%s</button></div></div>",
-            /* Show the actual reason, not a guess. A deliberate unmount leaves no
-             * mount error, so it must not be reported as a dead card. */
-            T(S_SD_NOT_MOUNTED),
-            sdst == SDST_NO_FS       ? T(S_SD_ERR_NOFS)
-            : sdst == SDST_UNMOUNTED ? T(S_SD_ERR_UNMOUNTED)
-            : sdst == SDST_WRITE_FAILED ? (sdcard_auto_remount_inhibited()
-                                           ? T(S_SD_ERR_WRITEFAIL_OUT) : T(S_SD_ERR_WRITEFAIL))
-                                     : T(S_SD_ERR_NOCARD),
-            T(S_SD_MOUNT),
-            T(S_SD_FORMAT_CONFIRM), T(S_SD_FORMATTING), T(S_SD_FORMAT));
-        httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
+            "<button class='act'>%s</button></form>",
+            lc, T(S_SD_MOUNT));
+        httpd_resp_send_chunk(req, mnt, HTTPD_RESP_USE_STRLEN);
+
+        /* The format button must be reachable HERE for a fault: an unreadable card never
+         * mounts, and nothing formats it automatically. */
+        /* Only where formatting can change something: NO_FS (its text recommends it) and
+         * WRITE_FAILED (the last resort before a new card). sdcard_format() mounts first. */
+        if (fault)
+        {
+            /* Same guard as sdreq() on the mounted page: the handler answers "Error" on a
+             * failed format, and a torn connection never reaches onload at all. */
+            /* 640 against a measured 564. A truncated onclick loses the button. */
+            char fbtn[640];
+            HTML_PRINTF(fbtn,
+                "<button class='dngr' onclick=\"if(confirm('%s')){"
+                /* ?lang=: a bare POST would answer a 403 in German on an English page. */
+                "var b=this;var x=new XMLHttpRequest();"
+                "x.open('POST','/sdcard/format?lang='+document.documentElement.lang);"
+                "x.onload=function(){if(x.status==403)alert(x.responseText);"
+                "else if(x.status!==200||x.responseText==='Error')"
+                "alert('%s ('+x.status+')');location.reload();};"
+                "x.onerror=function(){alert('%s');b.innerText='%s';};"
+                "b.innerText='%s';x.send();}\">%s</button>",
+                T(S_SD_FORMAT_CONFIRM), T(S_SD_ACTION_FAILED), T(S_SD_ACTION_FAILED),
+                T(S_SD_FORMAT), T(S_SD_FORMATTING), T(S_SD_FORMAT));
+            httpd_resp_send_chunk(req, fbtn, HTTPD_RESP_USE_STRLEN);
+        }
+        /* Closes the button row and the SD group opened above, because this branch
+         * returns early. The flash group follows with its fold open. */
+        httpd_resp_send_chunk(req, "</div></div>", HTTPD_RESP_USE_STRLEN);
+        send_fs_overview(req, true);
         httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, NULL, 0);
         return ESP_OK;
     }
 
-    /* Usage tile, upload form, format button and the tar and delete buttons. */
+    /* Usage tile, upload form and the tar and delete buttons. The format button comes at the
+     * end of the group. */
+    /* 384 against a measured 287 for the tile and 144 for the box. */
     char usage[384] = "";
     /* SDST_OK already means total != 0, so the percentage cannot divide by zero. */
     if (sdst == SDST_OK)
     {
         char t[24], u[24], f[24];
         unsigned pct = (unsigned)(((total - freeb) * 100ull) / total);
-        format_bytes64(total, t, sizeof(t));
-        format_bytes64(total - freeb, u, sizeof(u));
-        format_bytes64(freeb, f, sizeof(f));
+        fmt_bytes(total, web_lang(), t, sizeof(t));
+        fmt_bytes(total - freeb, web_lang(), u, sizeof(u));
+        fmt_bytes(freeb, web_lang(), f, sizeof(f));
         char used_of[128];
         snprintf(used_of, sizeof(used_of), T(S_SD_USED_OF), u, t, f);
-        /* Same thresholds and the same tile as the SD figure on '/'. %% is a
-         * literal percent sign in the value, not a conversion. */
+        /* The rules of sd_tile() on '/': red while writes are refused, else the 80/92
+         * thresholds. %% is a literal percent sign in the value, not a conversion. */
         snprintf(usage, sizeof(usage),
                  "<div class='grid'><div class='cell'><div class='l %s'>%s</div>"
                  "<div class='v'>%u<span class='e'>%%</span></div>"
                  "<div class='d'>%s</div></div></div>",
-                 lvl_class(pct, 80, 92), T(S_SD_USAGE), pct, used_of);
+                 web_faults_sd_dead(NULL) ? "v-bad" : lvl_class(pct, 80, 92), T(S_SD_USAGE),
+                 pct, used_of);
     }
     else
-        /* Show a note instead of silently dropping the tile. /status.json
-         * reports this case as "usage_error". */
-        snprintf(usage, sizeof(usage), "<p class='note'>%s</p>", T(S_SD_ERR_USAGE));
+        /* A warning box instead of silently dropping the tile: it is a card problem.
+         * /status.json reports this case as "usage_error". */
+        snprintf(usage, sizeof(usage), "<div class='warn'><p>%s</p></div>", T(S_SD_ERR_USAGE));
 
     /* Large scratch buffers would overflow the httpd stack, so they are static.
      * Only the httpd task runs this handler, one request at a time, so one instance
@@ -338,33 +397,41 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
     static EXT_RAM_BSS_ATTR char relenc[SD_PATH_MAX * 3];
     url_encode(rel, relenc, sizeof(relenc));
 
+    /* 4096 against a measured 3520, with the usage slot full and relenc at 959. */
     static EXT_RAM_BSS_ATTR char top[4096];
     snprintf(top, sizeof(top),
         "%s"
-        /* Colon inside the label: on its own it would become a separate flex item
-         * of .tools, and the gap would split it from the word. */
-        "<p class='tools'><label class='cap' for='fw'>%s:</label><input type='file' id='fw'>"
+        /* Label above its field in one .fld, so a wrapping row cannot part them. */
+        "<p class='tools'><span class='fld'><label class='cap' for='fw'>%s</label><input type='file' id='fw'></span>"
         "<button onclick='up()'>%s</button> "
         "<span id='ur'></span></p>"
-        "<p class='btnrow tools'><button class='dngr' onclick='fmt()'>%s</button> <span id='fr'></span></p>"
         "<p class='btnrow tools'><button onclick='seltar()'>&#8595; %s</button> "
         "<button class='dngr' onclick='seldel()'>%s</button></p>"
-        "<p class='note'>%s</p>"
+        "<p class='note hlp'>%s</p>"
         "<script>"
         "var P='%s';var ITS_SD_FAIL='%s';"
         /* sdreq() alerts on a non-200 status or an "Error" body before reloading.
-         * Otherwise a 414 from a long selection or a 500 would look like success. */
-        "function sdreq(u,go){var x=new XMLHttpRequest();x.open('POST',u);"
-        "x.onload=function(){if(x.status!==200||x.responseText==='Error')"
+         * Otherwise a 414 from a long selection or a 500 would look like success. A 403
+         * of web_csrf.c names its cause, so its text is shown. lang= goes first, where
+         * resolve_language() finds it even after a long ?sel=; a bare POST answers German. */
+        "function sdreq(u,go){var i=u.indexOf('?'),l='lang='+document.documentElement.lang;"
+        "u=i<0?u+'?'+l:u.slice(0,i+1)+l+'&'+u.slice(i+1);"
+        "var x=new XMLHttpRequest();x.open('POST',u);"
+        "x.onload=function(){if(x.status==403)alert(x.responseText);"
+        "else if(x.status!==200||x.responseText==='Error')"
         "alert(ITS_SD_FAIL+' ('+x.status+')');location.reload();};"
-        "x.onerror=function(){alert(ITS_SD_FAIL);};x.send(go);}"
+        /* A torn connection does not reload the page, so the progress words are cleared by
+         * hand. Otherwise the page keeps saying "uploading" or "formatting" for good. */
+        "x.onerror=function(){alert(ITS_SD_FAIL);"
+        "document.getElementById('ur').innerText='';"
+        "document.getElementById('fr').innerText='';};x.send(go);}"
         /* P and the del() paths arrive url-encoded from the server. Encoding them again
          * would turn a space into %2520. Only raw DOM values still need encoding. */
+        /* Through sdreq() as well: the upload answers 400 ("bad name", "empty") or 500
+         * ("write failed", the part-written file is removed), never a body of "Error". */
         "function up(){var f=document.getElementById('fw').files[0];if(!f){return;}"
-        "var x=new XMLHttpRequest();"
-        "x.open('POST','/sdcard/upload?p='+P+'&name='+encodeURIComponent(f.name));"
-        "x.onload=function(){location.reload();};"
-        "document.getElementById('ur').innerText='%s';x.send(f);}"
+        "document.getElementById('ur').innerText='%s';"
+        "sdreq('/sdcard/upload?p='+P+'&name='+encodeURIComponent(f.name),f);}"
         "function fmt(){if(!confirm('%s'))return;"
         "document.getElementById('fr').innerText='%s';sdreq('/sdcard/format');}"
         "function del(p){if(!confirm('%s'))return;"
@@ -380,7 +447,6 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
         "</script>",
         usage,
         T(S_SD_UP_HERE), T(S_SD_UP_BTN),
-        T(S_SD_FORMAT),
         T(S_TAR_SELECTED), T(S_SD_DELETE_SELECTED),
         T(S_TAR_HINT),
         relenc, T(S_SD_ACTION_FAILED),
@@ -391,17 +457,18 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, top, HTTPD_RESP_USE_STRLEN);
 
 
-    /* Same language as /fs: resolve_language has no cookie and no default
-     * beyond German, so a link without lang= silently switches back. */
+    /* Same language as /fs: a link without lang= falls back to the browser's language,
+     * not to the one this page shows. */
     const char *lq = web_lang() == LANG_EN ? "en" : "de";
-    send_path_crumbs(req, "/sdcard", lq, rel);
+    send_path_crumbs(req, "/sdcard", lq, rel, NULL, NULL);
 
     /* The sorter only moves rows inside <tbody id='dbody'>, and without it
      * the page cannot sort. The header row stays outside it in <thead>. */
+    /* 512 against a measured 263. */
     char tblopen[512];
     HTML_PRINTF(tblopen,
         "<div class='scroll'><table><thead><tr>"
-        "<th><input type='checkbox' onclick='selall(this)' aria-label='%s'></th>"
+        "<th><label><input type='checkbox' onclick='selall(this)' aria-label='%s'></label></th>"
         "<th data-c='1'>%s</th>"
         "<th data-c='2'>%s</th>"
         "<th aria-label='%s'></th></tr></thead><tbody id='dbody'>",
@@ -463,25 +530,26 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
             html_escape(childrel, relhtml, sizeof(relhtml));
 
             /* data-d/data-sz feed the client-side sorter: the displayed size is
-             * already formatted ("1.0 MiB") and cannot be compared numerically. */
-            /* 16x: the escaped path fits twice over (href and checkbox value)
-             * plus the name twice, once of it inside the checkbox label. */
+             * already formatted ("1,0 MB") and cannot be compared numerically. */
+            /* 16x holds the path once escaped (checkbox value) and twice url-encoded (link
+             * and delete button), plus the name twice, once in the checkbox's aria-label.
+             * Worst case 4648 of 5120 (file row). */
             static EXT_RAM_BSS_ATTR char row[SD_PATH_MAX * 16];
             if (is_dir)
             {
                 snprintf(row, sizeof(row),
-                    "<tr data-d='1' data-sz='0'><td><input type='checkbox' class='sel'"
-                    " aria-label='%s: %s' value='%s'></td>"
+                    "<tr data-d='1' data-sz='0'><td><label><input type='checkbox' class='sel'"
+                    " aria-label='%s: %s' value='%s'></label></td>"
                     "<td><a href='/sdcard?p=%s&amp;lang=%s'>%s/</a></td><td></td><td></td></tr>",
                     T(S_A11Y_SELECT_ROW), nameesc, relhtml, relenc2, lq, nameesc);
             }
             else
             {
                 char sz[32];
-                format_bytes64((uint64_t)st.st_size, sz, sizeof(sz));
+                fmt_bytes((uint64_t)st.st_size, web_lang(), sz, sizeof(sz));
                 snprintf(row, sizeof(row),
-                    "<tr data-d='0' data-sz='%llu'><td><input type='checkbox' class='sel'"
-                    " aria-label='%s: %s' value='%s'></td>"
+                    "<tr data-d='0' data-sz='%llu'><td><label><input type='checkbox' class='sel'"
+                    " aria-label='%s: %s' value='%s'></label></td>"
                     "<td><a href='/sdcard/download?p=%s'>%s</a></td><td>%s</td>"
                     "<td><button class='dngr' onclick=\"del('%s')\">%s</button></td></tr>",
                     (unsigned long long)st.st_size,
@@ -504,8 +572,13 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
 
     httpd_resp_send_chunk(req, "</tbody></table></div>", HTTPD_RESP_USE_STRLEN);
     send_dir_sort_script(req);
-    /* Closes the SD group opened above. */
+    /* Formatting last, away from upload and selection, because it erases the whole card:
+     * the same danger at the end as on /transit. fmt() and sdreq() at the top write #fr. */
+    web_send_parts(req, "<p class='btnrow'><button class='dngr' onclick='fmt()'>", T(S_SD_FORMAT),
+                   "</button> <span id='fr'></span></p>", NULL);
+    /* Closes the SD group opened above. The chip's flash follows, folded. */
     httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+    send_fs_overview(req, false);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -562,8 +635,16 @@ esp_err_t sdcard_download_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
     }
+    /* A read error ends the loop like the end of the file. Without the last chunk a short
+     * file cannot pass for a whole one. */
+    bool rd_err = ferror(f) != 0;
     fclose(f);
     sdcard_read_end();
+    if (rd_err)
+    {
+        ESP_LOGW(TAG, "download: read error in %s, aborted", full);
+        return ESP_FAIL;
+    }
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
@@ -643,7 +724,11 @@ esp_err_t sdcard_upload_handler(httpd_req_t *req)
         if (fwrite(buf, 1, r, f) != (size_t)r) { ok = false; break; }
         remaining -= r;
     }
-    fclose(f);
+    /* picolibc's fclose hides a failed last write-out: an "OK" would stand for a short file. */
+    if (ok && (fflush(f) != 0 || ferror(f)))
+        ok = false;
+    if (fclose(f) != 0)
+        ok = false;
     if (!ok)
     {
         remove(full);
@@ -824,7 +909,7 @@ typedef struct {
     bool pairs_overflow;
     bool de;                     /* language captured at request time */
     uint32_t from, to, thin;     /* thin 0 = one frame per station+type, total */
-    char result[256];            /* final line for the status poll */
+    char result[256];            /* final line for the status poll; worst 222 (German) */
 } rsu_job_t;
 static rsu_job_t rsu_job;
 
@@ -845,12 +930,14 @@ static bool rsu_collect_cb(uint32_t sec, uint32_t usec, const uint8_t *frame,
     (void)usec;
     rsu_batch_t *b = (rsu_batch_t *)vctx;
 
-    if (d->station_type != 15 || d->message_id == 0)
+    /* The kind, so an old EVCSN (id 3 at version 0) and a POIM count as two types. */
+    uint8_t kind = its_msg_kind(d->pdu_version, d->message_id);
+    if (d->station_type != 15 || kind == 0)
         return true;                    /* skip: not an RSU, or message type unknown */
 
     for (size_t i = 0; i < b->n_seen; i++)
     {
-        if (b->seen[i].station != d->station_id || b->seen[i].msgid != d->message_id)
+        if (b->seen[i].station != d->station_id || b->seen[i].msgid != kind)
             continue;
         if (rsu_job.thin == 0 || sec - b->seen[i].last_sec < rsu_job.thin)
         {
@@ -876,7 +963,7 @@ static bool rsu_collect_cb(uint32_t sec, uint32_t usec, const uint8_t *frame,
             rsu_job.stations++;
     }
     b->seen[b->n_seen].station = d->station_id;
-    b->seen[b->n_seen].msgid = d->message_id;
+    b->seen[b->n_seen].msgid = kind;
     b->seen[b->n_seen].last_sec = sec;
     b->n_seen++;
 
@@ -899,6 +986,8 @@ keep:
  * the actual cause when a frame cannot be queued. */
 static bool rsu_drain_batch(rsu_batch_t *b)
 {
+    /* web_str with the language of the request, never T(): this task has no request. */
+    const lang_t l = rsu_job.de ? LANG_DE : LANG_EN;
     for (size_t i = 0; i < b->n; i++)
     {
         bool ok = false;
@@ -913,11 +1002,7 @@ static bool rsu_drain_batch(rsu_batch_t *b)
         if (!ok)
         {
             snprintf(rsu_job.result, sizeof(rsu_job.result), "%s",
-                     mqtt_connected_state
-                         ? (rsu_job.de ? "Fehler: MQTT-Warteschlange dauerhaft voll."
-                                       : "Error: MQTT queue stayed full.")
-                         : (rsu_job.de ? "Fehler: MQTT-Verbindung verloren."
-                                       : "Error: MQTT connection lost."));
+                     web_str(mqtt_connected_state ? S_RSU_R_QFULL : S_RSU_R_LOST, l));
             return false;
         }
         rsu_job.sent++;
@@ -931,6 +1016,8 @@ static bool rsu_drain_batch(rsu_batch_t *b)
 static void rsu_upload_task(void *arg)
 {
     (void)arg;
+    /* web_str with the language of the request, never T(): this task has no request. */
+    const lang_t l = rsu_job.de ? LANG_DE : LANG_EN;
     bool truncated = false, failed = false;
     uint32_t replay_drop0 = mqtt_replay_dropped();
 
@@ -938,8 +1025,7 @@ static void rsu_upload_task(void *arg)
     uint8_t *buf = b ? heap_caps_malloc(RSU_BATCH_BYTES, MALLOC_CAP_SPIRAM) : NULL;
     if (!b || !buf)
     {
-        snprintf(rsu_job.result, sizeof(rsu_job.result), "%s",
-                 rsu_job.de ? "Fehler: kein Speicher." : "Error: out of memory.");
+        snprintf(rsu_job.result, sizeof(rsu_job.result), "%s", web_str(S_RSU_R_NOMEM, l));
         goto out;
     }
     b->buf = buf;
@@ -976,22 +1062,13 @@ static void rsu_upload_task(void *arg)
                              + mqtt_replay_pending();
         char und[80] = "";
         if (undelivered)
-            snprintf(und, sizeof(und),
-                     rsu_job.de ? " %lu davon nicht zugestellt (Verbindung)!"
-                                : " %lu of them not delivered (connection)!",
-                     (unsigned long)undelivered);
+            snprintf(und, sizeof(und), web_str(S_RSU_R_UNDELIV, l), (unsigned long)undelivered);
 
-        snprintf(rsu_job.result, sizeof(rsu_job.result),
-                 rsu_job.de
-                     ? "Fertig: %lu Frames von %lu Station(en) gesendet, %lu ausgedünnt.%s%s%s"
-                     : "Done: %lu frames from %lu station(s) sent, %lu thinned.%s%s%s",
+        snprintf(rsu_job.result, sizeof(rsu_job.result), web_str(S_RSU_R_DONE, l),
                  (unsigned long)rsu_job.sent, (unsigned long)rsu_job.stations,
                  (unsigned long)rsu_job.thinned,
-                 truncated ? (rsu_job.de ? " Zeitraum nur teilweise gelesen!"
-                                         : " Period only partly read!") : "",
-                 rsu_job.pairs_overflow
-                     ? (rsu_job.de ? " Mehr als 64 Sender-Typ-Paare, Rest übersprungen."
-                                   : " More than 64 station-type pairs, rest skipped.") : "",
+                 truncated ? web_str(S_RSU_R_PARTIAL, l) : "",
+                 rsu_job.pairs_overflow ? web_str(S_RSU_R_PAIRS, l) : "",
                  und);
     }
 
@@ -1065,8 +1142,8 @@ esp_err_t rsu_upload_status_handler(httpd_req_t *req)
         snprintf(out, sizeof(out), "{\"run\":1,\"sent\":%lu}",
                  (unsigned long)rsu_job.sent);
     else
-        /* result holds only our own fixed texts and numbers. They contain no quotes,
-         * so they are safe to embed unescaped. */
+        /* result holds only numbers and texts from the table (S_RSU_R_*). The table forbids
+         * quotes and backslashes in those texts, so result can be embedded unescaped. */
         snprintf(out, sizeof(out), "{\"run\":0,\"msg\":\"%s\"}", rsu_job.result);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -1088,21 +1165,34 @@ esp_err_t sdcard_format_handler(httpd_req_t *req)
 
 esp_err_t sdcard_mount_handler(httpd_req_t *req)
 {
+    resolve_language(req);
     if (!check_update_auth(req))
         return send_auth_required(req);
     /* Mounting by hand takes the device out of the prepared-for-power-off
      * state, so let sysmon look after the card again. */
     sdcard_allow_auto_remount();
-    sdcard_mount();
+    /* A manual mount (auto_retry=false) is refused in practice only by the needs-restart
+     * latch sdcard.c sets when a format did not mount back. The IDF returns the same code
+     * for a double registration. Redirecting would show the same page with the same button
+     * again, and nothing would ever say why it does nothing. */
+    if (sdcard_mount() == ESP_ERR_INVALID_STATE)
+    {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, T(S_SD_NEEDS_RESTART));
+        return ESP_FAIL;
+    }
     httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_set_hdr(req, "Location", "/sdcard");
+    /* lang= goes into the target, because the redirected GET is a new request and
+     * resolve_language() would fall back to the browser's language. The targets are
+     * literals because set_hdr keeps the pointer. */
+    httpd_resp_set_hdr(req, "Location",
+                       web_lang() == LANG_EN ? "/sdcard?lang=en" : "/sdcard?lang=de");
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
 
 /* ================================================================== */
 /*  /fs  -- read-only browser for the internal FAT storage (/data)    */
-/*  Reached from the "storage" partition row on the file-management    */
+/*  Reached from the flash group at the end of the file-management    */
 /*  page. Deliberately view+download only: /data is system storage,   */
 /*  no upload/delete/format like the removable SD card.               */
 /* ================================================================== */
@@ -1130,36 +1220,38 @@ esp_err_t internal_get_handler(httpd_req_t *req)
     }
 
     const char *lq = web_lang() == LANG_EN ? "en" : "de";
-    send_page_header(req, T(S_TITLE_SD));
+    /* Its own title, not the one of /sdcard. The step back to /sdcard is in the path line, and
+     * under the same title that link would look as if it led to this page. */
+    send_page_header(req, T(S_FS_INTERNAL));
 
     /* The path is not in here (send_path_crumbs escapes it per step), so a small
-     * stack buffer is enough. */
+     * stack buffer is enough: 1024 against a measured 821. */
     char head[1024];
     HTML_PRINTF(head,
         /* Path in a span, because the heading is uppercased. A mount point is
          * case-sensitive, and "/DATA" names something that does not exist. */
         "<div class='grp top'><h2>%s &middot; <span class='path'>/data</span></h2>"
-        "<p class='jump'><a href='/sdcard?lang=%s'>&larr; %s</a></p>"
         "<p class='btnrow tools'><button onclick='seltar()'>&#8595; %s</button></p>"
-        "<p class='note'>%s</p>"
+        "<p class='note hlp'>%s</p>"
         "<script>function selall(c){document.querySelectorAll('.sel').forEach(function(x){x.checked=c.checked;});}"
         "function seltar(){var s=[];document.querySelectorAll('.sel:checked').forEach("
         "function(c){s.push(encodeURIComponent(c.value));});"
         "if(!s.length){alert('%s');return;}location.href='/fs/tar?sel='+s.join('|');}</script>",
-        T(S_FS_INTERNAL), lq, T(S_TITLE_SD),
+        T(S_FS_INTERNAL),
         T(S_TAR_SELECTED),
         T(S_TAR_HINT),
         T(S_TAR_NONE));
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
 
-    send_path_crumbs(req, "/fs", lq, rel);
+    send_path_crumbs(req, "/fs", lq, rel, "/sdcard", T(S_TITLE_SD));
 
     /* The sorter only moves rows inside <tbody id='dbody'>, and without it
      * the page cannot sort. The header row stays outside it in <thead>. */
+    /* 512 against a measured 232. */
     char tblopen[512];
     HTML_PRINTF(tblopen,
         "<div class='scroll'><table><thead><tr>"
-        "<th><input type='checkbox' onclick='selall(this)' aria-label='%s'></th>"
+        "<th><label><input type='checkbox' onclick='selall(this)' aria-label='%s'></label></th>"
         "<th data-c='1'>%s</th>"
         "<th data-c='2'>%s</th></tr></thead><tbody id='dbody'>",
         T(S_A11Y_SELECT_ALL), T(S_SD_NAME), T(S_SD_SIZE));
@@ -1210,26 +1302,26 @@ esp_err_t internal_get_handler(httpd_req_t *req)
             url_encode(childrel, relenc2, sizeof(relenc2));
             html_escape(childrel, relhtml, sizeof(relhtml));
 
-            /* 16x: the escaped path fits twice over (href and checkbox value)
-             * plus the name twice, once of it inside the checkbox label. */
+            /* 16x holds the path once escaped (checkbox value) and once url-encoded (link),
+             * plus the name twice, once in the checkbox's aria-label. Worst case 3616 of 5120. */
             static EXT_RAM_BSS_ATTR char row[SD_PATH_MAX * 16];
             if (is_dir)
             {
                 snprintf(row, sizeof(row),
-                    "<tr data-d='1' data-sz='0'><td><input type='checkbox' class='sel'"
-                    " aria-label='%s: %s' value='%s'></td>"
+                    "<tr data-d='1' data-sz='0'><td><label><input type='checkbox' class='sel'"
+                    " aria-label='%s: %s' value='%s'></label></td>"
                     "<td><a href='/fs?p=%s&amp;lang=%s'>%s/</a></td><td></td></tr>",
                     T(S_A11Y_SELECT_ROW), nameesc, relhtml, relenc2, lq, nameesc);
             }
             else
             {
                 char sz[32];
-                format_bytes64((uint64_t)st.st_size, sz, sizeof(sz));
+                fmt_bytes((uint64_t)st.st_size, web_lang(), sz, sizeof(sz));
                 /* data-d/data-sz feed the sorter: the displayed size is already
-                 * formatted ("1.0 MiB") and cannot be compared numerically. */
+                 * formatted ("1,0 MB") and cannot be compared numerically. */
                 snprintf(row, sizeof(row),
-                    "<tr data-d='0' data-sz='%llu'><td><input type='checkbox' class='sel'"
-                    " aria-label='%s: %s' value='%s'></td>"
+                    "<tr data-d='0' data-sz='%llu'><td><label><input type='checkbox' class='sel'"
+                    " aria-label='%s: %s' value='%s'></label></td>"
                     "<td><a href='/fs/download?p=%s'>%s</a></td><td>%s</td></tr>",
                     (unsigned long long)st.st_size,
                     T(S_A11Y_SELECT_ROW), nameesc, relhtml, relenc2, nameesc, sz);
@@ -1292,7 +1384,14 @@ esp_err_t internal_download_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
     }
+    /* As on the card: a read error must break the download, not end it short. */
+    bool rd_err = ferror(f) != 0;
     fclose(f);
+    if (rd_err)
+    {
+        ESP_LOGW(TAG, "download: read error in %s, aborted", full);
+        return ESP_FAIL;
+    }
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
@@ -1300,6 +1399,71 @@ esp_err_t internal_download_handler(httpd_req_t *req)
 /* ================================================================== */
 /*  Raw partition image download  (/fs/part?label=...)                */
 /* ================================================================== */
+
+/* The part of an image's file name that says what it holds. An app slot is named by its
+ * version, the crash dump by the firmware that crashed, anything else by label and time. */
+static void part_what(const esp_partition_t *p, char *out, size_t cap)
+{
+    esp_app_desc_t d;
+    if (p->type == ESP_PARTITION_TYPE_APP && esp_ota_get_partition_description(p, &d) == ESP_OK)
+    {
+        snprintf(out, cap, "%s-%.31s", p->label, d.version);
+        return;
+    }
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    /* The dump belongs to the firmware that crashed, which after an update is the one in the
+     * other slot. Its summary holds the start of that firmware's ELF hash, the one esp-coredump
+     * checks. */
+    if (p->type == ESP_PARTITION_TYPE_DATA && p->subtype == ESP_PARTITION_SUBTYPE_DATA_COREDUMP &&
+        web_coredump_present())
+    {
+        /* About 1.1 KB with the stack copy in it, so PSRAM first. Zeroed: a dump without its
+         * version note leaves the hash unwritten, and "" then names nothing. */
+        esp_core_dump_summary_t *sum = heap_caps_calloc(1, sizeof(*sum), MALLOC_CAP_SPIRAM);
+        if (!sum)
+            sum = calloc(1, sizeof(*sum));
+        bool named = false;
+        if (sum && esp_core_dump_get_summary(sum) == ESP_OK)
+        {
+            char *h = (char *)sum->app_elf_sha256;
+            h[sizeof(sum->app_elf_sha256) - 1] = '\0';
+            size_t n = strlen(h);
+            /* Nine hex digits with CONFIG_APP_RETRIEVE_LEN_ELF_SHA=9. Fewer than eight
+             * would match by chance. Every slot is walked, so the iterator ends released. */
+            if (n >= 8 && n <= 64)
+            {
+                esp_partition_iterator_t it =
+                    esp_partition_find(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, NULL);
+                for (; it != NULL; it = esp_partition_next(it))
+                {
+                    char hex[65];
+                    if (named ||
+                        esp_ota_get_partition_description(esp_partition_get(it), &d) != ESP_OK)
+                        continue;
+                    for (size_t i = 0; i < sizeof(d.app_elf_sha256); i++)
+                        snprintf(hex + 2 * i, 3, "%02x", d.app_elf_sha256[i]);
+                    if (strncmp(hex, h, n) == 0)
+                    {
+                        snprintf(out, cap, "%s-%.31s", p->label, d.version);
+                        named = true;
+                    }
+                }
+                if (!named)
+                {
+                    snprintf(out, cap, "%s-elf-%s", p->label, h);
+                    named = true;
+                }
+            }
+        }
+        free(sum);
+        if (named)
+            return;
+    }
+#endif
+    char stamp[16];
+    web_dl_stamp(stamp, sizeof(stamp), time(NULL));
+    snprintf(out, cap, "%s%s%s", p->label, stamp[0] ? "-" : "", stamp);
+}
 
 esp_err_t partimg_download_handler(httpd_req_t *req)
 {
@@ -1323,17 +1487,25 @@ esp_err_t partimg_download_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no partition");
         return ESP_FAIL;
     }
-    char disp[64];
-    snprintf(disp, sizeof(disp), "attachment; filename=\"%s.img\"", p->label);
+    /* its-<node id>-ota_1-0.38.16-webui.img: what 48 of 64 (label 16, version 31). */
+    char what[64], disp[WEB_DL_DISP_MAX];
+    part_what(p, what, sizeof(what));
     httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    httpd_resp_set_hdr(req, "Content-Disposition", web_dl_disp(disp, sizeof(disp), what, "img"));
 
     static EXT_RAM_BSS_ATTR uint8_t partbuf[4096];
     for (size_t off = 0; off < p->size; off += sizeof(partbuf))
     {
         size_t n = (p->size - off) < sizeof(partbuf) ? (p->size - off) : sizeof(partbuf);
-        if (esp_partition_read(p, off, partbuf, n) != ESP_OK)
+        esp_err_t e = esp_partition_read(p, off, partbuf, n);
+        if (e != ESP_OK)
+        {
+            /* A flash fault, not a browser that left, and nothing else logs it: the worker only
+             * closes the socket. */
+            ESP_LOGW(TAG, "%s: read at 0x%x failed (%s), download cut", p->label, (unsigned)off,
+                     esp_err_to_name(e));
             return ESP_FAIL;
+        }
         if (httpd_resp_send_chunk(req, (const char *)partbuf, n) != ESP_OK)
             return ESP_FAIL;
     }
