@@ -4,7 +4,7 @@
 
 /* The pair count is written out in the comment at the top of web_strings.h. This holds the
  * two together: a new text fails the build until that number is corrected. */
-_Static_assert(S_COUNT == 1232, "update the pair count in the header comment of web_strings.h");
+_Static_assert(S_COUNT == 1244, "update the pair count in the header comment of web_strings.h");
 
 static const char *STR[S_COUNT][2] = {
     /*                        DE                          EN                     */
@@ -393,6 +393,20 @@ static const char *STR[S_COUNT][2] = {
     [S_ETH_CURRENT]     = { "Aktuell bezogen",           "Currently in use" },
     [S_ETH_CUR_NOT_UP]  = { "(keine IP &ndash; Kabel/Link pr&uuml;fen)",
                            "(no IP yet &ndash; check cable/link)" },
+    [S_ETH_STATS]       = { "Netzwerk-Z&auml;hler",       "Network counters" },
+    [S_ETH_ST_PAUSE]    = { "Puffer fast voll",         "buffer nearly full" },
+    [S_ETH_ST_OVERRUN]  = { "Puffer &uuml;bergelaufen",  "buffer overflowed" },
+    [S_ETH_ST_CRC]      = { "CRC-Fehler",               "CRC errors" },
+    [S_ETH_ST_SYMBOL]   = { "Symbolfehler",             "symbol errors" },
+    [S_ETH_ST_LONG]     = { "lange Rahmen",             "long frames" },
+    [S_ETH_ST_SPI]      = { "SPI-Busfehler",            "SPI bus errors" },
+    [S_ETH_ST_BADLEN]   = { "falsche L&auml;nge",         "wrong length" },
+    [S_ETH_ST_HINT]     = { "Seit dem Start. &bdquo;Puffer fast voll&ldquo; hei&szlig;t: Der Netzwerkchip "
+                            "bat den Switch um eine Pause, weil seine Daten nicht rechtzeitig abgeholt "
+                            "wurden. CRC- und Symbolfehler deuten auf Kabel oder Stecker.",
+                            "Since the start. &ldquo;buffer nearly full&rdquo; means the network chip asked "
+                            "the switch for a pause because its data was not collected in time. CRC and "
+                            "symbol errors point to the cable or a plug." },
     [S_NTP_SERVER]      = { "NTP-Server",                "NTP server" },
     [S_COL_TYPE]        = { "Typ",                       "Type" },
     [S_ACTIVITY_TITLE]  = { "Aktivit&auml;t",            "Activity" },
@@ -804,11 +818,16 @@ static const char *STR[S_COUNT][2] = {
                             "this persists, check the card." },
     [S_LOGS_CONSOLE]    = { "Konsole", "Console" },
     [S_LOGS_CONSOLE_HINT] = {
-        "Die letzten 64 Meldungen des Ger&auml;ts, gehalten im Arbeitsspeicher. Ein Neustart "
-        "l&ouml;scht sie, daf&uuml;r gibt es sie auch ohne SD-Karte. Das System-Log oben braucht "
-        "dagegen die SD-Karte.",
-        "The device's last 64 messages, kept in RAM. A restart clears them, but they are there "
-        "even without an SD card. The system log above needs the SD card." },
+        "Die letzten 256 Meldungen seit dem Start, gehalten im Arbeitsspeicher. Es gibt sie auch "
+        "ohne SD-Karte. Das System-Log oben braucht dagegen die SD-Karte.",
+        "The device's last 256 messages since the start, kept in RAM. They are there even without "
+        "an SD card. The system log above needs the SD card." },
+    [S_LOGS_PREV]       = { "Konsole vor dem letzten Neustart", "Console before the last restart" },
+    [S_LOGS_PREV_HINT] = {
+        "Die letzten 256 Meldungen, bevor das Ger&auml;t zuletzt neu gestartet ist. Nach einem "
+        "Absturz sieht man hier, was kurz davor passiert ist. Ein Stromausfall l&ouml;scht sie.",
+        "The last 256 messages before the device last restarted. After a crash they show what "
+        "happened just before it. A power cut clears them." },
     [S_SD_MOUNT]        = { "Einbinden",               "Mount" },
     [S_SD_USAGE]        = { "Belegung",                 "Usage" },
     [S_SD_USED_OF]      = { "%s von %s belegt (%s frei)", "%s of %s used (%s free)" },
@@ -1051,6 +1070,7 @@ static const char *STR[S_COUNT][2] = {
     [S_STAT_LASTCRASH]  = { "Letzter Absturz",          "Last crash" },
     [S_STAT_MAXUP]      = { "L&auml;ngste Laufzeit",    "Longest uptime" },
     [S_STAT_NEVER]      = { "noch keiner",              "none yet" },
+    [S_STAT_TIME_UNKNOWN] = { "Zeit unbekannt",         "time unknown" },
     [S_STAT_RESET]      = { "Z&auml;hler zur&uuml;cksetzen", "Reset counters" },
     [S_STAT_RESET_CONFIRM] = { "Alle Stabilit\u00e4ts-Z\u00e4hler und die Verluste der SD-Karte "
                                "\u00fcber alle Neustarts wirklich auf null setzen?",

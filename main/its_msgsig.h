@@ -151,6 +151,9 @@ void its_msgsig_stats(its_msgsig_stats_t *out);
  * microsecond clock and a fixed jitter seed, and a reset between cases. */
 extern bool (*its_msgsig_host_hash)(uint8_t alg, const uint8_t *p, size_t n, uint8_t *out);
 void its_msgsig_host_set_us(int64_t us);
+/* Called for every log line of a mismatch, with its receive second and the frames it names as
+ * left out since the line before. */
+extern void (*its_msgsig_host_warn)(uint32_t at, uint32_t quiet);
 void its_msgsig_host_reset(void);
 /* File a finished check as if the verify task had answered it, for the page tests. */
 void its_msgsig_host_file(const its_msgsig_rec_t *r);

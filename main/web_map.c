@@ -1585,7 +1585,7 @@ esp_err_t playback_get_handler(httpd_req_t *req)
         cursor = ctx.resume_sec;         /* buffer filled at this second -- continue there */
     }
     heap_caps_free(pbuf);
-    /* No password and no gate: another site's <img> loop would push out the 64-line console.
+    /* No password and no gate: another site's <img> loop would push out the RAM console.
      * One line a minute, as in web_csrf.c. The one worker runs one playback at a time. */
     static uint32_t log1;    /* uptime second + 1 of the last line, 0 before the first */
     static unsigned quiet;   /* playbacks since that line */

@@ -5,10 +5,6 @@ passive 802.11p / ITS-G5 (V2X) sniffer on an ESP32-C5. It listens to what
 vehicles and roadside units broadcast around it and forwards the raw frames
 over MQTT.
 
-This fork adds a web interface, a live map, on-device PCAP recording with
-playback, and Bluetooth streaming to a phone. It decodes the C-ITS messages it
-receives and checks the certificates of their senders.
-
 Upstream base: https://codeberg.org/opentrafficmap/its-g5-receiver-firmware
 
 ![Status page](docs/screenshot-status.png)
@@ -19,6 +15,63 @@ the bus line are changed in this screenshot.*
 ![File management](docs/screenshot-files.png)
 
 *The **Files** page: the SD card and the flash memory of the device.*
+
+## Features
+
+**Receiving and decoding**
+- Decodes the C-ITS messages it receives: CAM, DENM, SPATEM, MAPEM, SREM,
+  SSEM, CPM, POIM, EVCSN and RTCMEM. IVIM and SAEM are recognised by type.
+- Reads the GeoNetworking header: target area, hops, lifetime and traffic class.
+- Reads the VDV R09 telegrams of buses and trams.
+- Measures the noise floor and counts broken frames.
+
+**Security**
+- Checks each sender's certificate chain with ECDSA, up to the European trust
+  lists built into the firmware, including validity and revocation.
+- Checks whether the certificate allows the service and the content of a
+  message.
+- Checks the signature of a sample of the messages.
+
+**Web interface** (German and English, for phone and PC)
+- Live map with vehicles, traffic lights, warning areas and sensor objects,
+  the recorded vehicle tracks and the vehicles of other receivers in the same
+  network.
+- Traffic lights with their phases and a phase history, and the priority
+  requests of buses and trams with the answer of the light.
+- Warnings with their state, also as a profile by hour of day and weekday.
+- Traffic counts per hour by road user, over 24 hours, 7 or 30 days.
+- Bus and tram lines with delay, headway and passages.
+- Lists of messages, roadside units and certificates.
+- The status of other receivers in the same network on the start page. The
+  browser fetches it from each receiver directly.
+- A bar on every page that says what is wrong and links to the page that
+  helps.
+- **System** page with memory, tasks, radio, network, temperature and SD card
+  figures.
+- Log viewer and file manager for the SD card and the internal flash.
+
+**Recording**
+- Rolling PCAP capture on the SD card, readable by Wireshark. Search, export
+  and playback on the map.
+- Logs of warnings, phases, priority requests, transit passages, vehicle
+  tracks and traffic counts on the SD card.
+
+**Operation**
+- Forwards the raw frames over MQTT, as the original firmware does.
+- On request, sends the traffic lights and roadside units of a recording to
+  opentrafficmap.
+- Firmware update in the browser, with automatic rollback if the new version
+  does not confirm.
+- Optional web password, protection against requests from other web sites,
+  settings export and import, and JSON endpoints for other programs.
+- Network by DHCP or a fixed address, reachable as `its-<node>.local` (mDNS).
+- Restart and power-off from the browser. Time from NTP with a time zone.
+- Status LED with brightness and an optional fixed color. The LEDs of the
+  network socket can be switched off.
+- Crash dumps, a console that keeps the lines from before a restart, and
+  network counters for diagnosis.
+- Keeps running without Ethernet or DHCP and recovers on its own.
+- Bluetooth streaming to a phone (off by default).
 
 ## Download
 
@@ -38,6 +91,32 @@ Neither way needs a build environment.
 ## Version history
 
 Newest first.
+
+### 0.40.0-webui
+
+1. The device keeps running when the Ethernet chip does not answer at boot. It
+   tries again after 5 s, then up to once a minute.
+2. The firmware has its own copy of Espressif's KSZ8851SNL Ethernet driver in
+   `components/`. Section 6 of NOTICE lists every change against the original.
+3. The driver uses interrupts on the SPI bus that the Ethernet chip shares
+   with the SD card. A failed SPI access no longer stops sending or
+   receiving. A disturbed frame length no longer writes past the receive
+   buffer.
+4. The driver follows Microchip's errata sheet for the chip.
+5. **System** has a new row **Network counters**. It counts pause frames sent,
+   buffer overflows, CRC and symbol errors, long frames, SPI bus errors and
+   wrong frame lengths since the start. `/system.json` has the same counters
+   in seven new `eth_*` fields.
+6. The console on **Logs** holds 256 lines from the start. It also shows the
+   lines from before the last restart in their own group.
+7. **System** shows "time unknown" for a crash without a recorded time, not
+   "none yet".
+8. A download of a file that cannot be read answers "read error", not "not
+   found". The log gets a line about it.
+9. The system log does not rotate while a download reads it.
+10. The Ethernet chip's SPI clock is 20 MHz instead of 16.
+11. The built-in revocation lists and authority certificates are from
+    11 October 2026.
 
 ### 0.39.5-webui
 
@@ -211,7 +290,8 @@ MQTT is disconnected.
   The device does not fetch any of it from the network. Without a set clock
   it cannot judge validity, and the page says so.
 - **System** — chip, cores, CPU clock, flash size, ESP-IDF version, IP
-  address, the last reset reason and the state of the clock. A stability box
+  address, the last reset reason and the state of the clock. The network
+  counters of the Ethernet chip follow the IP address. A stability box
   counts reboots and crashes and shows the last crash and the longest uptime,
   and a button resets those counters and the SD losses. A table lists what the
   device had to drop since it started, such as full receive buffers, a full
@@ -229,8 +309,9 @@ MQTT is disconnected.
   the file down to warnings and errors, a search box finds text, and a link
   opens the previous file. After a read error a note says that newer lines are
   missing. Logging is switched on under **Settings**. The device's own console
-  follows underneath: the last 64 messages, held in RAM. They are there even
-  with no card in the slot.
+  follows underneath: up to 256 lines since the start, held in RAM. They are
+  there even with no card in the slot. The lines from before the last restart
+  show in their own group.
 - **Files** — the SD card and the internal flash. Sort by name or size, move
   back up through the path line, see how full it is, upload and delete files
   one at a time or several at once, download files and folders as a `.tar`,
@@ -378,7 +459,9 @@ myself for a separate dashboard.
 - `/system.json` — uptime, CPU load and memory, the radio figures, and the
   figures of the certificate check: the certificates seen, the chain checks,
   the start-up self test, the message signatures and the permission answers
-  for service and content. Half of it is HTML meant for the page.
+  for service and content. Since 0.40.0 it also has the network counters
+  `eth_pause`, `eth_overrun`, `eth_crc`, `eth_symbol`, `eth_long`,
+  `eth_spi_err` and `eth_bad_len`. Half of it is HTML meant for the page.
 
 `/status.json` is built from values already in memory, except the card
 figures, which it asks the filesystem for. The **Status** page itself

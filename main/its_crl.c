@@ -15,18 +15,18 @@
  *   L0/3489CA11CB74538E-crl.oer, 505 bytes, SHA-256 9bd61e590072ac9feec68d50d7a9b97daa33181d2b056793bb96abc5e7c63baf
  *     root 3489CA11CB74538E 0_CHT-ROOT-CA-2026-06_L0, signature verified
  *     thisUpdate 716539282, nextUpdate 968827282, 2 entries
- *   L0/38B3B35DEEC7D350-crl.oer, 491 bytes, SHA-256 ee0fd91a7d7619c0fad4aa78998224df7ace5f1de291044a5a998aee8426db27
+ *   L0/38B3B35DEEC7D350-crl.oer, 491 bytes, SHA-256 c3a902c8bee24b308685be7dc78aa61b68c86ab39890cff59c93da0c2b1c9386
  *     root 383CD5FE489EAFED 1_Autobahn-V2X-RootCA-2021-1_L0, signature verified
- *     thisUpdate 716249187, nextUpdate 718841187, 0 entries
+ *     thisUpdate 718495587, nextUpdate 721087587, 0 entries
  *   L0/56D3026D2901AC2A-crl.oer, 562 bytes, SHA-256 e0e5f8e3b00ea4cf445cf2092728ffac366958fcc9d570b8a96c8fc49a1a6dd9
  *     root E262165DEAF7B4EC 0_CITS-CZ-TEST-ROOT-CA_L0, signature verified
  *     thisUpdate 716739151, nextUpdate 724377600, 0 entries
  *   L0/6BC91BE3845B138C-crl.oer, 400 bytes, SHA-256 78e0385413921ca36fee0d186a6f2b47bccec4096c53146e9ba3ab44e681cb85
  *     root 6BC91BE3845B138C 0_SAESOLTECH-ROOT-CA_L0, signature verified
  *     thisUpdate 716509915, nextUpdate 719101915, 0 entries
- *   L0/733A8A8F9D42CC6D-crl.oer, 513 bytes, SHA-256 9f165f5f54938653196698683a2523af365616ecea22ed9e409cd5caaab3b53f
+ *   L0/733A8A8F9D42CC6D-crl.oer, 513 bytes, SHA-256 d6db4863d6ee9a44d70f224a97d2cc16d9679b9ecc563d73d6bc51a3c302b9df
  *     root 733A8A8F9D42CC6D 0_microsec-ccms-rca-sandbox_L0, signature verified
- *     thisUpdate 716490005, nextUpdate 719082005, 0 entries
+ *     thisUpdate 718736405, nextUpdate 721328405, 0 entries
  *   L0/75038BE08FE7F851-crl.oer, 436 bytes, SHA-256 44f3834e8258a2a6e6d8c7f9b6d232de7f2073f4d9046e4c93b8da374d98044c
  *     root 75038BE08FE7F851 0_CHT-ROOT-CA-2024-2_L0, signature verified
  *     thisUpdate 660800293, nextUpdate 913088293, 2 entries
@@ -42,39 +42,39 @@
  *   L0/B735AC70F6A82B2D-crl.oer, 142 bytes, SHA-256 90faed013f30149b2b9cf37ac52e8c22cb70e193b0b4455d5da0c7db0dcfcd07
  *     root B735AC70F6A82B2D 0_FR-ROOT-CA_L0, signature verified
  *     thisUpdate 613785605, nextUpdate 771570365, 0 entries
- *   L0/D0E0A69224C5E3F9-crl.oer, 732 bytes, SHA-256 3116c5657b3e9ceeb70afc84bbd338f334f3f4b9b725d4de65a0aaac2104253a
+ *   L0/D0E0A69224C5E3F9-crl.oer, 732 bytes, SHA-256 4e553b6b5edaf434a814eb2b51efb523327bc5f108eb79ce0ba9d6e0c08033f0
  *     root 063C96F1AB3AD296 0_OpenTrafficMap-Root-CA-2_L0, signature verified
- *     thisUpdate 716644528, nextUpdate 717249328, 0 entries
+ *     thisUpdate 718552812, nextUpdate 719157612, 0 entries
  *   L0/DAF300CB6F96C029-crl.oer, 500 bytes, SHA-256 74ea45454d2bf0bfef8a2640ae86c8fb565852e12a4c46097597bfd55ef0151b
  *     root 5EED16754FE7F927 0_DARS-SI-ROOT-CA_L0, signature verified
  *     thisUpdate 716741741, nextUpdate 724377600, 0 entries
- *   L0/DBF851D9AFAB2EFE-crl.oer, 454 bytes, SHA-256 944d1992c4ebb190f54c25ee05fffa68ab26b60b946e64196779d1596b84c0b9
+ *   L0/DBF851D9AFAB2EFE-crl.oer, 454 bytes, SHA-256 acad00f097b0f89db60baf2219a3d5d0b289a20e34f82dfc2c360b09a30f3d52
  *     root DBF851D9AFAB2EFE 0_CTAG-ROOT-CA_L0, signature verified
- *     thisUpdate 716731388, nextUpdate 716904188, 3 entries
- *   L0/DCA3229227BFBE74-crl.oer, 509 bytes, SHA-256 987989a7fee1ebee65e118a4ab641ae6cc5f2ecf47845b5d41ec6c5ee731d278
+ *     thisUpdate 718761787, nextUpdate 718934587, 3 entries
+ *   L0/DCA3229227BFBE74-crl.oer, 509 bytes, SHA-256 5028f9a6c657f139228ae0647eba17df4557b457f1e5928f3a9d9361eac6bd65
  *     root 77978079D436DA21 0_Microsec-CCMS-RCA-2023-1_L0, signature verified
- *     thisUpdate 715781908, nextUpdate 718373908, 0 entries
- *   L0/E2B7A7542F015577-crl.oer, 475 bytes, SHA-256 3ae8db7744f4baea3edc362580a3a9034b3420e925d48837e076acf0a70a5b08
+ *     thisUpdate 718028308, nextUpdate 720620308, 0 entries
+ *   L0/E2B7A7542F015577-crl.oer, 475 bytes, SHA-256 f4b4b9ef094f28d72d81a74fc1fc20e6dde3409ade71c1ea18dd182c1e24c006
  *     root BB5C2A05305AA31D MPI-ROOT-1_L0, signature verified
- *     thisUpdate 716781670, nextUpdate 717386470, 0 entries
+ *     thisUpdate 718768870, nextUpdate 719373670, 0 entries
  *   L1/119AF1794E2AC4AC-crl.oer, 142 bytes, SHA-256 9e80a10b0a8dc1204b1ab117ca708c9a1e4892328cd71ead5d1a8247dc184415
  *     root 119AF1794E2AC4AC 1_EU-ROOT-CA_L1, signature verified
  *     thisUpdate 711417605, nextUpdate 722044805, 0 entries
- *   L1/2092015C89AF766A-crl.oer, 523 bytes, SHA-256 ec4addbab62f889af9bb3a2f4700e37992b0028aedb49be342736ea9b2a4ef09
+ *   L1/2092015C89AF766A-crl.oer, 523 bytes, SHA-256 a1ce974e3194768375f259143e2859d5f33d7609cf3a94e2f5ae0cd6072f8f45
  *     root 6F65B2CC9AC7ED61 8_Hamburg-CCMS-RCA-2026_L1, signature verified
- *     thisUpdate 714997343, nextUpdate 717589343, 0 entries
- *   L1/7BD3290652719EED-crl.oer, 417 bytes, SHA-256 289f33ce96186c0e786a1b39d8023c93f1220b82b4a4d45f9dce7e50bfc1a0cb
+ *     thisUpdate 717243743, nextUpdate 719835743, 0 entries
+ *   L1/7BD3290652719EED-crl.oer, 417 bytes, SHA-256 6bb17fe7d08d975015e79b228e1999bfadb27d7aba1d98ef41e35277b4852bb6
  *     root 7BD3290652719EED 7_ISS-EU-RCA-V1_L1, signature verified
- *     thisUpdate 708998405, nextUpdate 717897605, 0 entries
- *   L1/F85CA0AA47C2212A-crl.oer, 524 bytes, SHA-256 17f2b9fbe26c6ce5d0ea24a586640b4164b593050aa675bf25c2e7ccf4a0ea98
+ *     thisUpdate 716947205, nextUpdate 725846405, 0 entries
+ *   L1/F85CA0AA47C2212A-crl.oer, 524 bytes, SHA-256 bac1ecd421293553d93d5575036655bd7096e4743d5f198246eda59438214006
  *     root 0A5B826F5414E51C 3_Microsec-CCMS-RCA-2024_L1, signature verified
- *     thisUpdate 715639531, nextUpdate 718231531, 0 entries
- *   L2/18AC8EBDC4AAC82F-crl.oer, 417 bytes, SHA-256 7b2fc0347cc60ae951432eb9672a68c075440b8ab6d66f5f5f7f0b3b53dd22e7
+ *     thisUpdate 717885931, nextUpdate 720477931, 0 entries
+ *   L2/18AC8EBDC4AAC82F-crl.oer, 417 bytes, SHA-256 a3b2293aa5936603796f319b7b711c8fc5826e57e5f9d176cad51418d8574337
  *     root 18AC8EBDC4AAC82F 7_ISS-EU-RCA-V1_L2, signature verified
- *     thisUpdate 708998405, nextUpdate 717897605, 0 entries
- *   L2/8FCDF36EA7FB58A4-crl.oer, 524 bytes, SHA-256 a20aa33134666e803ac6dca4d327fd72ce361e93e1cce13b9511136da7f44970
+ *     thisUpdate 716947205, nextUpdate 725846405, 0 entries
+ *   L2/8FCDF36EA7FB58A4-crl.oer, 524 bytes, SHA-256 2cf62136c92386ccd841255619f5a036f297fc51adbe400c49cacd3850019f1b
  *     root 9234BD935B8BC5F9 3_Microsec-CCMS-RCA-2024_L2, signature verified
- *     thisUpdate 715639558, nextUpdate 718231558, 0 entries
+ *     thisUpdate 717885958, nextUpdate 720477958, 0 entries
  */
 
 #include "its_crl.h"
@@ -148,8 +148,8 @@ static const its_crl_list_t s_lists[ITS_CRL_LIST_COUNT] = {
     {   /* L0/38B3B35DEEC7D350-crl.oer */
         .root_id8 = { 0x38, 0x3c, 0xd5, 0xfe, 0x48, 0x9e, 0xaf, 0xed },
         .root_name = "1_Autobahn-V2X-RootCA-2021-1_L0",
-        .this_update = 716249187u,
-        .next_update = 718841187u,
+        .this_update = 718495587u,
+        .next_update = 721087587u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L0,
     },
@@ -172,8 +172,8 @@ static const its_crl_list_t s_lists[ITS_CRL_LIST_COUNT] = {
     {   /* L0/733A8A8F9D42CC6D-crl.oer */
         .root_id8 = { 0x73, 0x3a, 0x8a, 0x8f, 0x9d, 0x42, 0xcc, 0x6d },
         .root_name = "0_microsec-ccms-rca-sandbox_L0",
-        .this_update = 716490005u,
-        .next_update = 719082005u,
+        .this_update = 718736405u,
+        .next_update = 721328405u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L0,
     },
@@ -220,8 +220,8 @@ static const its_crl_list_t s_lists[ITS_CRL_LIST_COUNT] = {
     {   /* L0/D0E0A69224C5E3F9-crl.oer */
         .root_id8 = { 0x06, 0x3c, 0x96, 0xf1, 0xab, 0x3a, 0xd2, 0x96 },
         .root_name = "0_OpenTrafficMap-Root-CA-2_L0",
-        .this_update = 716644528u,
-        .next_update = 717249328u,
+        .this_update = 718552812u,
+        .next_update = 719157612u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L0,
     },
@@ -236,24 +236,24 @@ static const its_crl_list_t s_lists[ITS_CRL_LIST_COUNT] = {
     {   /* L0/DBF851D9AFAB2EFE-crl.oer */
         .root_id8 = { 0xdb, 0xf8, 0x51, 0xd9, 0xaf, 0xab, 0x2e, 0xfe },
         .root_name = "0_CTAG-ROOT-CA_L0",
-        .this_update = 716731388u,
-        .next_update = 716904188u,
+        .this_update = 718761787u,
+        .next_update = 718934587u,
         .entries = 3,
         .env = ITS_TRUST_ENV_L0,
     },
     {   /* L0/DCA3229227BFBE74-crl.oer */
         .root_id8 = { 0x77, 0x97, 0x80, 0x79, 0xd4, 0x36, 0xda, 0x21 },
         .root_name = "0_Microsec-CCMS-RCA-2023-1_L0",
-        .this_update = 715781908u,
-        .next_update = 718373908u,
+        .this_update = 718028308u,
+        .next_update = 720620308u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L0,
     },
     {   /* L0/E2B7A7542F015577-crl.oer */
         .root_id8 = { 0xbb, 0x5c, 0x2a, 0x05, 0x30, 0x5a, 0xa3, 0x1d },
         .root_name = "MPI-ROOT-1_L0",
-        .this_update = 716781670u,
-        .next_update = 717386470u,
+        .this_update = 718768870u,
+        .next_update = 719373670u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L0,
     },
@@ -268,40 +268,40 @@ static const its_crl_list_t s_lists[ITS_CRL_LIST_COUNT] = {
     {   /* L1/2092015C89AF766A-crl.oer */
         .root_id8 = { 0x6f, 0x65, 0xb2, 0xcc, 0x9a, 0xc7, 0xed, 0x61 },
         .root_name = "8_Hamburg-CCMS-RCA-2026_L1",
-        .this_update = 714997343u,
-        .next_update = 717589343u,
+        .this_update = 717243743u,
+        .next_update = 719835743u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L1,
     },
     {   /* L1/7BD3290652719EED-crl.oer */
         .root_id8 = { 0x7b, 0xd3, 0x29, 0x06, 0x52, 0x71, 0x9e, 0xed },
         .root_name = "7_ISS-EU-RCA-V1_L1",
-        .this_update = 708998405u,
-        .next_update = 717897605u,
+        .this_update = 716947205u,
+        .next_update = 725846405u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L1,
     },
     {   /* L1/F85CA0AA47C2212A-crl.oer */
         .root_id8 = { 0x0a, 0x5b, 0x82, 0x6f, 0x54, 0x14, 0xe5, 0x1c },
         .root_name = "3_Microsec-CCMS-RCA-2024_L1",
-        .this_update = 715639531u,
-        .next_update = 718231531u,
+        .this_update = 717885931u,
+        .next_update = 720477931u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L1,
     },
     {   /* L2/18AC8EBDC4AAC82F-crl.oer */
         .root_id8 = { 0x18, 0xac, 0x8e, 0xbd, 0xc4, 0xaa, 0xc8, 0x2f },
         .root_name = "7_ISS-EU-RCA-V1_L2",
-        .this_update = 708998405u,
-        .next_update = 717897605u,
+        .this_update = 716947205u,
+        .next_update = 725846405u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L2,
     },
     {   /* L2/8FCDF36EA7FB58A4-crl.oer */
         .root_id8 = { 0x92, 0x34, 0xbd, 0x93, 0x5b, 0x8b, 0xc5, 0xf9 },
         .root_name = "3_Microsec-CCMS-RCA-2024_L2",
-        .this_update = 715639558u,
-        .next_update = 718231558u,
+        .this_update = 717885958u,
+        .next_update = 720477958u,
         .entries = 0,
         .env = ITS_TRUST_ENV_L2,
     },
@@ -468,7 +468,7 @@ size_t its_crl_overdue(uint32_t now)
     if (!now)
         return 0;
     /* Same rule as the table on /trust: a list that never asked for a renewal
-     * cannot be late, and counting it here made the two disagree. */
+     * cannot be late. Counting it here would make the two disagree. */
     for (size_t i = 0; i < ITS_CRL_LIST_COUNT; i++)
         if (s_lists[i].next_update && s_lists[i].next_update <= now)
             n++;

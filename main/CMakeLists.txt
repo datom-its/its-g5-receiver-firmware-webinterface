@@ -62,6 +62,11 @@ idf_component_register(
         "web_traffic.c"
         "web_infolog.c"
         "web_msgdetail.c"
+        "web_msgdetail_sec.c"
+        "web_msgdetail_cpm.c"
+        "web_msgdetail_poim.c"
+        "web_msgdetail_prio.c"
+        "web_msgdetail_denm.c"
         "web_sechdr.c"
         "web_gn.c"
         "web_trust.c"
@@ -86,8 +91,10 @@ idf_component_register(
         esp_eth
         esp_http_server
         esp_https_ota
+        esp_mm
         esp_netif
         esp_wifi
+        ksz8851snl
         esp_system
         espcoredump
         fatfs

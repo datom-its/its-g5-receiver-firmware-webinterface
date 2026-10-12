@@ -3674,25 +3674,31 @@ static bool stream_tail_escaped(httpd_req_t *req, FILE *f, long start)
     return !ferror(f);
 }
 
-#define RLOG_SNAP 10496   /* 64 lines of 160 plus separators */
+#define RLOG_SNAP (SDLOG_CONSOLE_LINES * SDLOG_CONSOLE_LEN + 1)   /* a full copy, see sdlog.h */
 #define RLOG_ESC  1200    /* one line, worst case 6x through html_escape */
 
-/* The RAM console, as its own group. Streamed line by line: 64 lines can reach
- * 60 KB once escaped, which no single buffer here should have to hold. */
-static void send_console_block(httpd_req_t *req)
+/* The RAM console as its own group, or with prev the lines it held when the device last
+ * restarted (sdlog_previous). Streamed line by line: 256 lines can reach 240 KB once escaped,
+ * which no single buffer here should have to hold. */
+static void send_console_block(httpd_req_t *req, bool prev)
 {
-    /* Measured 304 of 512. */
+    /* Static because 40 KB do not fit on the 16 KB stack. Only the httpd task reaches this
+     * page (no defer_to_worker), and the two groups are sent one after the other. */
+    static EXT_RAM_BSS_ATTR char raw[RLOG_SNAP];
+    size_t n = prev ? sdlog_previous(raw, sizeof(raw)) : sdlog_recent(raw, sizeof(raw));
+    /* Nothing kept from before the restart (first start, power cut): no group at all. */
+    if (prev && !n)
+        return;
+
+    /* Measured 306 of 512 (German, the group from before the restart). */
     char head[512];
     HTML_PRINTF(head,
         "<div class='grp'><h2>%s</h2><p class='note hlp'>%s</p>"
-        "<div class='scroll'><pre id='rlpre' class='logpre'>",
-        T(S_LOGS_CONSOLE), T(S_LOGS_CONSOLE_HINT));
+        "<div class='scroll'><pre id='%s' class='logpre'>",
+        prev ? T(S_LOGS_PREV) : T(S_LOGS_CONSOLE), prev ? T(S_LOGS_PREV_HINT) : T(S_LOGS_CONSOLE_HINT),
+        prev ? "rlprev" : "rlpre");
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
 
-    /* Only the httpd task reaches this page (no defer_to_worker), so static is
-     * safe and keeps 10 KB off the 16 KB stack. */
-    static EXT_RAM_BSS_ATTR char raw[RLOG_SNAP];
-    size_t n = sdlog_recent(raw, sizeof(raw));
     char *line = raw;
     while (n && line < raw + n)
     {
@@ -3716,9 +3722,18 @@ static void send_console_block(httpd_req_t *req)
         httpd_resp_send_chunk(req, "&ndash;", HTTPD_RESP_USE_STRLEN);
     /* The newest lines are at the bottom, so the box opens there. The script follows the
      * <pre>, because the filter script of the page runs before this block exists. */
-    httpd_resp_send_chunk(req,
-        "</pre></div><script>(function(){var c=document.getElementById('rlpre');"
-        "c.scrollTop=c.scrollHeight;})();</script></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, prev
+        ? "</pre></div><script>(function(){var c=document.getElementById('rlprev');"
+          "c.scrollTop=c.scrollHeight;})();</script></div>"
+        : "</pre></div><script>(function(){var c=document.getElementById('rlpre');"
+          "c.scrollTop=c.scrollHeight;})();</script></div>", HTTPD_RESP_USE_STRLEN);
+}
+
+/* Both console groups: the running one, then the one from before the last restart. */
+static void send_console_blocks(httpd_req_t *req)
+{
+    send_console_block(req, false);
+    send_console_block(req, true);
 }
 
 static esp_err_t logs_get_handler(httpd_req_t *req)
@@ -3783,7 +3798,7 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
         snprintf(msg, sizeof(msg), "<p class='note'>%s</p></div>",
                  T(old ? S_LOGS_NONE_OLD : S_LOGS_NONE));
         httpd_resp_send_chunk(req, msg, HTTPD_RESP_USE_STRLEN);
-        send_console_block(req);
+        send_console_blocks(req);
         httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
         httpd_resp_send_chunk(req, NULL, 0);
         return ESP_OK;
@@ -3891,7 +3906,7 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, "</p>", HTTPD_RESP_USE_STRLEN);
     /* Own chunk so the closing tag of the page's group is findable. */
     httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-    send_console_block(req);
+    send_console_blocks(req);
     httpd_resp_send_chunk(req, PAGE_FOOTER, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
@@ -3912,7 +3927,7 @@ void webserver_init(void)
      * describing a browser that left. Genuine faults still log at E. */
     esp_log_level_set("httpd_ws", ESP_LOG_ERROR);
     /* Unthrottled W lines per failed handler (401, 403 too), 400, 404, 405, 414, 431, 501, 505:
-     * another site could fill the 64-line console. web_csrf.c and the 401 log once a minute. */
+     * another site could fill the RAM console. web_csrf.c and the 401 log once a minute. */
     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
     esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
 

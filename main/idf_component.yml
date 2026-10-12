@@ -9,6 +9,11 @@ dependencies:
     version: "~1.3.0"
   espressif/led_indicator:
     version: "~2.1.2"
+  # Pulled in by led_indicator as "3.*". Pinned because any change to the manifests makes the
+  # component manager solve anew and take the newest release, and 3.1.0 changes the WS2812
+  # timings. An upgrade should be its own step, not a side effect.
+  espressif/led_strip:
+    version: "3.0.3"
   espressif/mdns:
     version: "^1.2.0"
   espressif/mqtt:

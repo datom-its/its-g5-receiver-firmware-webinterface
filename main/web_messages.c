@@ -37,8 +37,8 @@ static const char TAG[] = "WEBSERVER";
  * the station number and the address small below it. Without a name the station number moves
  * to the top. The name is escaped like the feed's sn key, and sid 0 means no station number.
  * A missing address ('' or the '-' the search hay keeps) shows as the page-wide &ndash;.
- * The dot is bound to the address, so a narrow window wraps before it and never leaves it at
- * a line end. */
+ * The dot is bound to the station number, so a narrow window wraps after it and the address
+ * line never starts with it. */
 static void sender_cell(const char *name, uint32_t sid, const char *mac_str, char *out, size_t cap)
 {
     char ids[16] = "";
@@ -50,7 +50,7 @@ static void sender_cell(const char *name, uint32_t sid, const char *mac_str, cha
     {
         size_t k = web_msgdetail_escape(name, out, cap);
         web_addf(out, cap, (int)k, "<div class='sub mono'>%s%s%s</div>", ids,
-                 ids[0] ? " &middot;&nbsp;" : "", mac_str);
+                 ids[0] ? "&nbsp;&middot; " : "", mac_str);
     }
     else if (ids[0])
         snprintf(out, cap, "<span class='mono'>%s</span><div class='sub mono'>%s</div>", ids, mac_str);
@@ -222,7 +222,7 @@ esp_err_t messages_get_handler(httpd_req_t *req)
         /* Type cell exactly like the server-rendered row above: size and line
          * already stand in the detail column, and the map reads m.vl/m.pl from
          * the same feed for its popup. The phone cards need the same cell order. */
-        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+String(nv(m.r)).replace(' dBm','')+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+m.y+'</td><td class=\"wrapcell\">'+(m.sn?m.sn+'<div class=\"sub mono\">'+(m.i?m.i+' &middot;&nbsp;':'')+nv(m.sm)+'</div>':m.i?'<span class=\"mono\">'+m.i+'</span><div class=\"sub mono\">'+nv(m.sm)+'</div>':'<span class=\"mono\">'+nv(m.sm)+'</span>')+'</td><td class=\"wrapcell\">'+m.h+'</td></tr>';}"
+        "h+='<tr><td>'+(i+1)+'</td><td>'+m.t+'</td><td>'+String(nv(m.r)).replace(' dBm','')+'</td><td>'+m.l+'</td><td class=\"wrapcell\">'+m.y+'</td><td class=\"wrapcell\">'+(m.sn?m.sn+'<div class=\"sub mono\">'+(m.i?m.i+'&nbsp;&middot; ':'')+nv(m.sm)+'</div>':m.i?'<span class=\"mono\">'+m.i+'</span><div class=\"sub mono\">'+nv(m.sm)+'</div>':'<span class=\"mono\">'+nv(m.sm)+'</span>')+'</td><td class=\"wrapcell\">'+m.h+'</td></tr>';}"
         "document.getElementById('msgtbody').innerHTML=h;if(window.applyf)window.applyf();}"
         /* While the list is paused, or within 5 s of the reader scrolling, tapping, typing or
          * selecting, the newest frame waits in pend. Older ones are dropped. */
@@ -687,7 +687,7 @@ esp_err_t messages_export_stream(httpd_req_t *req)
         off += n;
     }
     heap_caps_free(ctx.buf);
-    /* Without a web password another site's <img> loop would push out the 64-line console.
+    /* Without a web password another site's <img> loop would push out the RAM console.
      * Log one line a minute, as web_csrf.c does. The statics need no lock, because the one
      * worker runs one export at a time. */
     static uint32_t log1;    /* uptime second + 1 of the last line, 0 before the first */

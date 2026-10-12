@@ -228,7 +228,7 @@ static const char *verdict_class(uint8_t state)
     }
 }
 
-/* The same mapping as in web_msgdetail.c. It is kept here as well, because a page may not
+/* The same mapping as in web_msgdetail_sec.c. It is kept here as well, because a page may not
  * reach into another page's file. */
 static str_id_t why_name(uint8_t why)
 {

@@ -6,8 +6,8 @@
 
 #include "web_fmt.h"
 
-/* A third copy of the string writer sb_t of web_msgdetail.c, as in web_sechdr.c. A host test
- * expects sb_t exactly once in web_msgdetail.c, so no header can share it. */
+/* A third copy of the string writer sb_t of web_msgdetail_priv.h, as in web_sechdr.c. A host test
+ * expects sb_t exactly once in that header, and only the detail-line files include it. */
 typedef struct
 {
     char  *s;

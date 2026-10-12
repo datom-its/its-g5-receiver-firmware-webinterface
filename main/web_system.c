@@ -101,7 +101,10 @@ bool web_crash_summary(char *ago, size_t cap)
         int64_t lc = sysstat_last_crash_time();
         if (lc <= 0)
         {
-            snprintf(ago, cap, "%s", T(S_STAT_NEVER));
+            /* A crash without a time: the boot after the last crash ended before the clock was
+             * set, for instance without network. "noch keiner" beside a count above 0 would be wrong. */
+            snprintf(ago, cap, "%s",
+                     T(sysstat_crash_count() > 0 ? S_STAT_TIME_UNKNOWN : S_STAT_NEVER));
             return false;
         }
         int64_t now = (int64_t)time(NULL);
@@ -641,6 +644,28 @@ esp_err_t system_get_handler(httpd_req_t *req)
         T(S_ETH_IP), eth_line);
     httpd_resp_send_chunk(req, devblk, HTTPD_RESP_USE_STRLEN);
 
+    /* The Ethernet chip's fault counters, a row of their own so devblk keeps its measure. Left out
+     * when the chip gives none: another chip, or no complete answer yet since the start. 640 against
+     * 564 (German, every counter at its widest). */
+    ethernet_stats_t est;
+    if (ethernet_get_stats(&est))
+    {
+        static EXT_RAM_BSS_ATTR char ethst[640];
+        HTML_PRINTF(ethst,
+            "<tr><th>%s</th><td>%s %llu &middot; %s %lu &middot; %s %llu &middot; %s %llu &middot; "
+            "%s %llu &middot; %s %lu &middot; %s %lu<p class='note hlp'>%s</p></td></tr>",
+            T(S_ETH_STATS),
+            T(S_ETH_ST_PAUSE), (unsigned long long)est.tx_pause,
+            T(S_ETH_ST_OVERRUN), (unsigned long)est.rx_overruns,
+            T(S_ETH_ST_CRC), (unsigned long long)est.rx_crc_errors,
+            T(S_ETH_ST_SYMBOL), (unsigned long long)est.rx_symbol_errors,
+            T(S_ETH_ST_LONG), (unsigned long long)est.rx_long,
+            T(S_ETH_ST_SPI), (unsigned long)est.spi_bus_errors,
+            T(S_ETH_ST_BADLEN), (unsigned long)est.bad_lengths,
+            T(S_ETH_ST_HINT));
+        httpd_resp_send_chunk(req, ethst, HTTPD_RESP_USE_STRLEN);
+    }
+
     /* Own chunk: the NTP server name is user text and escapes to 378 bytes. cst 640 against
      * 613 with the zone label, clkrow 1024 against 687 with cst at its 639 (measured). */
     static EXT_RAM_BSS_ATTR char cst[640];
@@ -1100,7 +1125,10 @@ esp_err_t system_json_get_handler(httpd_req_t *req)
     char paused_str[32];
     format_paused(paused_ms, paused_str, sizeof(paused_str));
 
-    /* 24576: the longest answer is 23255 bytes (23234 before perm_content_sub), 16383 of them the
+    ethernet_stats_t est;
+    ethernet_get_stats(&est);   /* zeroed when the chip gives none */
+
+    /* 24576: the longest answer is 23460 bytes (23255 before the eth_* counters), 16383 of them the
      * task rows and 2047 the fault lines at their cap. A silent cut here would hand readers half a
      * JSON object, so the return value is checked below. */
     static EXT_RAM_BSS_ATTR char json[24576];
@@ -1112,6 +1140,9 @@ esp_err_t system_json_get_handler(httpd_req_t *req)
         "\"rx_on\":%s,\"rx_broken\":%lu,\"rx_nf_frames\":%lu,"
         "\"rx_nf_min\":%s,\"rx_nf_avg\":%s,\"rx_nf_max\":%s,"
         "\"rx_nf_html\":\"%s\",\"rx_nf_sub\":\"%s\",\"rx_bad_sub\":\"%s\",\"eth_autoip\":%s,"
+        /* The Ethernet chip's fault counters as on the page, 0 while the chip has given none. */
+        "\"eth_pause\":%llu,\"eth_overrun\":%lu,\"eth_crc\":%llu,\"eth_symbol\":%llu,\"eth_long\":%llu,"
+        "\"eth_spi_err\":%lu,\"eth_bad_len\":%lu,"
         "\"cert_entries\":%lu,\"cert_capacity\":%lu,\"cert_digests_known\":%lu,"
         "\"cert_digests_missing\":%lu,\"cert_digest_share\":%s,\"cert_sub\":\"%s\","
         "\"trust_checks\":%llu,\"trust_checked\":%lu,\"trust_unavailable\":%lu,"
@@ -1156,6 +1187,10 @@ esp_err_t system_json_get_handler(httpd_req_t *req)
         sniffer_get_channel() ? "true" : "false", (unsigned long)q.broken,
         (unsigned long)q.nf_frames, nf_min, nf_avg, nf_max,
         rx.nf_v, rx.nf_d, rx.bad_d, web_autoip_active() ? "true" : "false",
+        (unsigned long long)est.tx_pause, (unsigned long)est.rx_overruns,
+        (unsigned long long)est.rx_crc_errors, (unsigned long long)est.rx_symbol_errors,
+        (unsigned long long)est.rx_long, (unsigned long)est.spi_bus_errors,
+        (unsigned long)est.bad_lengths,
         (unsigned long)cs.entries, (unsigned long)cs.capacity, (unsigned long)cs.digests_known,
         (unsigned long)cs.digests_missing, share, certd,
         (unsigned long long)checks, (unsigned long)vs.checked, (unsigned long)vs.unavailable,

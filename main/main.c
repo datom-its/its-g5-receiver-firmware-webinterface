@@ -136,6 +136,10 @@ void register_reboot(void)
 
 void app_main(void)
 {
+    /* First, so the RAM console on /logs sees everything app_main logs, and so the lines from
+     * before the last restart are kept before anything else writes to the ring. */
+    sdlog_console_start();
+
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_timer_init();
 

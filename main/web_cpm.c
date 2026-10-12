@@ -307,7 +307,7 @@ static const struct {
     { "tw", S_CPM_TOWARD },
 };
 
-/* The word lists of cpm_class() and cpm_sensor_names() in web_msgdetail.c, so the popup names
+/* The word lists of cpm_class() and cpm_sensor_names() in web_msgdetail_cpm.c, so the popup names
  * a class as the detail line does. S_COUNT marks a vehicle value without a word ("" here). */
 static const str_id_t CPM_CAT[ITS_CPM_CATS] = {
     [ITS_CPM_CAT_CAR] = S_CPM_CAT_CAR, [ITS_CPM_CAT_BUS] = S_CPM_CAT_BUS,
@@ -375,7 +375,7 @@ static const char WEB_CPM_MAP_JS[] =
     "var EM=['\\ud83d\\ude97','\\ud83d\\ude8c','\\ud83d\\ude9a','\\ud83d\\ude8a','\\ud83d\\udeb2',"
     "'\\ud83d\\udeb6','\\ud83d\\udc3e','\\ud83d\\udc65','\\ud83d\\udce6','\\u26aa'];"
     /* The subclass words per ObjectClass, and the category word for a value past the list, as
-     * cpm_class() in web_msgdetail.c; -1: a vehicle value without a word gets its number. */
+     * cpm_class() in web_msgdetail_cpm.c; -1: a vehicle value without a word gets its number. */
     "var SUB={1:[C.sv,-1],2:[C.sp,5],3:[C.sb,4],4:[C.sm,4],5:[C.sa,6],8:[C.so,8]};"
     "function cw(o){var c=o[4],s=o[5],t=SUB[c],w;"
     "if(c===7)return C.gof.replace('%u',s);if(c===6||c===9)return C.newer;"

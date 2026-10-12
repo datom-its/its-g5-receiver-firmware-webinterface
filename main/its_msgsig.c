@@ -131,6 +131,7 @@ void its_msgsig_init(void)
 }
 
 bool (*its_msgsig_host_hash)(uint8_t alg, const uint8_t *p, size_t n, uint8_t *out);
+void (*its_msgsig_host_warn)(uint32_t at, uint32_t quiet);
 
 static bool lock(uint32_t ms)
 {
@@ -383,9 +384,9 @@ static void warn_line(const its_msgsig_rec_t *r, bool trusted, uint32_t quiet)
              (unsigned long)r->psid, r->id[0], r->id[1], r->id[2], r->id[3], r->id[4], r->id[5],
              r->id[6], r->id[7], trusted ? "trusted" : "not trusted", (unsigned long)quiet);
 #else
-    (void)r;
     (void)trusted;
-    (void)quiet;
+    if (its_msgsig_host_warn)
+        its_msgsig_host_warn(r->at, quiet);
 #endif
 }
 
@@ -546,20 +547,24 @@ static void note(const uint8_t *frame, size_t len, const its_sec_info_t *sec,
          * such frames cannot flood the list and the log. */
         rec.state = ITS_MSGSIG_BAD;
         rec.why = ITS_MSGSIG_WHY_CURVE;
+        /* Without the lock nothing is filed, counted or charged, so the frame is busy like
+         * any other that finds the lock taken. */
+        if (!lock(10))
+        {
+            answer(out, ITS_MSGSIG_BUSY, ITS_MSGSIG_WHY_NONE);
+            s_st.busy++;
+            return;
+        }
         answer(out, ITS_MSGSIG_BAD, ITS_MSGSIG_WHY_CURVE);
         uint32_t quiet = 0;
-        bool warn = false;
-        if (lock(10))
-        {
-            rec.serial = next_serial();
-            s_st.started++;
-            s_st.untrusted += !trusted;
-            bool first = file_answer(&rec);
-            uint32_t d = full_us(kind);
-            charge(kind, trusted, d);
-            warn = warn_due(&rec, first && trusted, &quiet);
-            unlock();
-        }
+        rec.serial = next_serial();
+        s_st.started++;
+        s_st.untrusted += !trusted;
+        bool first = file_answer(&rec);
+        uint32_t d = full_us(kind);
+        charge(kind, trusted, d);
+        bool warn = warn_due(&rec, first && trusted, &quiet);
+        unlock();
         if (warn)
             warn_line(&rec, trusted, quiet);
         return;

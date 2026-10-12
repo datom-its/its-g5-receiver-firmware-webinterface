@@ -89,6 +89,10 @@ void sysstat_record_boot(void)
         s_crashes++;
         nvs_set_u32(h, "crashes", s_crashes);
         s_crash_pending = true;   /* timestamp backfilled in sysstat_tick */
+        /* The stored time belongs to the crash before. Kept, it would be shown as the last
+         * crash whenever this boot ends before the clock is set and the stamp never comes. */
+        s_last_crash = 0;
+        nvs_set_i64(h, "lastcrash", 0);
     }
 
     nvs_commit(h);

@@ -10,7 +10,7 @@
 #include "web_strings.h"
 
 /* The string writer of web_sechdr.c once more, under its own name. A host test expects sb_t
- * exactly once, in web_msgdetail.c, so the modules cannot share it through a header. */
+ * exactly once, in web_msgdetail_priv.h, and only the detail-line files include that header. */
 typedef struct
 {
     char  *s;
@@ -20,7 +20,7 @@ typedef struct
 } mw_t;
 
 #define SEP " &middot; "
-/* The sign of PERM_WARN in web_msgdetail.c: the line has no colour, so the sign says it. */
+/* The sign of PERM_WARN in web_msgdetail_sec.c: the line has no colour, so the sign says it. */
 #define SIG_WARN "&#9888; "
 #define S(id) web_str((id), lang)
 

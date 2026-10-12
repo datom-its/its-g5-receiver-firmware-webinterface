@@ -8,8 +8,8 @@
 #include "its_security.h"
 #include "web_fmt.h"
 
-/* A copy of the string writer sb_t of web_msgdetail.c. A host test cuts sb_t out of that file
- * and expects it there exactly once, so the two modules cannot share it through a header. */
+/* A copy of the string writer sb_t of web_msgdetail_priv.h. A host test cuts sb_t out of that
+ * header and expects it there exactly once, and only the detail-line files include it. */
 typedef struct
 {
     char  *s;
@@ -19,7 +19,7 @@ typedef struct
 } sw_t;
 
 #define SEP " &middot; "
-/* The sign of PERM_WARN in web_msgdetail.c: the line has no colour, so the sign says it. */
+/* The sign of PERM_WARN in web_msgdetail_sec.c: the line has no colour, so the sign says it. */
 #define SEC_WARN "&#9888; "
 #define S(id) web_str((id), lang)
 #define HAS(v, bit) (((v) & (bit)) != 0)

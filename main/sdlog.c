@@ -4,6 +4,8 @@
 
 #if CONFIG_ENABLE_SD
 
+#include <inttypes.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -22,6 +24,9 @@
 #include "config.h"
 #include "events.h"
 #include "esp_attr.h"
+#if CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY
+#include "esp_cache.h"
+#endif
 #include "sdcard.h"
 
 static const char TAG[] = "SDLOG";
@@ -124,15 +129,42 @@ static stream_t sys_stream   = { SYS_LOG,   SYS_LOG_OLD,   0, {0} };
 static volatile bool s_ready;
 static volatile bool cfg_log_sys;
 
-/* The last console lines, kept in RAM. The SD log needs the card, so it cannot
- * record why a mount failed. */
-#define RLOG_LINES 64
-#define RLOG_LEN   160
-static EXT_RAM_BSS_ATTR char rlog[RLOG_LINES][RLOG_LEN];
-static uint32_t rlog_next;      /* number of lines ever written */
+/* The last console lines, kept in RAM from the start of app_main on. The SD log needs the
+ * card, so it cannot record why a mount failed. */
+#define RLOG_LINES SDLOG_CONSOLE_LINES
+#define RLOG_LEN   SDLOG_CONSOLE_LEN
+/* A power of two, so the index stays right when the uint32_t counter wraps. */
+_Static_assert((RLOG_LINES & (RLOG_LINES - 1)) == 0, "RLOG_LINES must be a power of two");
+/* Marks a ring that holds lines, with its size folded in: an image with another layout reads
+ * an older ring as empty instead of as garbage. */
+#define RLOG_MAGIC (0x524C0000u ^ ((uint32_t)RLOG_LINES << 8) ^ (uint32_t)RLOG_LEN)
+
+typedef struct {
+    uint32_t magic;
+    uint32_t next;      /* lines written since sdlog_console_start() */
+    char     line[RLOG_LINES][RLOG_LEN];
+} rlog_t;
+
+/* In the PSRAM .noinit section the ring keeps its lines through a restart: ESP-IDF neither
+ * clears that range at startup nor runs its memory test over it. A restart drops the C5's data
+ * cache without writing it back, so rlog_sync() writes every line back as it is stored. A power
+ * cut leaves random content, which fails RLOG_MAGIC. Without that section (no PSRAM, or the
+ * option off) the ring stays in BSS, which startup clears, so nothing carries over. */
+#if CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY
+static EXT_RAM_NOINIT_ATTR rlog_t s_rlog;
+#else
+static EXT_RAM_BSS_ATTR rlog_t s_rlog;
+#endif
 static portMUX_TYPE rlog_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* Tags that log on a timer fill the 64-line ring within minutes, until it holds
+/* The ring as it stood at the last restart. Copied here once by sdlog_console_start(),
+ * because the running ring starts over at slot 0. */
+static EXT_RAM_BSS_ATTR char s_prev[RLOG_LINES][RLOG_LEN];
+static uint32_t s_prev_n;
+
+static bool s_hooked;
+
+/* Tags that log on a timer fill the ring within the hour, until it holds
  * nothing but temperature. Only their info lines are dropped, so a failing
  * sensor still shows. Every line still reaches the UART and the SD log. */
 static bool rlog_noisy(const char *line)
@@ -147,17 +179,68 @@ static bool rlog_noisy(const char *line)
     return false;
 }
 
+/* Writes a part of the ring back from the data cache to PSRAM. Only the .noinit ring needs it.
+ * The flags allow any address and length, and the call takes its own spinlock. */
+static void rlog_sync(const void *p, size_t len)
+{
+#if CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY
+    esp_cache_msync((void *)p, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+#else
+    (void)p;
+    (void)len;
+#endif
+}
+
+/* The task whose last piece did not end its line, NULL when the newest slot is complete. The
+ * Wi-Fi library writes "I (123) wifi:" and the message as two pieces; the second one of the same
+ * task is added to that slot, as the UART shows it. A piece of another task starts a new slot. */
+static TaskHandle_t s_open_task;
+
 static void rlog_put(const char *line, int n)
 {
     if (n <= 0) return;
+    /* A piece too long for a slot counts as a whole line: its end is cut off anyway. */
+    bool ends = n >= RLOG_LEN || line[n - 1] == '\n' || line[n - 1] == '\r';
     if (n > RLOG_LEN - 1) n = RLOG_LEN - 1;
-    /* sdlog_recent() adds a newline to each line, so strip the logged one. */
+    /* rlog_emit() adds a newline to each line, so strip the logged one. */
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
+    TaskHandle_t me = xTaskGetCurrentTaskHandle();
     portENTER_CRITICAL_SAFE(&rlog_mux);
-    memcpy(rlog[rlog_next % RLOG_LINES], line, (size_t)n);
-    rlog[rlog_next % RLOG_LINES][n] = '\0';
-    rlog_next++;
+    /* A piece that was only a line end takes no slot, it only closes the open one. */
+    if (n > 0)
+    {
+        bool join = s_open_task == me && s_rlog.next > 0;
+        char *slot = s_rlog.line[(s_rlog.next - (join ? 1u : 0u)) % RLOG_LINES];
+        size_t have = join ? strnlen(slot, RLOG_LEN - 1) : 0;
+        size_t add = (size_t)n < RLOG_LEN - 1 - have ? (size_t)n : RLOG_LEN - 1 - have;
+        memcpy(slot + have, line, add);
+        slot[have + add] = '\0';
+        if (!join)
+            s_rlog.next++;
+        /* The slot before the counter: a restart between the two then loses the newest line
+         * instead of showing an old one in its place. */
+        rlog_sync(slot, have + add + 1);
+        if (!join)
+            rlog_sync(&s_rlog, offsetof(rlog_t, line));
+    }
+    s_open_task = ends ? NULL : me;
     portEXIT_CRITICAL_SAFE(&rlog_mux);
+}
+
+/* Appends one line with a newline to out at *o. False when it does not fit. */
+static bool rlog_emit(const char *slot_src, char *out, size_t cap, size_t *o)
+{
+    /* Full-width copy plus a forced terminator: a line the writer is replacing right now
+     * may be torn, but it can never run off the slot. */
+    char slot[RLOG_LEN];
+    memcpy(slot, slot_src, RLOG_LEN);
+    slot[RLOG_LEN - 1] = '\0';
+    size_t len = strlen(slot);
+    if (*o + len + 2 > cap) return false;
+    memcpy(out + *o, slot, len);
+    *o += len;
+    out[(*o)++] = '\n';
+    return true;
 }
 
 size_t sdlog_recent(char *out, size_t cap)
@@ -165,25 +248,29 @@ size_t sdlog_recent(char *out, size_t cap)
     if (!out || cap == 0) return 0;
     out[0] = '\0';
     size_t o = 0;
-    /* Only the index is read under the lock. rlog is in PSRAM, and copying
-     * 10 KB of it with interrupts off would stall the packet path. */
+    /* Only the index is read under the lock. s_rlog is in PSRAM, and copying
+     * 40 KB of it with interrupts off would stall the packet path. */
     portENTER_CRITICAL_SAFE(&rlog_mux);
-    uint32_t total = rlog_next;
+    uint32_t total = s_rlog.next;
     portEXIT_CRITICAL_SAFE(&rlog_mux);
 
     uint32_t have = total < RLOG_LINES ? total : RLOG_LINES;
     for (uint32_t i = 0; i < have; i++)
-    {
-        /* Full-width copy plus a forced terminator: a line the writer is
-         * replacing right now may be torn, but it can never run off the slot. */
-        char slot[RLOG_LEN];
-        memcpy(slot, rlog[(total - have + i) % RLOG_LINES], RLOG_LEN);
-        slot[RLOG_LEN - 1] = '\0';
-        size_t len = strlen(slot);
-        if (o + len + 2 > cap) break;
-        memcpy(out + o, slot, len); o += len;
-        out[o++] = '\n';
-    }
+        if (!rlog_emit(s_rlog.line[(total - have + i) % RLOG_LINES], out, cap, &o))
+            break;
+    out[o] = '\0';
+    return o;
+}
+
+size_t sdlog_previous(char *out, size_t cap)
+{
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    size_t o = 0;
+    /* No lock: s_prev is written once, before the hook goes in, and never again. */
+    for (uint32_t i = 0; i < s_prev_n; i++)
+        if (!rlog_emit(s_prev[i], out, cap, &o))
+            break;
     out[o] = '\0';
     return o;
 }
@@ -288,9 +375,11 @@ static void flush_stream(stream_t *s)
         ok = false;
     sdcard_note_write(ok);
 
-    /* Rotate once the file is full. It replaces the old backup. */
+    /* Rotate once the file is full. It replaces the old backup. Not while a download reads a
+     * file: with FS_LOCK=0 the remove would free the clusters of an open system.1.log under it.
+     * The file grows past its cap for that time, and the next flush rotates. */
     struct stat st;
-    if (stat(s->path, &st) == 0 && (size_t)st.st_size >= s->file_cap)
+    if (sdcard_read_active() == 0 && stat(s->path, &st) == 0 && (size_t)st.st_size >= s->file_cap)
     {
         remove(s->path_old);
         rename(s->path, s->path_old);
@@ -373,6 +462,35 @@ static int sdlog_vprintf(const char *fmt, va_list args)
 /*  Public API                                                        */
 /* ================================================================== */
 
+void sdlog_console_start(void)
+{
+    /* Runs before the hook is in, so no logging call writes to the ring during the copy. The
+     * copy takes the last RLOG_LINES lines in order, as sdlog_recent() would have shown them. */
+    uint32_t n = 0;
+    if (s_rlog.magic == RLOG_MAGIC)
+    {
+        uint32_t total = s_rlog.next;
+        n = total < RLOG_LINES ? total : RLOG_LINES;
+        for (uint32_t i = 0; i < n; i++)
+        {
+            memcpy(s_prev[i], s_rlog.line[(total - n + i) % RLOG_LINES], RLOG_LEN);
+            s_prev[i][RLOG_LEN - 1] = '\0';
+        }
+    }
+    s_prev_n = n;
+    s_rlog.next = 0;
+    s_rlog.magic = RLOG_MAGIC;
+    s_open_task = NULL;
+    rlog_sync(&s_rlog, offsetof(rlog_t, line));
+
+    if (!s_hooked)
+    {
+        s_orig_vprintf = esp_log_set_vprintf(sdlog_vprintf);
+        s_hooked = true;
+    }
+    ESP_LOGI(TAG, "Console ring started, %" PRIu32 " lines kept from before the restart", n);
+}
+
 void sdlog_init(void)
 {
     /* A frames.csv from older firmware is kept on purpose. It is outside the /logs
@@ -392,8 +510,11 @@ void sdlog_init(void)
         return;
     }
 
-    /* Install the log hook only after the ring buffer and writer task exist. */
-    s_orig_vprintf = esp_log_set_vprintf(sdlog_vprintf);
+    /* sdlog_console_start() normally ran first thing in app_main. Without that call it runs
+     * here, so the console ring gets its magic as well as the hook. Lines reach the SD ring
+     * only once s_ready is set, after the ring buffer and the writer task exist. */
+    if (!s_hooked)
+        sdlog_console_start();
     s_ready = true;
 
     ESP_ERROR_CHECK(esp_event_handler_register(CONFIG_EVENT_BASE, ESP_EVENT_ANY_ID,
@@ -403,10 +524,12 @@ void sdlog_init(void)
 
 #else /* !CONFIG_ENABLE_SD */
 
+void sdlog_console_start(void) {}
 void sdlog_init(void) {}
 void sdlog_flush_now(void) {}
 
-/* Without SD support there is no logger, but the getter must still link. */
+/* Without SD support there is no logger, but the getters must still link. */
 size_t sdlog_recent(char *out, size_t cap) { if (out && cap) out[0] = '\0'; return 0; }
+size_t sdlog_previous(char *out, size_t cap) { if (out && cap) out[0] = '\0'; return 0; }
 
 #endif

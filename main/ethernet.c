@@ -1,13 +1,20 @@
 #include "sdkconfig.h"
 
+#include <inttypes.h>
 #include <string.h>
 
+#include "esp_bit_defs.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "ethernet_init.h"
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
+#include "esp_eth_mac_ksz8851snl.h"
+#endif
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "lwip/netif.h"
 #include "lwip/inet.h"
@@ -213,11 +220,12 @@ static void set_hostname_from_config(esp_netif_t *netif)
         ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(res));
 }
 
-/* Takes the handle itself, since esp_eth_handle_t is already an opaque pointer. */
-static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
+/* Creates the management netif and attaches it to the driver. Takes the handle itself, since
+ * esp_eth_handle_t is already an opaque pointer. Succeeds once per boot: mgmt_netif is set only
+ * on success, so a failed call runs again on the next try, and a retry after a failed
+ * esp_eth_start() skips this step. */
+static esp_err_t create_management_netif(esp_eth_handle_t eth_handle, int idx)
 {
-    ESP_ERROR_CHECK(esp_netif_init());
-
     esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
     esp_netif_config.route_prio -= idx * 5;
     /* The .mtu field is left unset, so the netif keeps the 1500-byte default.
@@ -252,11 +260,10 @@ static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     cfg.base = &esp_netif_config;
     esp_netif_t *eth_netif = esp_netif_new(&cfg);
+    if (!eth_netif)
+        return ESP_ERR_NO_MEM;
 
     set_hostname_from_config(eth_netif);
-
-    mgmt_netif = eth_netif;
-    mgmt_eth = eth_handle;
 
     /* With a static IP there is no DHCP lease and therefore no
      * IP_EVENT_ETH_GOT_IP. Configure DNS now and, once the link is started,
@@ -265,50 +272,158 @@ static void configure_management_interface(esp_eth_handle_t eth_handle, int idx)
     if (static_ip)
         eth_config_dns(eth_netif);
 
-    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
-    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
-
-    /* Also applied on every link-up. This call makes the setting take effect
-     * even when no cable is plugged in yet. */
-    ethernet_apply_led_setting();
-
-    if (static_ip)
+    esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
+    esp_err_t res = glue ? esp_netif_attach(eth_netif, glue) : ESP_ERR_NO_MEM;
+    if (res != ESP_OK)
     {
-        esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
-        if (post_res != ESP_OK)
-            ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
+        if (glue)
+            esp_eth_del_netif_glue(glue);
+        esp_netif_destroy(eth_netif);
+        return res;
     }
+
+    mgmt_netif = eth_netif;
+    mgmt_eth = eth_handle;
+    return ESP_OK;
+}
+
+/* Bring-up state, kept so a retry resumes where the last attempt stopped. */
+static esp_eth_handle_t *eth_handles;
+static uint8_t eth_port_cnt;
+static uint32_t eth_ports_started;   /* bit i: port i runs */
+
+static esp_err_t start_port(uint32_t i)
+{
+    esp_eth_handle_t h = eth_handles[i];
+    esp_err_t res;
+
+    if (i == ETH_MANAGEMENT_INTERFACE && !mgmt_netif)
+    {
+        res = create_management_netif(h, i);
+        if (res != ESP_OK)
+            return res;
+    }
+
+    res = esp_eth_start(h);
+    if (res != ESP_OK)
+    {
+        /* esp_eth_start() marks the driver as started before it talks to the chip and does
+         * not undo that on failure. Without the stop, every later try would end in
+         * ESP_ERR_INVALID_STATE. The stop itself gives up at the link timer, which never ran,
+         * and then posts no ETHERNET_EVENT_STOP. If the start got as far as its
+         * ETHERNET_EVENT_START, the netif is already in lwIP, and the next START would add it
+         * a second time and trip an lwIP assert. This STOP is queued behind that START and
+         * takes the netif out again; without a START before it, it does nothing. */
+        if (esp_eth_stop(h) != ESP_OK)
+            esp_event_post(ETH_EVENT, ETHERNET_EVENT_STOP, &h, sizeof(h), portMAX_DELAY);
+        return res;
+    }
+
+    if (i == ETH_MANAGEMENT_INTERFACE)
+    {
+        /* Also applied on every link-up. This call makes the setting take effect
+         * even when no cable is plugged in yet. */
+        ethernet_apply_led_setting();
+
+        if (static_ip)
+        {
+            esp_err_t post_res = esp_event_post(APP_EVENT_BASE, APP_ETHERNET_MGMT_INTERFACE_GOT_IP, NULL, 0, 0);
+            if (post_res != ESP_OK)
+                ESP_LOGE(TAG, "esp_event_post failed: %s", esp_err_to_name(post_res));
+        }
+    }
+    else
+    {
+        /* Only fails when all sniffer slots are taken. Another try would not change that,
+         * so the port counts as started either way. */
+        res = sniffer_reg_eth_intf(h);
+        if (res != ESP_OK)
+            ESP_LOGE(TAG, "sniffer_reg_eth_intf failed: %s", esp_err_to_name(res));
+    }
+    return ESP_OK;
+}
+
+/* One attempt. Calls after a failure continue with the step that failed. */
+static esp_err_t eth_bring_up(void)
+{
+    if (!eth_handles)
+    {
+        /* On failure ethernet_init_all() releases what it set up, the SPI device included,
+         * so the next call starts again from the beginning. Only a second SPI error during
+         * that cleanup can leave a little memory behind. */
+        esp_err_t res = ethernet_init_all(&eth_handles, &eth_port_cnt);
+        if (res != ESP_OK)
+        {
+            eth_handles = NULL;
+            return res;
+        }
+    }
+
+    for (uint32_t i = 0; i < eth_port_cnt; i++)
+    {
+        if (eth_ports_started & BIT(i))
+            continue;
+        esp_err_t res = start_port(i);
+        if (res != ESP_OK)
+            return res;
+        eth_ports_started |= BIT(i);
+    }
+    return ESP_OK;
+}
+
+#define ETH_RETRY_FIRST_MS 5000
+#define ETH_RETRY_MAX_MS   60000
+
+/* The chip shares the SPI bus with the SD card, and ethernet_init_all() has failed once at
+ * boot, most likely from an error on that bus. That used to abort and reboot. Now the device
+ * keeps running without network and tries again, first after 5 s, then doubling up to once a
+ * minute. arg carries the error of the attempt at boot. */
+static void eth_retry_task(void *arg)
+{
+    esp_err_t res = (esp_err_t)(intptr_t)arg;
+    uint32_t failed = 1;
+    uint32_t wait_ms = ETH_RETRY_FIRST_MS;
+
+    vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    /* Repeated here: the line at boot came before sdlog_init() made the SD log ready, so the
+     * SD log is missing it. The console on the log page has it. */
+    ESP_LOGE(TAG, "Ethernet start at boot failed (%s)", esp_err_to_name(res));
+    while ((res = eth_bring_up()) != ESP_OK)
+    {
+        failed++;
+        ESP_LOGE(TAG, "Ethernet start failed again (%s), try %" PRIu32, esp_err_to_name(res), failed);
+        wait_ms = wait_ms * 2 > ETH_RETRY_MAX_MS ? ETH_RETRY_MAX_MS : wait_ms * 2;
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    }
+    /* The free stack is in the line so the task size below can be checked on a device that
+     * needed the task. */
+    ESP_LOGW(TAG, "Ethernet up after %" PRIu32 " failed tries, %" PRIu32 " B stack left", failed,
+             (uint32_t)uxTaskGetStackHighWaterMark(NULL) * (uint32_t)sizeof(StackType_t));
+    vTaskDelete(NULL);
 }
 
 void initialize_ethernet(void)
 {
-    // Initialize Ethernet driver
-    uint8_t eth_port_cnt = 0;
-    esp_eth_handle_t *eth_handles;
-    ESP_ERROR_CHECK(ethernet_init_all(&eth_handles, &eth_port_cnt));
+    /* Needed by the web server and MQTT even when the Ethernet chip does not answer. It only
+     * fails when RAM runs out, and then nothing else would work either. */
+    ESP_ERROR_CHECK(esp_netif_init());
 
-    if (eth_port_cnt == 0)
-        return;
-
-    // Register user defined event handlers
+    /* Registered before the driver exists, so a later start from eth_retry_task() finds
+     * them in place. Both only fail without RAM. */
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler, NULL));
 
-    for (uint32_t i = 0; i < eth_port_cnt; i++) {
-        if (i != ETH_MANAGEMENT_INTERFACE)
-        {
-            /* start Ethernet driver state machine */
-            ESP_ERROR_CHECK(esp_eth_start(eth_handles[i]));
-            /* Register the Ethernet interface so the sniffer can use it */
-            ESP_ERROR_CHECK(sniffer_reg_eth_intf(eth_handles[i]));
-        }
-        else
-        {
-            // Start management ethernet interface
-            ESP_LOGD(TAG, "Configuring management ethernet interface %d", i);
-            configure_management_interface(eth_handles[i], i);
-        }
-    }
+    esp_err_t res = eth_bring_up();
+    if (res == ESP_OK)
+        return;
+
+    ESP_LOGE(TAG, "Ethernet start failed (%s), trying again in the background",
+             esp_err_to_name(res));
+    /* The same stack as the main task, where this call chain ran up to 0.39.5. The task only
+     * exists while Ethernet is down. */
+    if (xTaskCreate(eth_retry_task, "eth_retry", CONFIG_ESP_MAIN_TASK_STACK_SIZE,
+                    (void *)(intptr_t)res, 3, NULL) != pdPASS)
+        ESP_LOGE(TAG, "Failed to create eth_retry task, Ethernet stays off");
 }
 
 esp_err_t ethernet_apply_led_setting(void)
@@ -373,6 +488,38 @@ eth_speed_t ethernet_get_mgmt_if_link_speed(void)
     }
 
     return speed;
+}
+
+bool ethernet_get_stats(ethernet_stats_t *out)
+{
+    memset(out, 0, sizeof(*out));
+#if CONFIG_ETHERNET_SPI_DEV0_KSZ8851SNL
+    if (!mgmt_eth)
+        return false;
+    /* Only a complete answer is taken. On a busy bus the call can miss the driver lock; then the
+     * last complete answer stands in, so a reader logging /system.json sees no false drop to 0.
+     * The chip keeps counting until the next read. */
+    static ethernet_stats_t last;
+    static bool have_last;
+    eth_ksz8851snl_stats_t s = { 0 };
+    if (esp_eth_ioctl(mgmt_eth, ETH_KSZ8851SNL_CMD_G_STATS, &s) == ESP_OK)
+    {
+        last.tx_pause = s.tx_pause;
+        last.rx_crc_errors = s.rx_crc_errors;
+        last.rx_symbol_errors = s.rx_symbol_errors;
+        last.rx_long = s.rx_long;
+        last.rx_overruns = s.rx_overruns;
+        last.spi_bus_errors = s.spi_bus_errors;
+        last.bad_lengths = s.bad_lengths;
+        have_last = true;
+    }
+    if (!have_last)
+        return false;
+    *out = last;
+    return true;
+#else
+    return false;
+#endif
 }
 
 void ethernet_get_status(ethernet_status_t *out)

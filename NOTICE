@@ -1,7 +1,7 @@
 # Provenance and third-party notices
 
 This repository is a fork. The code in it does not all come from one place,
-and it is not all under one licence. This file states honestly what came from
+and it is not all under one licence. This file states what came from
 where, so that anyone reusing it knows what they are actually allowed to do.
 
 ## 1. This fork's own contributions — MIT
@@ -83,6 +83,68 @@ uses this fork's own decoder, the NVS persistence of the duty cycle was removed,
 and several defects were fixed (a client that connects without subscribing could
 pause the sniffer indefinitely; the duty-cycle characteristic accepted values
 that parked reception near zero). Those changes are this fork's, under section 1.
+
+## 6. KSZ8851SNL Ethernet driver — MIT
+
+`components/ksz8851snl/` is version 1.2.0 of the Espressif component
+espressif/ksz8851snl (https://github.com/espressif/esp-eth-drivers), MIT,
+copyright 2021 Vladimir Chistyakov and 2025 Espressif Systems (Shanghai)
+CO LTD. Its LICENSE file is kept beside it. This copy in `components/`
+replaces the one the component manager downloads for espressif/ethernet_init.
+
+Changes against 1.2.0:
+
+- `src/esp_eth_phy_ksz8851snl.c`: Espressif's fix f01f48bffa0c "use
+  configured PHY reset timing and avoid delay undershoot", as published
+  upstream.
+- `src/esp_eth_mac_ksz8851snl.c` and `include/esp_eth_mac_ksz8851snl.h`:
+  fourteen changes by this fork, under the licence of section 1. Each is
+  marked "Changed for its-g5-receiver-firmware" in the source.
+  - SPI transfers use interrupts instead of polling. The SD card shares the
+    bus. A polling transfer once crashed the device in the SD driver
+    (probably ESP-IDF issue #18527).
+  - The receive function releases its lock after a failed SPI access
+    (ESP-IDF issue #18869).
+  - The delete function first removes the interrupt handler and waits for a
+    running transfer. Then it deletes the receive task. A retried start,
+    which this firmware uses instead of a restart, needs this order.
+  - A failed removal of the SPI device is logged.
+  - The interrupt and queue registers are written with fixed values only.
+    Sending and receiving switch the interrupts off for a moment. A failed
+    SPI access could leave them off for good. The receive task writes the
+    fixed values again about once a second.
+  - The driver checks the frame length the chip reports before it reads the
+    frame. The chip passes frames of 64 to 2000 bytes. A disturbed read can
+    report up to 4095, more than the 2016-byte buffer holds. A frame outside
+    64 to 2000 is released, and the receive round ends. The driver waits for
+    the release, for at most ten register reads. The log line for a cut-off
+    frame names both lengths.
+  - The driver follows Microchip's errata sheet DS80000716D. It queues one
+    frame per transmit operation and waits up to 20 ms for it to go out. The
+    chip does not fill in checksums. The network stack computes them.
+  - The power management register is written with a fixed value. A misread
+    value written back could select energy detect mode, in which the MAC is
+    off. The fixed value also lets the chip wake up on its own.
+  - An SPI bus error reported by the chip is logged as a warning with a
+    count, at most every 10 seconds.
+  - A new esp_eth_ioctl() command returns fault counters. Four come from the
+    chip's MIB: pause frames sent, CRC errors, symbol errors and long frames.
+    Each read clears these four. The driver adds them up. The others are the
+    driver's own counts of buffer overflows, SPI bus errors and wrong frame
+    lengths.
+  - The receive control register RXCR1 is written from a copy, never with a
+    value read back. A flush of the receive queue holds one lock for all four
+    writes and ends with the intended value.
+  - The transmit control register TXCR is written from a copy as well. A
+    misread value written back could switch off the CRC of every frame. The
+    receive task writes both copies again about once a second.
+  - After reading a frame, the driver compares the length in the frame's own
+    header with the length it read before. If they differ, it flushes the
+    receive queue and counts a wrong frame length. The log line comes at most
+    every 10 seconds.
+  - The free transmit memory is read with its datasheet mask. The three top
+    bits are reserved. A value too small right after a sent frame is read
+    once more after the DMA access bit is cleared. Both values are logged.
 
 ## Corrections welcome
 

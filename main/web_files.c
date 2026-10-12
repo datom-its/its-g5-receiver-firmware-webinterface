@@ -1,6 +1,7 @@
 #include "web_files.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
@@ -584,6 +585,20 @@ esp_err_t sdcard_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* A file that is missing answers 404. Any other failed open is a read error of the card and gets
+ * a log line, so a failing card does not look like a wrong link. err is errno right after fopen. */
+static esp_err_t send_open_failed(httpd_req_t *req, const char *full, int err)
+{
+    if (err == ENOENT || err == ENOTDIR || err == EISDIR)
+    {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+    ESP_LOGW(TAG, "download: cannot open %s (errno %d)", full, err);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "read error");
+    return ESP_FAIL;
+}
+
 esp_err_t sdcard_download_handler(httpd_req_t *req)
 {
     if (!check_update_auth(req))
@@ -611,9 +626,9 @@ esp_err_t sdcard_download_handler(httpd_req_t *req)
     FILE *f = fopen(full, "rb");
     if (!f)
     {
+        int err = errno;
         sdcard_read_end();
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
-        return ESP_FAIL;
+        return send_open_failed(req, full, err);
     }
     const char *base = strrchr(rel, '/');
     base = base ? base + 1 : rel;
@@ -1361,10 +1376,7 @@ esp_err_t internal_download_handler(httpd_req_t *req)
     data_full_path(rel, full, sizeof(full));
     FILE *f = fopen(full, "rb");
     if (!f)
-    {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
-        return ESP_FAIL;
-    }
+        return send_open_failed(req, full, errno);
     const char *base = strrchr(rel, '/');
     base = base ? base + 1 : rel;
     char basesafe[SD_PATH_MAX];
